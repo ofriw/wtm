@@ -1,0 +1,11 @@
+# build output
+/wtm
+/test/bin/
+
+# local harness state (also test artifacts)
+/test/tmp/
+
+# PLAINTEXT API KEYS — never commit or copy these anywhere
+.chunkhound.json
+.chunkhound/
+.mcp.json

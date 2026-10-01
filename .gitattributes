@@ -1,0 +1,7 @@
+# Cross-OS determinism. Goldens are byte-compared, so their encoding must never
+# be rewritten by a checkout: `* text=auto eol=lf` normalizes everything to LF,
+# and the `-text` rule pins the goldens as opaque bytes.
+* text=auto eol=lf
+*.go text eol=lf
+test/**/*.sh text eol=lf
+test/scenarios/**/expected.* -text
