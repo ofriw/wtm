@@ -1,0 +1,6 @@
+worktree: /SBX/wt with space
+branch:   wt-spaced
+base:     refs/heads/main (local)
+source:   /SBX/repo
+indexed:  false
+spaced path checks passed

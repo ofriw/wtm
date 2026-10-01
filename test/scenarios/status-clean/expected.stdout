@@ -1,0 +1,14 @@
+PATH       BRANCH   LAST USED  STATUS  CONFIG  DB   MCP
+/SBX/repo  main    2020-01-01  ACTIVE  -       yes  yes
+[
+  {
+    "path": "/SBX/repo",
+    "branch": "main",
+    "main": true,
+    "lastUsed": "2020-01-01T00:00:00Z",
+    "status": "ACTIVE",
+    "config": false,
+    "db": true,
+    "mcp": true
+  }
+]

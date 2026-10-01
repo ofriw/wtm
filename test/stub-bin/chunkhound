@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Offline chunkhound for scenarios. The harness puts /stub-bin first on PATH so
+# every call (wtm's runIndex and setup's db_index) is embedding-free — and
+# therefore network-free. HOME=/root points chunkhound at the DuckDB extension
+# cache baked into the image, keeping tool caches out of the /sbx manifest; the
+# sandbox HOME stays reserved for wtm/pi state.
+exec env HOME=/root /root/.local/bin/chunkhound "$@" --no-embeddings

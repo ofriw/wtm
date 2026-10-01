@@ -1,0 +1,7 @@
+worktree: /SBX/wt-master
+branch:   wt-master
+base:     refs/heads/master (local)
+source:   /SBX/repo
+indexed:  true
+wt-master: 3461f36 seed
+master:    3461f36 seed

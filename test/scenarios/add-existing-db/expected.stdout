@@ -1,0 +1,5 @@
+worktree: /SBX/wt-copy
+branch:   wt-copy
+base:     refs/heads/main (local)
+source:   /SBX/repo
+indexed:  true

@@ -1,0 +1,5 @@
+worktree: /SBX/wt-pi2
+branch:   wt-pi2
+base:     refs/heads/main (local)
+source:   /SBX/repo
+indexed:  false
