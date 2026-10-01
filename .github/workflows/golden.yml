@@ -1,0 +1,56 @@
+name: golden-update
+
+# Goldens must never be regenerated on push/PR: an automated refresh that opens
+# a PR forces a human to inspect every byte-level diff before it can land.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Normalize checkout to LF
+        run: git config --global core.autocrlf false
+      - name: Regenerate goldens
+        env:
+          WTM_CACHE_FROM: type=gha,scope=golden-linux/amd64
+          WTM_CACHE_TO: type=gha,mode=max,scope=golden-linux/amd64
+        run: test/run.sh --update
+      - name: Open golden-refresh PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.ref_name }}
+        run: |
+          if git diff --quiet -- test/scenarios; then
+            echo "goldens unchanged"
+            exit 0
+          fi
+          branch="golden-update/$(date -u +%Y%m%d%H%M%S)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add test/scenarios
+          git commit -m "chore: regenerate container goldens"
+          gh auth setup-git
+          git push origin "$branch"
+          gh pr create --base "$BASE_REF" --head "$branch" \
+            --title "chore: regenerate container goldens" \
+            --body "Automated golden refresh via workflow_dispatch. Inspect every diff before merging."
