@@ -97,6 +97,19 @@ func assertWorktreeNotListed(t *testing.T, repo, wt string) {
 	}
 }
 
+// setHomeEnv points os.UserHomeDir at home on every OS: it reads HOME on Unix
+// and USERPROFILE on Windows, so tests must set both or the rewrite is a no-op.
+func setHomeEnv(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if runtime.GOOS == "windows" {
+		vol := filepath.VolumeName(home)
+		t.Setenv("HOMEDRIVE", vol)
+		t.Setenv("HOMEPATH", strings.TrimPrefix(home, vol))
+	}
+}
+
 // initRepo creates a repo named "repo" inside a per-test temp dir so sibling
 // worktrees live under the same cleaned-up tree.
 func initRepo(t *testing.T, branch string) string {
@@ -148,13 +161,7 @@ func sandbox(t *testing.T) sandboxEnv {
 	if err := os.MkdirAll(filepath.Join(agent, "sessions"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	if runtime.GOOS == "windows" {
-		vol := filepath.VolumeName(home)
-		t.Setenv("HOMEDRIVE", vol)
-		t.Setenv("HOMEPATH", strings.TrimPrefix(home, vol))
-	}
+	setHomeEnv(t, home)
 	t.Setenv("PI_CODING_AGENT_DIR", agent)
 	t.Setenv("TZ", "UTC")
 	t.Setenv("LC_ALL", "C")

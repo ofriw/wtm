@@ -303,7 +303,7 @@ func TestBuildWorktreeNativeMCP(t *testing.T) {
 // TestDisplayPath pins the only user-visible path rewrite: $HOME becomes ~.
 func TestDisplayPath(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeEnv(t, home)
 	sep := string(os.PathSeparator)
 	cases := []struct{ in, want string }{
 		{home, "~"},
@@ -387,9 +387,10 @@ func TestRenderGridMatchesPrintTable(t *testing.T) {
 // end to end, and that displayPath runs before width budgeting.
 func TestPrintStatusTableFits(t *testing.T) {
 	t.Setenv("COLUMNS", "80")
-	t.Setenv("HOME", "/home/agent")
+	home := t.TempDir()
+	setHomeEnv(t, home)
 	wts := []worktree{{
-		Path:   "/home/agent/very/long/checkout/that/never/ends/repo",
+		Path:   filepath.Join(home, "very", "long", "checkout", "that", "never", "ends", "repo"),
 		Branch: "feature/a-rather-long-branch-name", LastUsed: time.Now(),
 		Upstream: upstream{Short: "origin/feature/a-rather-long-branch-name", Remote: "origin", Ref: "refs/heads/x"},
 		Config:   true, DB: true, MCP: true,
@@ -403,8 +404,11 @@ func TestPrintStatusTableFits(t *testing.T) {
 	if !strings.Contains(out, "…") {
 		t.Fatalf("long path must be middle-elided:\n%s", out)
 	}
-	if strings.Contains(out, "/home/agent/") {
+	if strings.Contains(out, home) {
 		t.Fatalf("displayPath must rewrite $HOME before budgeting:\n%s", out)
+	}
+	if !strings.Contains(out, "~") {
+		t.Fatalf("displayPath must produce ~ in output:\n%s", out)
 	}
 }
 

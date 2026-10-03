@@ -122,7 +122,7 @@ func TestGCPickerGrid(t *testing.T) {
 	now := time.Now()
 	ttl := 10 * time.Hour
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeEnv(t, home)
 	candidates := []worktree{
 		{Path: filepath.Join(home, "wt1"), Branch: "feat", LastUsed: time.Time{}},
 		{Path: filepath.Join(home, "wt2"), Branch: "bug/x", Dirty: true,
@@ -178,9 +178,10 @@ func TestGCPickerDescription(t *testing.T) {
 func TestGCPickerColumnBudget(t *testing.T) {
 	now := time.Now()
 	ttl := 10 * time.Hour
-	t.Setenv("HOME", "/home/nobody")
+	home := t.TempDir()
+	setHomeEnv(t, home)
 	candidates := []worktree{{
-		Path:   "/home/nobody/very/long/checkout/path/that/keeps/going/on/and/on/wt",
+		Path:   filepath.Join(home, "very", "long", "checkout", "path", "that", "keeps", "going", "on", "and", "on", "wt"),
 		Branch: "feature/a-rather-long-branch-name", Dirty: true,
 		Upstream: upstream{Short: "origin/feature/a-rather-long-branch-name", Remote: "origin", Ref: "refs/heads/x"},
 	}}
