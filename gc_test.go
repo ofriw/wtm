@@ -427,9 +427,7 @@ func TestGCRemoveMissingGitLink(t *testing.T) {
 	if exists(linked) {
 		t.Fatalf("broken worktree survived: %s", linked)
 	}
-	if out := mustGit(t, repo, "worktree", "list", "--porcelain"); strings.Contains(out, linked) {
-		t.Fatalf("worktree still registered after gc:\n%s", out)
-	}
+	assertWorktreeNotListed(t, repo, linked)
 }
 
 // A run where every removal fails must still prune stale admin entries: the
@@ -457,13 +455,8 @@ func TestGCRemovePrunesWhenNothingRemoved(t *testing.T) {
 	if !res.Pruned {
 		t.Fatal("Pruned must be true: prune must run even when nothing was removed")
 	}
-	out := mustGit(t, repo, "worktree", "list", "--porcelain")
-	if strings.Contains(out, stale) {
-		t.Fatalf("stale worktree not pruned:\n%s", out)
-	}
-	if !strings.Contains(out, locked) {
-		t.Fatalf("locked worktree must remain registered:\n%s", out)
-	}
+	assertWorktreeNotListed(t, repo, stale)
+	assertWorktreeListed(t, repo, locked)
 }
 
 func TestGCReport(t *testing.T) {

@@ -382,20 +382,6 @@ func assertWorktreeIntact(t *testing.T, wt, session string) {
 	}
 }
 
-func assertWorktreeListed(t *testing.T, repo, wt string) {
-	t.Helper()
-	if list := mustGit(t, repo, "worktree", "list"); !strings.Contains(list, wt) {
-		t.Errorf("git worktree list lost %s:\n%s", wt, list)
-	}
-}
-
-func assertWorktreeNotListed(t *testing.T, repo, wt string) {
-	t.Helper()
-	if list := mustGit(t, repo, "worktree", "list"); strings.Contains(list, wt) {
-		t.Errorf("git worktree list still has %s:\n%s", wt, list)
-	}
-}
-
 // TestGCTUIDeclineJSON pins the machine contract of a declined gc: stdout
 // carries the abort report shape (empty removals, flag echoes), stderr the
 // aborted notice, and the exit code stays 0.

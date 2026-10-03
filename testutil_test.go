@@ -74,6 +74,29 @@ func mustGit(t *testing.T, dir string, args ...string) string {
 	return out
 }
 
+// gitWorktrees returns git's worktree listing with all paths normalized to
+// forward slashes, matching the format required for cross-platform comparisons.
+func gitWorktrees(t *testing.T, repo string) string {
+	t.Helper()
+	return filepath.ToSlash(mustGit(t, repo, "worktree", "list", "--porcelain"))
+}
+
+// assertWorktreeListed asserts that git worktree list registers wt.
+func assertWorktreeListed(t *testing.T, repo, wt string) {
+	t.Helper()
+	if list := gitWorktrees(t, repo); !strings.Contains(list, filepath.ToSlash(wt)) {
+		t.Fatalf("git worktree list lost %s:\n%s", wt, list)
+	}
+}
+
+// assertWorktreeNotListed asserts that git worktree list does not register wt.
+func assertWorktreeNotListed(t *testing.T, repo, wt string) {
+	t.Helper()
+	if list := gitWorktrees(t, repo); strings.Contains(list, filepath.ToSlash(wt)) {
+		t.Fatalf("git worktree list still has %s:\n%s", wt, list)
+	}
+}
+
 // initRepo creates a repo named "repo" inside a per-test temp dir so sibling
 // worktrees live under the same cleaned-up tree.
 func initRepo(t *testing.T, branch string) string {
