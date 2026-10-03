@@ -3,7 +3,6 @@
 # the STATUS column so the wall-clock LAST USED date never enters a golden.
 . "${HARNESS:-/harness}/lib.sh"
 out=$(wtm status)
-status_of() { awk -v p="$1" '$1==p {print $4}' <<<"$out"; }
 [[ $(status_of "$SBX/wt-fresh") == ACTIVE ]] || { echo 'wt-fresh not ACTIVE' >&2; exit 1; }
 [[ $(status_of "$SBX/wt-edge") == ACTIVE ]] || { echo 'wt-edge not ACTIVE' >&2; exit 1; }
 [[ $(status_of "$SBX/wt-old") == UNUSED ]] || { echo 'wt-old not UNUSED' >&2; exit 1; }

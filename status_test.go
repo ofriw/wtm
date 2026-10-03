@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -215,7 +217,7 @@ func TestDiscover(t *testing.T) {
 	setMtime(t, chunkhoundDBPath(repo), now.Add(-10*time.Hour))
 	setMtime(t, filepath.Join(linkedA, piMCPFile), now.Add(-10*time.Hour))
 
-	wts, err := discover(repo)
+	wts, err := discover(repo, nil)
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
@@ -239,6 +241,62 @@ func TestDiscover(t *testing.T) {
 	}
 	if wts[2].Config || wts[2].DB || wts[2].MCP {
 		t.Fatalf("linked-b must have empty inventory: %+v", wts[2])
+	}
+}
+
+// TestDiscoverUpstreamsUnavailableReachesNotice pins that when branchUpstreams
+// fails, discovery degrades instead of aborting, and the warning must travel
+// through the renderer's persistent notice path. A raw stderr write during the
+// renderer is overwritten by the next frame — the warning would vanish.
+func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
+	sandbox(t)
+	repo := initRepo(t, "main")
+	gitTestCommit(t, repo)
+	// A corrupt packed-refs makes for-each-ref fail while `worktree list` still
+	// succeeds, so the branchUpstreams error path is reachable with real git and
+	// no stub.
+	writeFile(t, filepath.Join(repo, ".git", "packed-refs"), "garbage\n", 0o644)
+
+	events := make(chan progressEvent, 64)
+	p := &progress{ctx: context.Background(), events: events}
+	if _, err := discover(repo, p); err != nil {
+		t.Fatalf("discover must degrade on a bad upstream query, not fail: %v", err)
+	}
+	close(events)
+	var notices []string
+	for ev := range events {
+		if ev.kind == evNotice {
+			notices = append(notices, ev.text)
+		}
+	}
+	if got := countNotices(notices, "upstreams unavailable"); got != 1 {
+		t.Fatalf("upstreams-unavailable notices = %d (%v), want exactly 1", got, notices)
+	}
+
+	stderr := captureStderr(t, func() {
+		if _, err := discover(repo, nil); err != nil {
+			t.Fatalf("discover(nil progress): %v", err)
+		}
+	})
+	if !strings.Contains(stderr, "upstreams unavailable") {
+		t.Fatalf("nil progress must warn on stderr: %q", stderr)
+	}
+}
+
+// TestBuildWorktreeNativeMCP proves the MCP signal keys off the shared
+// piMCPFiles SSOT, not just the adapter's .mcp.json.
+func TestBuildWorktreeNativeMCP(t *testing.T) {
+	for _, rel := range append([]string{""}, piMCPFiles()...) {
+		t.Run(rel, func(t *testing.T) {
+			root := t.TempDir()
+			if rel != "" {
+				writeFile(t, filepath.Join(root, rel), "{}", 0o644)
+			}
+			w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil)
+			if w.MCP != (rel != "") || w.MCPNative != (rel == piNativeMCPFile) {
+				t.Fatalf("%s: MCP = %v, MCPNative = %v", rel, w.MCP, w.MCPNative)
+			}
+		})
 	}
 }
 
@@ -271,6 +329,60 @@ func TestPrintTable(t *testing.T) {
 	}
 }
 
+// TestStatusHeadersSSOT pins the status header literal and proves the shrink
+// policy is derived from the same registry: a rename or a new rank cannot pass
+// without updating this contract.
+func TestStatusHeadersSSOT(t *testing.T) {
+	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "STATUS", "CONFIG", "DB", "MCP"}
+	if !slices.Equal(statusTableHeaders, want) {
+		t.Fatalf("statusTableHeaders = %v, want %v", statusTableHeaders, want)
+	}
+	for _, name := range shrinkPriority {
+		if !slices.Contains(want, name) {
+			t.Errorf("shrink column %q is not a status header; shrink policy leaked from another grid", name)
+		}
+	}
+	// The derived elision order is a contract, not an implementation detail.
+	wantShrink := []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED"}
+	if !slices.Equal(shrinkPriority, wantShrink) {
+		t.Errorf("shrinkPriority = %v, want %v", shrinkPriority, wantShrink)
+	}
+	for _, c := range allColumns {
+		if c.shrinkRank == 0 {
+			continue
+		}
+		if shrinkFloor[c.header] != c.floor {
+			t.Errorf("column %q floor = %d, want the registered %d", c.header, shrinkFloor[c.header], c.floor)
+		}
+	}
+	// Every column a grid uses must be registered in allColumns, or it silently
+	// escapes the shared shrink policy.
+	registered := map[string]bool{}
+	for _, c := range allColumns {
+		registered[c.header] = true
+	}
+	for _, cols := range [][]worktreeColumn{statusColumns, gcPickerColumns} {
+		for _, c := range cols {
+			if !registered[c.header] {
+				t.Errorf("column %q is used by a grid but missing from allColumns", c.header)
+			}
+		}
+	}
+}
+
+// TestRenderGridMatchesPrintTable pins the extraction: printTable's bytes must
+// equal the shared grid engine's header+body rejoined under a no-color profile.
+func TestRenderGridMatchesPrintTable(t *testing.T) {
+	t.Setenv("COLUMNS", "0")
+	headers := []string{"A", "BB", "CCC"}
+	rows := [][]string{{"x", "yy", "zzz"}, {"longer", "y", "z"}}
+	out := captureStdout(t, func() { printTable(headers, rows, colorNever, nil, []string{"CCC"}) })
+	header, body := renderGrid(sizedGrid(headers, rows, widthBudget(), []string{"CCC"}))
+	if got := gridString(header, body) + "\n"; got != out {
+		t.Fatalf("renderGrid = %q, printTable = %q", got, out)
+	}
+}
+
 // TestPrintStatusTableFits proves the whole status table honors a pinned budget
 // end to end, and that displayPath runs before width budgeting.
 func TestPrintStatusTableFits(t *testing.T) {
@@ -279,7 +391,8 @@ func TestPrintStatusTableFits(t *testing.T) {
 	wts := []worktree{{
 		Path:   "/home/agent/very/long/checkout/that/never/ends/repo",
 		Branch: "feature/a-rather-long-branch-name", LastUsed: time.Now(),
-		Config: true, DB: true, MCP: true,
+		Upstream: upstream{Short: "origin/feature/a-rather-long-branch-name", Remote: "origin", Ref: "refs/heads/x"},
+		Config:   true, DB: true, MCP: true,
 	}}
 	out := captureStdout(t, func() { printStatusTable(wts, time.Now(), 10*time.Hour, colorAuto) })
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
@@ -300,8 +413,8 @@ func TestPrintStatusJSON(t *testing.T) {
 	ttl := 10 * time.Hour
 	last := time.Date(2021, 2, 3, 4, 5, 6, 0, time.UTC)
 	wts := []worktree{
-		{Path: "/detached", LastUsed: last, Config: true, MCP: true},
-		{Path: "/main", Branch: "main", Main: true, DB: true},
+		{Path: "/detached", LastUsed: last, Config: true, MCP: true, MCPNative: true},
+		{Path: "/main", Branch: "main", Main: true, DB: true, Upstream: upstream{Short: "origin/main", Remote: "origin", Ref: "refs/heads/main"}},
 	}
 	out := captureStdout(t, func() {
 		if err := printStatusJSON(wts, now, ttl); err != nil {
@@ -330,8 +443,24 @@ func TestPrintStatusJSON(t *testing.T) {
 	if got[1].LastUsed != nil {
 		t.Fatalf("zero LastUsed = %v, want nil", *got[1].LastUsed)
 	}
-	if !got[1].Main || !got[1].DB || !got[0].Config || !got[0].MCP {
+	if !got[1].Main || !got[1].DB || !got[0].Config || !got[0].MCP || !got[0].MCPNative || got[1].MCPNative {
 		t.Fatalf("flags lost in JSON: %+v", got)
+	}
+	if got[1].Upstream != "origin/main" || got[0].Upstream != "" {
+		t.Fatalf("upstream lost in JSON: %+v", got)
+	}
+	// Field names are the script contract: decode to maps so a rename fails
+	// fast even when the struct tags follow.
+	var raw []map[string]any
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		t.Fatalf("re-decode JSON: %v", err)
+	}
+	for _, key := range []string{"upstream", "mcpNative"} {
+		for i, m := range raw {
+			if _, ok := m[key]; !ok {
+				t.Fatalf("row %d missing key %q: %v", i, key, m)
+			}
+		}
 	}
 }
 
@@ -339,10 +468,24 @@ func TestPrintStatusJSON(t *testing.T) {
 // dispatch, so every subcommand rejects a bogus value as a usage error (exit 2)
 // before touching the repo.
 func TestDispatchValidatesColor(t *testing.T) {
-	for _, cmd := range []string{"status", "add", "gc", "config"} {
+	for _, cmd := range []string{"status", "add", "delete", "gc", "config"} {
 		g := &globals{color: "bogus"}
 		if err := dispatch(cmd, g, nil); !isUsage(err) {
 			t.Errorf("dispatch(%q, color:bogus) = %v, want usageError", cmd, err)
+		}
+	}
+}
+
+// TestParseSubRejectsInvalidGlobalsAfterSubcommand pins that a bogus global
+// placed AFTER the subcommand is validated: subFlags re-binds globals, so the
+// value is only visible once parseSub has parsed it.
+func TestParseSubRejectsInvalidGlobalsAfterSubcommand(t *testing.T) {
+	for _, args := range [][]string{
+		{"--color", "bogus"},
+		{"--progress", "sometimes"},
+	} {
+		if err := cmdStatus(&globals{root: t.TempDir()}, args); !isUsage(err) {
+			t.Errorf("cmdStatus(%v) = %v, want usageError", args, err)
 		}
 	}
 }

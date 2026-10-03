@@ -168,31 +168,80 @@ func TestPurgePiSessions(t *testing.T) {
 	}
 }
 
+// TestCopyPiHarnessMCP pins the explicit MCP seed: every recognized config
+// copies whenever the source has one and the checkout does not, ignored or
+// not. The ordinary-file control proves the exemption is MCP-only: gated .pi
+// files copy solely when ignored, and the native config is owned by the seed
+// alone (the .pi walk skips it instead of re-gating it).
 func TestCopyPiHarnessMCP(t *testing.T) {
-	src := t.TempDir()
-	dst := t.TempDir()
+	for _, rel := range piMCPFiles() {
+		for _, ignored := range []bool{false, true} {
+			tag := "unignored"
+			if ignored {
+				tag = "ignored"
+			}
+			t.Run(rel+"/"+tag, func(t *testing.T) {
+				src := initRepo(t, "main")
+				dst := initRepo(t, "main")
+				if ignored {
+					writeFile(t, filepath.Join(dst, ".gitignore"), ".mcp.json\n.pi/mcp.json\n.pi/note.txt\n", 0o644)
+				}
+				dstFile := filepath.Join(dst, rel)
 
-	if err := copyPiHarness(src, dst); err != nil {
-		t.Fatalf("absent src no-op: %v", err)
-	}
-	if exists(filepath.Join(dst, piMCPFile)) {
-		t.Fatal("absent source must not create .mcp.json")
-	}
+				if err := copyPiHarness(src, dst); err != nil {
+					t.Fatalf("absent src no-op: %v", err)
+				}
+				if exists(dstFile) {
+					t.Fatalf("absent source must not create %s", rel)
+				}
 
-	writeFile(t, filepath.Join(src, piMCPFile), "SRC", 0o644)
-	if err := copyPiHarness(src, dst); err != nil {
-		t.Fatalf("copy .mcp.json: %v", err)
-	}
-	if b, _ := os.ReadFile(filepath.Join(dst, piMCPFile)); string(b) != "SRC" {
-		t.Fatalf(".mcp.json = %q, want SRC", b)
-	}
+				writeFile(t, filepath.Join(src, rel), "SRC", 0o644)
+				writeFile(t, filepath.Join(src, ".pi", "note.txt"), "NOTE", 0o644)
+				if err := copyPiHarness(src, dst); err != nil {
+					t.Fatalf("copyPiHarness: %v", err)
+				}
+				if b, _ := os.ReadFile(dstFile); string(b) != "SRC" {
+					t.Fatalf("%s %s = %q, want SRC", rel, tag, b)
+				}
+				if got := exists(filepath.Join(dst, ".pi", "note.txt")); got != ignored {
+					t.Fatalf("gated control copied=%v, want %v", got, ignored)
+				}
 
-	writeFile(t, filepath.Join(dst, piMCPFile), "DST", 0o644)
-	if err := copyPiHarness(src, dst); err != nil {
-		t.Fatalf("re-copy: %v", err)
+				writeFile(t, dstFile, "DST", 0o644)
+				if err := copyPiHarness(src, dst); err != nil {
+					t.Fatalf("re-copy: %v", err)
+				}
+				if b, _ := os.ReadFile(dstFile); string(b) != "DST" {
+					t.Fatalf("existing %s overwritten: %q", rel, b)
+				}
+			})
+		}
 	}
-	if b, _ := os.ReadFile(filepath.Join(dst, piMCPFile)); string(b) != "DST" {
-		t.Fatalf("existing .mcp.json overwritten: %q", b)
+}
+
+// TestAnyMCPConfig pins the presence helper as the SSOT for the status signal.
+func TestAnyMCPConfig(t *testing.T) {
+	if anyMCPConfig(mcpConfigs(t.TempDir(), nil)) {
+		t.Fatal("empty root must not be MCP-configured")
+	}
+	for _, rel := range piMCPFiles() {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, rel), "{}", 0o644)
+		if !anyMCPConfig(mcpConfigs(root, nil)) {
+			t.Fatalf("%s must mark the root configured", rel)
+		}
+	}
+}
+
+// TestCorruptMCPConfigTreatedAsAbsent pins that an existing but unparseable
+// MCP config warns and counts as absent: status must never claim it healthy.
+func TestCorruptMCPConfigTreatedAsAbsent(t *testing.T) {
+	for _, rel := range piMCPFiles() {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, rel), "{not json", 0o644)
+		if configs := mcpConfigs(root, nil); configs[rel] || anyMCPConfig(configs) {
+			t.Fatalf("corrupt %s must count as absent, got %v", rel, configs)
+		}
 	}
 }
 
@@ -224,5 +273,26 @@ func TestCopyPiHarnessPI(t *testing.T) {
 	}
 	if exists(piFile("plain.txt")) {
 		t.Fatal("src-unignored file must not be copied")
+	}
+}
+
+// TestCorruptMCPConfigWarnsThroughRenderer pins that the corrupt-config warning
+// travels as a persistent renderer notice, not a raw stderr write that the next
+// frame would erase.
+func TestCorruptMCPConfigWarnsThroughRenderer(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, piMCPFile), "{not json", 0o644)
+	events := make(chan progressEvent, 8)
+	p := &progress{ctx: t.Context(), events: events}
+	mcpConfigs(root, p)
+	close(events)
+	var notices []string
+	for ev := range events {
+		if ev.kind == evNotice {
+			notices = append(notices, ev.text)
+		}
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], warnPrefix) {
+		t.Fatalf("notices = %v, want one %q-prefixed notice", notices, warnPrefix)
 	}
 }

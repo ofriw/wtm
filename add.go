@@ -31,7 +31,7 @@ func cmdAdd(g *globals, args []string) error {
 	fs.StringVar(&o.branch, "branch", "", "alias of -b")
 	fs.StringVar(&o.from, "from", "", "source worktree to seed from (default: main worktree)")
 	fs.BoolVar(&o.noIndex, "no-index", false, "skip `chunkhound index` after seeding")
-	pos, err := parseSub(fs, args)
+	pos, err := parseSub(fs, g, args)
 	if err != nil {
 		return err
 	}

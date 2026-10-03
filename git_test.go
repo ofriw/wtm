@@ -57,7 +57,7 @@ func parseWorktreeCases() []parseCase {
 HEAD 1111111111111111111111111111111111111111
 branch refs/heads/main
 `,
-			want: []gworktree{{Path: "/repo/main", Branch: "main", Main: true}},
+			want: []gworktree{{Path: "/repo/main", HEAD: "1111111111111111111111111111111111111111", Branch: "main", Main: true}},
 		},
 		{
 			name: "main and linked, Main only on first",
@@ -70,8 +70,8 @@ HEAD 2222222222222222222222222222222222222222
 branch refs/heads/feature
 `,
 			want: []gworktree{
-				{Path: "/repo/main", Branch: "main", Main: true},
-				{Path: "/repo/linked", Branch: "feature"},
+				{Path: "/repo/main", HEAD: "1111111111111111111111111111111111111111", Branch: "main", Main: true},
+				{Path: "/repo/linked", HEAD: "2222222222222222222222222222222222222222", Branch: "feature"},
 			},
 		},
 		{
@@ -80,7 +80,7 @@ branch refs/heads/feature
 HEAD 3333333333333333333333333333333333333333
 detached
 `,
-			want: []gworktree{{Path: "/repo/detached", Main: true}},
+			want: []gworktree{{Path: "/repo/detached", HEAD: "3333333333333333333333333333333333333333", Main: true}},
 		},
 		{
 			name: "bare",
@@ -88,7 +88,7 @@ detached
 HEAD 4444444444444444444444444444444444444444
 bare
 `,
-			want: []gworktree{{Path: "/repo/bare", Bare: true, Main: true}},
+			want: []gworktree{{Path: "/repo/bare", HEAD: "4444444444444444444444444444444444444444", Bare: true, Main: true}},
 		},
 		{
 			name: "locked without reason",
@@ -97,7 +97,7 @@ HEAD 5555555555555555555555555555555555555555
 branch refs/heads/locked
 locked
 `,
-			want: []gworktree{{Path: "/repo/locked", Branch: "locked", Locked: true, Main: true}},
+			want: []gworktree{{Path: "/repo/locked", HEAD: "5555555555555555555555555555555555555555", Branch: "locked", Locked: true, Main: true}},
 		},
 		{
 			name: "locked with reason",
@@ -106,7 +106,7 @@ HEAD 5555555555555555555555555555555555555555
 branch refs/heads/locked
 locked user reason
 `,
-			want: []gworktree{{Path: "/repo/locked", Branch: "locked", Locked: true, Main: true}},
+			want: []gworktree{{Path: "/repo/locked", HEAD: "5555555555555555555555555555555555555555", Branch: "locked", Locked: true, Main: true}},
 		},
 		{
 			name: "prunable",
@@ -115,14 +115,14 @@ HEAD 6666666666666666666666666666666666666666
 branch refs/heads/dead
 prunable gitdir file points to non-existent location
 `,
-			want: []gworktree{{Path: "/repo/prunable", Branch: "dead", Prunable: true, Main: true}},
+			want: []gworktree{{Path: "/repo/prunable", HEAD: "6666666666666666666666666666666666666666", Branch: "dead", Prunable: true, Main: true}},
 		},
 		{
 			name: "CRLF line endings",
 			in:   "worktree /repo/main\r\nHEAD 1\r\nbranch refs/heads/main\r\n\r\nworktree /repo/linked\r\nHEAD 2\r\nbranch refs/heads/x\r\n",
 			want: []gworktree{
-				{Path: "/repo/main", Branch: "main", Main: true},
-				{Path: "/repo/linked", Branch: "x"},
+				{Path: "/repo/main", HEAD: "1", Branch: "main", Main: true},
+				{Path: "/repo/linked", HEAD: "2", Branch: "x"},
 			},
 		},
 		{
@@ -135,7 +135,7 @@ branch refs/heads/main
 
 
 `,
-			want: []gworktree{{Path: "/repo/main", Branch: "main", Main: true}},
+			want: []gworktree{{Path: "/repo/main", HEAD: "1111111111111111111111111111111111111111", Branch: "main", Main: true}},
 		},
 		{
 			name: "path containing spaces",
@@ -143,7 +143,7 @@ branch refs/heads/main
 HEAD 1111111111111111111111111111111111111111
 branch refs/heads/main
 `,
-			want: []gworktree{{Path: "/repo/my main", Branch: "main", Main: true}},
+			want: []gworktree{{Path: "/repo/my main", HEAD: "1111111111111111111111111111111111111111", Branch: "main", Main: true}},
 		},
 		{
 			name: "empty input yields nil",
@@ -406,5 +406,130 @@ func TestGitErrorIsExplicit(t *testing.T) {
 	_, err = git(repo, "definitely-not-a-subcommand")
 	if err == nil || !strings.Contains(err.Error(), "definitely-not-a-subcommand") {
 		t.Fatalf("error must quote the failing invocation: %v", err)
+	}
+}
+
+// gitTestUpstreamFixture seeds a repo with a local bare origin: a real remote
+// that needs no network.
+func gitTestUpstreamFixture(t *testing.T) (repo, origin string) {
+	t.Helper()
+	repo = initRepo(t, "main")
+	gitTestCommit(t, repo)
+	origin = filepath.Join(filepath.Dir(repo), "origin.git")
+	mustGit(t, repo, "init", "-q", "--bare", "-b", "main", origin)
+	mustGit(t, repo, "remote", "add", "origin", origin)
+	mustGit(t, repo, "push", "-q", "origin", "main")
+	return repo, origin
+}
+
+// remoteHasBranch reports whether a branch still exists on a remote, checked
+// from workDir so a local bare origin needs no network.
+func remoteHasBranch(t *testing.T, workDir, remote, branch string) bool {
+	t.Helper()
+	out, err := git(workDir, "ls-remote", "--heads", remote, "refs/heads/"+branch)
+	if err != nil {
+		t.Fatalf("ls-remote: %v", err)
+	}
+	return out != ""
+}
+
+func TestBranchUpstreams(t *testing.T) {
+	repo, _ := gitTestUpstreamFixture(t)
+	gitTestBranch(t, repo, "tracked")
+	mustGit(t, repo, "push", "-q", "origin", "tracked:tracked")
+	mustGit(t, repo, "branch", "--set-upstream-to=origin/tracked", "tracked")
+	gitTestBranch(t, repo, "local-only")
+
+	ups, err := branchUpstreams(repo)
+	if err != nil {
+		t.Fatalf("branchUpstreams: %v", err)
+	}
+	got, ok := ups["tracked"]
+	want := upstream{Short: "origin/tracked", Remote: "origin", Ref: "refs/heads/tracked"}
+	if !ok || got != want || !got.present() {
+		t.Fatalf("tracked upstream = %+v (ok=%v), want %+v", got, ok, want)
+	}
+	if _, ok := ups["local-only"]; ok {
+		t.Fatalf("local-only must have no upstream entry: %+v", ups)
+	}
+}
+
+// TestBranchUpstreamsDanglingRemote pins the half-configured edge: a branch
+// with a configured remote but no tracking ref (no branch.X.merge) is not
+// reported by for-each-ref's upstream atoms at all, so it has no map entry —
+// status shows "-" and gc can never select it for deletion.
+func TestBranchUpstreamsDanglingRemote(t *testing.T) {
+	repo, _ := gitTestUpstreamFixture(t)
+	gitTestBranch(t, repo, "dangling")
+	mustGit(t, repo, "config", "branch.dangling.remote", "origin")
+
+	ups, err := branchUpstreams(repo)
+	if err != nil {
+		t.Fatalf("branchUpstreams: %v", err)
+	}
+	if _, ok := ups["dangling"]; ok {
+		t.Fatalf("half-configured branch must have no upstream entry: %+v", ups)
+	}
+}
+
+func TestDeleteRemoteBranch(t *testing.T) {
+	repo, origin := gitTestUpstreamFixture(t)
+	gitTestBranch(t, repo, "doomed")
+	mustGit(t, repo, "push", "-q", "origin", "doomed:doomed")
+
+	if err := deleteRemoteBranch(repo, "origin", "refs/heads/doomed"); err != nil {
+		t.Fatalf("deleteRemoteBranch: %v", err)
+	}
+	if remoteHasBranch(t, repo, origin, "doomed") {
+		t.Fatal("remote branch doomed survived deletion")
+	}
+
+	mustGit(t, origin, "config", "receive.denyDeletes", "true")
+	gitTestBranch(t, repo, "protected")
+	mustGit(t, repo, "push", "-q", "origin", "protected:protected")
+	if err := deleteRemoteBranch(repo, "origin", "refs/heads/protected"); err == nil {
+		t.Fatal("deleteRemoteBranch succeeded despite receive.denyDeletes")
+	}
+}
+
+// TestRemoteRefExists pins the offline existence probe gc uses to make the
+// remote delete idempotent: present reports true, absent reports false, and
+// neither is an error.
+func TestRemoteRefExists(t *testing.T) {
+	repo, _ := gitTestUpstreamFixture(t)
+	gitTestBranch(t, repo, "present")
+	mustGit(t, repo, "push", "-q", "origin", "present:present")
+
+	if ok, err := remoteRefExists(repo, "origin", "refs/heads/present"); err != nil || !ok {
+		t.Fatalf("remoteRefExists(present) = %v,%v, want true,nil", ok, err)
+	}
+	if ok, err := remoteRefExists(repo, "origin", "refs/heads/absent"); err != nil || ok {
+		t.Fatalf("remoteRefExists(absent) = %v,%v, want false,nil", ok, err)
+	}
+}
+
+// TestRemoteRefExistsUnreachableRemote pins the outage contract: a failed
+// ls-remote is an error, never a silent "absent" — otherwise gc would hide a
+// remote outage and leave the branch behind.
+func TestRemoteRefExistsUnreachableRemote(t *testing.T) {
+	repo, _ := gitTestUpstreamFixture(t)
+	mustGit(t, repo, "remote", "set-url", "origin", filepath.Join(repo, "no-such.git"))
+	ok, err := remoteRefExists(repo, "origin", "refs/heads/main")
+	if err == nil || ok {
+		t.Fatalf("remoteRefExists(unreachable) = %v,%v, want false,error", ok, err)
+	}
+}
+
+// TestRemoteDefaultBranchRef pins the guard input: the remote HEAD symref maps
+// to a local ref name, and an unknown remote yields "" (never a guess).
+func TestRemoteDefaultBranchRef(t *testing.T) {
+	repo := initRepo(t, "work")
+	gitTestCommit(t, repo)
+	if got := remoteDefaultBranchRef(repo, "origin"); got != "" {
+		t.Fatalf("no remote HEAD = %q, want empty", got)
+	}
+	gitTestRemoteHead(t, repo, "origin", "main")
+	if got := remoteDefaultBranchRef(repo, "origin"); got != "refs/heads/main" {
+		t.Fatalf("origin HEAD = %q, want refs/heads/main", got)
 	}
 }

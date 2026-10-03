@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -55,6 +57,14 @@ func (p *ttyPoll) text() string {
 	return ansi.Strip(string(p.buf))
 }
 
+// raw returns the bytes unstripped; assertions about the escape sequences
+// themselves must use this, since text() erases what they check.
+func (p *ttyPoll) raw() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return string(p.buf)
+}
+
 // waitContains polls until sub appears or the child exits, so a hung TUI is a
 // diagnosable timeout instead of a stuck test.
 func (p *ttyPoll) waitContains(sub string, timeout time.Duration, childDone <-chan struct{}) error {
@@ -87,16 +97,22 @@ func gcTTYEnv() []string {
 	return append(env, "TERM=xterm")
 }
 
-// openTTY hands back one pty pair; 200 columns keep every form line unwrapped,
-// so polled titles are contiguous in the stripped stream.
-func openTTY(t *testing.T) (master, slave *os.File) {
+// gcTTYWidth is the default pty width: wide enough that every form line stays
+// unwrapped, so polled titles are contiguous in the stripped stream.
+const gcTTYWidth = 200
+
+// openTTY hands back one pty pair at the requested column count.
+func openTTY(t *testing.T, cols int) (master, slave *os.File) {
 	t.Helper()
 	master, slave, err := pty.Open()
 	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, os.ErrPermission) || strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("pty.Open: %v (skipping PTY test in restricted environment)", err)
+		}
 		t.Fatalf("pty.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = master.Close(); _ = slave.Close() })
-	if err := pty.Setsize(master, &pty.Winsize{Rows: 50, Cols: 200}); err != nil {
+	if err := pty.Setsize(master, &pty.Winsize{Rows: 50, Cols: uint16(cols)}); err != nil {
 		t.Fatalf("pty.Setsize: %v", err)
 	}
 	return master, slave
@@ -119,7 +135,8 @@ func driveGCTTY(master *os.File, poll *ttyPoll, steps []gcTUIStep, childDone <-c
 // drainPTY copies one pty master into a poll buffer until the child exits
 // (EOF or EIO on macOS/Linux); without a concurrent reader the child blocks
 // on a full pty buffer.
-func drainPTY(master *os.File, sink func([]byte)) {
+func drainPTY(master *os.File, sink func([]byte), wg *sync.WaitGroup) {
+	defer wg.Done()
 	buf := make([]byte, 4096)
 	for {
 		n, err := master.Read(buf)
@@ -133,13 +150,14 @@ func drainPTY(master *os.File, sink func([]byte)) {
 }
 
 // runGCTTY runs the real `wtm gc` behind ptys, replays steps, and returns the
-// child's stdout, stderr and exit code.
-func runGCTTY(t *testing.T, repo string, steps []gcTUIStep) (stdout, stderr string, rc int) {
+// child's stdout, stderr and exit code. Extra args are appended after "gc".
+func runGCTTY(t *testing.T, repo string, cols int, steps []gcTUIStep, args ...string) (stdout, stderr string, rc int) {
 	t.Helper()
 
-	masterIn, slaveIn := openTTY(t)
-	masterErr, slaveErr := openTTY(t)
-	cmd := exec.Command(buildWTM(t), "gc")
+	masterIn, slaveIn := openTTY(t, cols)
+	masterErr, slaveErr := openTTY(t, cols)
+	argv := append([]string{buildWTM(t), "gc"}, args...)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = repo
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slaveIn, slaveIn, slaveErr
 	cmd.Env = gcTTYEnv()
@@ -151,8 +169,10 @@ func runGCTTY(t *testing.T, repo string, steps []gcTUIStep) (stdout, stderr stri
 	_ = slaveErr.Close()
 
 	outStream, errStream := &ttyPoll{}, &ttyPoll{}
-	go drainPTY(masterIn, outStream.append)
-	go drainPTY(masterErr, errStream.append)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go drainPTY(masterIn, outStream.append, &wg)
+	go drainPTY(masterErr, errStream.append, &wg)
 
 	waitCh, childDone := waitGCTTY(cmd)
 	driveCh := make(chan error, 1)
@@ -162,12 +182,15 @@ func runGCTTY(t *testing.T, repo string, steps []gcTUIStep) (stdout, stderr stri
 	if driveErr := <-driveCh; driveErr != nil {
 		t.Fatalf("keystroke drive failed: %v\nstdout:\n%s\nstderr:\n%s", driveErr, outStream.text(), errStream.text())
 	}
+	wg.Wait()
 	// The tty layer translates LF to CRLF; assertions match on logical lines.
-	return crlfFree(outStream.text()), crlfFree(errStream.text()), exitCode(t, "wtm gc", waitErr)
+	return crToLF(outStream.text()), crToLF(errStream.text()), exitCode(t, "wtm gc", waitErr)
 }
 
-// crlfFree removes the CR that the tty adds after every LF.
-func crlfFree(s string) string { return strings.ReplaceAll(s, "\r", "") }
+// crToLF turns every CR into LF. The tty layer translates LF to CRLF, and the
+// renderer rewrites lines in place with CR; treating CR as a line break keeps
+// same-line repaints as separate logical lines so width assertions stay honest.
+func crToLF(s string) string { return strings.ReplaceAll(s, "\r", "\n") }
 
 // awaitGCTTY bounds the whole TUI session with a watchdog: a form that never
 // yields must fail the test with both streams attached, not hang CI.
@@ -243,7 +266,7 @@ func gcTUISeedTime() time.Time {
 func TestGCTUIDefaultNothingSelected(t *testing.T) {
 	repo, wt1, session := gcTUIFixture(t)
 
-	stdout, stderr, rc := runGCTTY(t, repo, []gcTUIStep{
+	stdout, stderr, rc := runGCTTY(t, repo, gcTTYWidth, []gcTUIStep{
 		{want: "Select worktrees to remove", send: "\r"},
 	})
 	if rc != 0 {
@@ -275,7 +298,7 @@ func TestGCTUIToggleAcceptRemoves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stdout, stderr, rc := runGCTTY(t, repo, []gcTUIStep{
+	stdout, stderr, rc := runGCTTY(t, repo, gcTTYWidth, []gcTUIStep{
 		{want: "Select worktrees to remove", send: " \r"},
 		{want: "Remove 1 worktree(s)?", send: "y"},
 	})
@@ -291,6 +314,11 @@ func TestGCTUIToggleAcceptRemoves(t *testing.T) {
 	if _, err := os.Stat(session); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("session %s must be purged on accept (stat err %v)", session, err)
 	}
+	for _, want := range []string{"removing worktrees", "pruning", "✓ done"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing removal progress %q; stderr:\n%s", want, stderr)
+		}
+	}
 	assertWorktreeNotListed(t, repo, wt1)
 }
 
@@ -299,7 +327,7 @@ func TestGCTUIToggleAcceptRemoves(t *testing.T) {
 func TestGCTUIDeclineAborts(t *testing.T) {
 	repo, wt1, session := gcTUIFixture(t)
 
-	stdout, stderr, rc := runGCTTY(t, repo, []gcTUIStep{
+	stdout, stderr, rc := runGCTTY(t, repo, gcTTYWidth, []gcTUIStep{
 		{want: "Select worktrees to remove", send: " \r"},
 		{want: "Remove 1 worktree(s)?", send: "n"},
 	})
@@ -314,6 +342,34 @@ func TestGCTUIDeclineAborts(t *testing.T) {
 	}
 	assertWorktreeIntact(t, wt1, session)
 	assertWorktreeListed(t, repo, wt1)
+}
+
+// TestGCPickerNarrowWidth pins the fit contract: at 80 columns every rendered
+// TUI line must stay within the pty, or lipgloss wraps it and the grid columns
+// visibly misalign.
+func TestGCPickerNarrowWidth(t *testing.T) {
+	repo, _, _ := gcTUIFixture(t)
+
+	_, stderr, rc := runGCTTY(t, repo, 80, []gcTUIStep{
+		{want: "Select worktrees to remove", send: "\r"},
+	})
+	if rc != 0 {
+		t.Fatalf("rc = %d, want 0; stderr:\n%s", rc, stderr)
+	}
+	assertLinesFit(t, stderr, 80)
+}
+
+// assertLinesFit fails on the first content line wider than cols. Trailing
+// spaces are ignored: the frame pads to width, and bubbletea's erase sequence
+// (cursor-up followed by a space) leaks one stray space into the stripped
+// stream at the capture boundary.
+func assertLinesFit(t *testing.T, s string, cols int) {
+	t.Helper()
+	for _, line := range strings.Split(s, "\n") {
+		if w := dispWidth(strings.TrimRight(line, " ")); w > cols {
+			t.Fatalf("line is %d cells, exceeds %d:\n%q", w, cols, line)
+		}
+	}
 }
 
 func assertWorktreeIntact(t *testing.T, wt, session string) {
@@ -338,4 +394,34 @@ func assertWorktreeNotListed(t *testing.T, repo, wt string) {
 	if list := mustGit(t, repo, "worktree", "list"); strings.Contains(list, wt) {
 		t.Errorf("git worktree list still has %s:\n%s", wt, list)
 	}
+}
+
+// TestGCTUIDeclineJSON pins the machine contract of a declined gc: stdout
+// carries the abort report shape (empty removals, flag echoes), stderr the
+// aborted notice, and the exit code stays 0.
+func TestGCTUIDeclineJSON(t *testing.T) {
+	repo, wt1, session := gcTUIFixture(t)
+
+	stdout, stderr, rc := runGCTTY(t, repo, gcTTYWidth, []gcTUIStep{
+		{want: "Select worktrees to remove", send: " \r"},
+		{want: "Remove 1 worktree(s)?", send: "n"},
+	}, "--json")
+	if rc != 0 {
+		t.Fatalf("rc = %d, want 0 (decline is not an error)", rc)
+	}
+	var res gcResult
+	if err := json.Unmarshal([]byte(stdout), &res); err != nil {
+		t.Fatalf("declined --json stdout is not a gc report: %v\nstdout:\n%s", err, stdout)
+	}
+	if len(res.Removed) != 0 || len(res.RemoteDeleted) != 0 || res.SessionsPurged != 0 {
+		t.Fatalf("report = %+v, want the empty abort shape", res)
+	}
+	if res.KeptSessions || res.KeptRemote {
+		t.Fatalf("report = %+v, want both keeps false", res)
+	}
+	if !strings.Contains(stderr, "aborted") {
+		t.Errorf("stderr = %q, want the aborted notice", stderr)
+	}
+	assertWorktreeIntact(t, wt1, session)
+	assertWorktreeListed(t, repo, wt1)
 }

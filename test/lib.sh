@@ -47,3 +47,11 @@ mk_session() { # mk_session <worktree> <session-dir> <touch-stamp>
 backdate() { # backdate <path>... — pin mtimes to SEED epoch so activity reads old
   touch -t "$OLD_STAMP" "$@"
 }
+
+status_of() { # status_of <path> [output] — extract STATUS cell for path from wtm status output
+  local p=$1 status_out=${2:-$out}
+  # The STATUS cell is matched by value (exactly ACTIVE/UNUSED), not by column
+  # position: the header itself cannot be whitespace-split because "LAST USED"
+  # contains a space, and inserting a column must not shift this helper.
+  awk -v p="$p" '$1==p { for (i = 1; i <= NF; i++) if ($i == "ACTIVE" || $i == "UNUSED") print $i }' <<<"$status_out"
+}

@@ -139,7 +139,7 @@ func cmdConfigGet(g *globals) error {
 
 func cmdConfig(g *globals, args []string) error {
 	fs := subFlags("config", g)
-	pos, err := parseSub(fs, args)
+	pos, err := parseSub(fs, g, args)
 	if err != nil {
 		return err
 	}

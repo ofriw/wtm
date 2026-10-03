@@ -1,0 +1,11 @@
+{
+  "removed": [
+    "/SBX/wt1"
+  ],
+  "remoteDeleted": [],
+  "failed": [],
+  "sessionsPurged": 1,
+  "keptSessions": false,
+  "keptRemote": true,
+  "pruned": true
+}

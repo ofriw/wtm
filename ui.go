@@ -7,23 +7,35 @@ import (
 	"strconv"
 	"strings"
 
+	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
 	"github.com/charmbracelet/colorprofile"
-	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 )
 
 // ui.go — table rendering and the interactive gc picker.
 
-// shrinkPriority orders the columns elided when a table must fit a budget;
-// earlier names give up width first. Every other column is pinned to natural.
-var shrinkPriority = []string{"PATH", "BRANCH", "LAST USED"}
+// warnPrefix labels every non-fatal disclosure line, wherever it is emitted.
+const warnPrefix = "warning: "
 
-// shrinkFloor is the smallest width a shrinkable column is elided to before an
-// impossibly tight budget forces it further down to one cell.
-var shrinkFloor = map[string]int{"PATH": 12, "BRANCH": 8, "LAST USED": 10}
+// warnf writes a `warning:` line to stderr. stdout stays machine-clean, so
+// every non-fatal disclosure goes through here.
+func warnf(format string, a ...any) {
+	fmt.Fprint(os.Stderr, warnPrefix+fmt.Sprintf(format, a...)+"\n")
+}
+
+// pickerOptionPrefixWidth is how far huh's MultiSelect indents an option key:
+// the selector ("> " / "  ") plus the toggle prefix ("• " / "✓ ").
+const pickerOptionPrefixWidth = 4
+
+// pickerChromeWidth is ThemeCharm's frame around a field's content: the left
+// ThickBorder edge plus PaddingLeft(1). A picker row is therefore
+// pickerChromeWidth + pickerOptionPrefixWidth wider than its label.
+// Coupled to huh's ThemeCharm: changing the theme requires updating these
+// widths and TestGCPickerNarrowWidth.
+const pickerChromeWidth = 2
 
 // Color modes accepted by --color; "" behaves as auto.
 const (
@@ -31,6 +43,13 @@ const (
 	colorAlways = "always"
 	colorNever  = "never"
 )
+
+func booleanStyle(active bool) lipgloss.Style {
+	if active {
+		return lipgloss.NewStyle().Foreground(lipgloss.Green)
+	}
+	return lipgloss.NewStyle().Faint(true)
+}
 
 // statusCellStyle maps a status-table cell to its style. Basic ANSI colors are
 // deliberate: the terminal theme owns the palette, and every profile (16/256/
@@ -44,16 +63,11 @@ func statusCellStyle(header, value string) lipgloss.Style {
 		}
 		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
 	case "CONFIG", "DB", "MCP":
-		if value == "yes" {
-			return lipgloss.NewStyle().Foreground(lipgloss.Green)
-		}
-		return lipgloss.NewStyle().Faint(true)
-	case "BRANCH":
-		if value == "(detached)" {
-			return lipgloss.NewStyle().Faint(true)
-		}
-	case "LAST USED":
-		if value == "never" {
+		return booleanStyle(value == "yes")
+	case "UPSTREAM":
+		return booleanStyle(value != "-")
+	case "BRANCH", "LAST USED":
+		if value == "(detached)" || value == "never" {
 			return lipgloss.NewStyle().Faint(true)
 		}
 	}
@@ -70,16 +84,44 @@ type cellStyleFunc func(header, value string) lipgloss.Style
 // the resolved profile supports them; NoTTY output stays pure ASCII so pipes,
 // --json and goldens remain byte-stable.
 func printTable(headers []string, rows [][]string, colorMode string, style cellStyleFunc, rightAlign []string) {
-	widths := columnWidths(headers, rows, widthBudget())
-	// Alignment is resolved from the plain headers before elision/styling, so
-	// ANSI decoration can never change which columns are right-aligned.
-	aligns := columnAligns(headers, rightAlign)
-	headers, rows = elideCells(headers, rows, widths)
+	headers, rows, widths, aligns := sizedGrid(headers, rows, widthBudget(), rightAlign)
 	profile := resolveColorProfile(colorMode)
 	if profile > colorprofile.NoTTY && style != nil {
 		headers, rows = styleCells(headers, rows, style)
 	}
-	writeTable(renderTable(headers, rows, widths, aligns), profile)
+	header, body := renderGrid(headers, rows, widths, aligns)
+	writeTable(gridString(header, body), profile)
+}
+
+// sizedGrid resolves a grid against a width budget: columns are sized, then
+// middle-elided, and alignment is resolved from the plain headers before
+// elision so ANSI decoration can never change which columns are right-aligned.
+// Return order matches renderGrid's parameters, so renderGrid(sizedGrid(...))
+// composes.
+func sizedGrid(headers []string, rows [][]string, budget int, rightAlign []string) ([]string, [][]string, []int, []lipgloss.Position) {
+	widths := columnWidths(headers, rows, budget)
+	aligns := columnAligns(headers, rightAlign)
+	headers, rows = elideCells(headers, rows, widths)
+	return headers, rows, widths, aligns
+}
+
+// renderGrid splits a rendered grid into its header line ("" when headers is
+// empty) and its body lines. gridString is the exact inverse, so a grid always
+// round-trips through the split.
+func renderGrid(headers []string, rows [][]string, widths []int, aligns []lipgloss.Position) (string, []string) {
+	lines := strings.Split(renderTable(headers, rows, widths, aligns), "\n")
+	if len(headers) == 0 {
+		return "", lines
+	}
+	return lines[0], lines[1:]
+}
+
+// gridString rejoins a header line and body lines into one rendered grid.
+func gridString(header string, body []string) string {
+	if header == "" {
+		return strings.Join(body, "\n")
+	}
+	return strings.Join(append([]string{header}, body...), "\n")
 }
 
 // columnAligns maps right-align header names to positions, defaulting left.
@@ -102,6 +144,16 @@ func resolveColorProfile(mode string) colorprofile.Profile {
 	return resolveColorMode(mode, term.IsTerminal(os.Stdout.Fd()))
 }
 
+func envColorProfile() colorprofile.Profile {
+	if truthy(os.Getenv("FORCE_COLOR")) {
+		return max(colorprofile.Detect(os.Stdout, os.Environ()), colorprofile.ANSI)
+	}
+	if os.Getenv("CLICOLOR") == "0" && !truthy(os.Getenv("CLICOLOR_FORCE")) {
+		return colorprofile.NoTTY
+	}
+	return colorprofile.Detect(os.Stdout, os.Environ())
+}
+
 func resolveColorMode(mode string, isTTY bool) colorprofile.Profile {
 	switch mode {
 	case colorAlways:
@@ -111,18 +163,11 @@ func resolveColorMode(mode string, isTTY bool) colorprofile.Profile {
 	}
 	if noColorSet() {
 		if isTTY {
-			// NO_COLOR drops color but not decoration (https://no-color.org).
 			return colorprofile.ASCII
 		}
 		return colorprofile.NoTTY
 	}
-	if truthy(os.Getenv("FORCE_COLOR")) {
-		return max(colorprofile.Detect(os.Stdout, os.Environ()), colorprofile.ANSI)
-	}
-	if os.Getenv("CLICOLOR") == "0" && !truthy(os.Getenv("CLICOLOR_FORCE")) {
-		return colorprofile.NoTTY
-	}
-	return colorprofile.Detect(os.Stdout, os.Environ())
+	return envColorProfile()
 }
 
 // validateColor rejects an unknown --color value so it can never silently
@@ -189,6 +234,21 @@ func widthBudget() int {
 
 func dispWidth(s string) int { return ansi.StringWidth(s) }
 
+func balanceMiddle(s string, avail int) (head, tail string) {
+	head = ansi.Truncate(s, avail/2, "")
+	rest := s[len(head):]
+	tail = ansi.TruncateLeft(rest, dispWidth(rest)-(avail-avail/2), "")
+	// Wide graphemes make a grapheme-aware cut land past the target; trim the
+	// head first, then the tail, so the result never exceeds avail.
+	if excess := dispWidth(head) + dispWidth(tail) - avail; excess > 0 {
+		head = ansi.Truncate(head, dispWidth(head)-excess, "")
+	}
+	if over := dispWidth(head) + dispWidth(tail) - avail; over > 0 {
+		tail = ansi.TruncateLeft(tail, over, "")
+	}
+	return head, tail
+}
+
 // middleElide shortens s to at most w display cells, keeping both ends and
 // replacing the middle with an ellipsis. Returns s unchanged when it fits.
 func middleElide(s string, w int) string {
@@ -201,18 +261,7 @@ func middleElide(s string, w int) string {
 	if w == 1 {
 		return "…"
 	}
-	avail := w - 1
-	head := ansi.Truncate(s, avail/2, "")
-	rest := s[len(head):]
-	tail := ansi.TruncateLeft(rest, dispWidth(rest)-(avail-avail/2), "")
-	// Wide graphemes make a grapheme-aware cut land past the target; trim the
-	// head first, then the tail, so the result never exceeds w.
-	if excess := dispWidth(head) + dispWidth(tail) - avail; excess > 0 {
-		head = ansi.Truncate(head, dispWidth(head)-excess, "")
-	}
-	if over := dispWidth(head) + dispWidth(tail) - avail; over > 0 {
-		tail = ansi.TruncateLeft(tail, over, "")
-	}
+	head, tail := balanceMiddle(s, w-1)
 	elided := head + "…" + tail
 	// A single wide grapheme cannot be cut to fit a one-cell remainder; fall
 	// back to end-elision, which drops whole graphemes until it fits.
@@ -339,8 +388,10 @@ func interactive() bool {
 }
 
 // multiSelect shows candidates: nothing selected by default, ctrl+a selects
-// all (huh default keymap), space toggles. Returns indices into labels.
-func multiSelect(title string, labels []string) ([]int, error) {
+// all (huh default keymap), space toggles. header becomes the field description
+// and must already carry the indent that lines it up with the option keys; an
+// empty header is a huh no-op. Returns indices into labels.
+func multiSelect(title, header string, labels []string) ([]int, error) {
 	opts := make([]huh.Option[int], len(labels))
 	for i, l := range labels {
 		opts[i] = huh.NewOption(l, i)
@@ -348,6 +399,7 @@ func multiSelect(title string, labels []string) ([]int, error) {
 	var sel []int
 	err := huh.NewMultiSelect[int]().
 		Title(title).
+		Description(header).
 		Options(opts...).
 		Value(&sel).
 		Run()

@@ -74,6 +74,7 @@ func TestColumnWidths(t *testing.T) {
 	rows := [][]string{{
 		"/a/very/long/checkout/path/that/keeps/going/on",
 		"feature/a-rather-long-branch",
+		"origin/feature/a-rather-long-branch",
 		"2020-01-01", "UNUSED", "yes", "yes", "yes",
 	}}
 	natural := naturalWidths(headers, rows)
@@ -93,11 +94,11 @@ func TestColumnWidths(t *testing.T) {
 		if got[0] >= natural[0] {
 			t.Errorf("PATH should shrink first: got %d, natural %d", got[0], natural[0])
 		}
-		if got[1] != natural[1] {
-			t.Errorf("BRANCH must not shrink while PATH has room: got %d, natural %d", got[1], natural[1])
+		if got[1] != natural[1] || got[2] != natural[2] {
+			t.Errorf("BRANCH/UPSTREAM must not shrink while PATH has room: got %d/%d, natural %d/%d", got[1], got[2], natural[1], natural[2])
 		}
 	})
-	t.Run("branch shrinks after path floor", func(t *testing.T) {
+	t.Run("upstream shrinks after path floor", func(t *testing.T) {
 		budget := naturalTotal - (natural[0] - shrinkFloor["PATH"]) - 3
 		got := columnWidths(headers, rows, budget)
 		assertWithin(t, got, budget)
@@ -105,8 +106,8 @@ func TestColumnWidths(t *testing.T) {
 		if got[0] != shrinkFloor["PATH"] {
 			t.Errorf("PATH = %d, want floor %d", got[0], shrinkFloor["PATH"])
 		}
-		if got[1] != natural[1]-3 {
-			t.Errorf("BRANCH = %d, want %d", got[1], natural[1]-3)
+		if got[2] != natural[2]-3 {
+			t.Errorf("UPSTREAM = %d, want %d", got[2], natural[2]-3)
 		}
 	})
 	t.Run("tight budget still fits and keeps pinned columns", func(t *testing.T) {
@@ -121,6 +122,7 @@ func TestElideCells(t *testing.T) {
 	rows := [][]string{{
 		"/a/very/long/checkout/path",
 		"feature/x",
+		"origin/x",
 		"2020-01-01", "UNUSED", "yes", "yes", "yes",
 	}}
 	widths := naturalWidths(headers, rows)
@@ -191,6 +193,8 @@ func TestStatusCellStyle(t *testing.T) {
 		{"CONFIG", "yes", false, false, lipgloss.Green},
 		{"DB", "yes", false, false, lipgloss.Green},
 		{"MCP", "-", false, true, nil},
+		{"UPSTREAM", "origin/feat", false, false, lipgloss.Green},
+		{"UPSTREAM", "-", false, true, nil},
 		{"BRANCH", "(detached)", false, true, nil},
 		{"BRANCH", "main", false, false, nil},
 		{"LAST USED", "never", false, true, nil},
@@ -213,8 +217,8 @@ func TestStatusCellStyle(t *testing.T) {
 func TestStyledCellsStripToPlain(t *testing.T) {
 	headers := statusHeaders()
 	rows := [][]string{
-		{"/SBX/repo", "main", "2020-01-01", "ACTIVE", "yes", "-", "yes"},
-		{"/SBX/wt", "(detached)", "never", "UNUSED", "-", "yes", "-"},
+		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "yes", "-", "yes"},
+		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "-", "yes", "-"},
 	}
 	_, styled := styleCells(headers, rows, statusCellStyle)
 	for r := range rows {
@@ -225,8 +229,8 @@ func TestStyledCellsStripToPlain(t *testing.T) {
 		}
 	}
 	for r, want := range []string{"ACTIVE", "UNUSED"} {
-		if !strings.Contains(styled[r][3], "\x1b[") {
-			t.Errorf("STATUS %q cell carries no ANSI: %q", want, styled[r][3])
+		if !strings.Contains(styled[r][4], "\x1b[") {
+			t.Errorf("STATUS %q cell carries no ANSI: %q", want, styled[r][4])
 		}
 	}
 }
@@ -236,8 +240,8 @@ func TestStyledCellsStripToPlain(t *testing.T) {
 func TestStyledTableStripsToPlain(t *testing.T) {
 	headers := statusHeaders()
 	rows := [][]string{
-		{"/SBX/repo", "main", "2020-01-01", "ACTIVE", "yes", "-", "yes"},
-		{"/SBX/wt", "(detached)", "never", "UNUSED", "-", "yes", "-"},
+		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "yes", "-", "yes"},
+		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "-", "yes", "-"},
 	}
 	widths := naturalWidths(headers, rows)
 	aligns := columnAligns(headers, statusRightAlign)
@@ -273,7 +277,7 @@ func assertWidths(t *testing.T, got, want []int) {
 
 func assertPinned(t *testing.T, got, natural []int) {
 	t.Helper()
-	for _, i := range []int{3, 4, 5, 6} {
+	for _, i := range []int{4, 5, 6, 7} {
 		if got[i] != natural[i] {
 			t.Errorf("pinned column %d = %d, want %d", i, got[i], natural[i])
 		}

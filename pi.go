@@ -12,8 +12,51 @@ import (
 
 // pi.go — the only file that knows the Pi.dev agent layout.
 
-// piMCPFile is pi-mcp-adapter's per-project MCP config, read by Pi at startup.
-const piMCPFile = ".mcp.json"
+// Pi reads per-project MCP servers from two mutually-exclusive configs:
+// pi-mcp-adapter reads `.mcp.json` (repo root); Pi's built-in MCP reads
+// `.pi/mcp.json`, gated by project trust. Either may hold secrets, so wtm seeds
+// both even when git ignores them.
+const (
+	piMCPFile       = ".mcp.json"
+	piNativeMCPFile = ".pi/mcp.json"
+)
+
+// piMCPFiles is the SSOT for the MCP configs wtm recognizes: harness seeding and
+// status presence both key off it. A func returning a fresh slice, so no
+// caller can mutate shared state.
+func piMCPFiles() []string { return []string{piMCPFile, piNativeMCPFile} }
+
+// mcpConfigs inventories recognized configs once so merged and native status agree.
+// An existing but unparseable config warns and counts as absent: status must
+// never report a corrupt file as a healthy MCP setup. The warning goes through
+// the progress handle because this runs during discovery, under the renderer.
+func mcpConfigs(root string, p *progress) map[string]bool {
+	configs := make(map[string]bool, 2)
+	for _, rel := range piMCPFiles() {
+		path := filepath.Join(root, rel)
+		if !exists(path) {
+			configs[rel] = false
+			continue
+		}
+		var v any
+		if err := readJSON(path, &v); err != nil {
+			warnProgress(p, "%s is not valid JSON (%s); treating as absent", path, err)
+			configs[rel] = false
+			continue
+		}
+		configs[rel] = true
+	}
+	return configs
+}
+
+func anyMCPConfig(configs map[string]bool) bool {
+	for _, present := range configs {
+		if present {
+			return true
+		}
+	}
+	return false
+}
 
 // piAgentDir honors PI_CODING_AGENT_DIR so tests can sandbox the agent dir.
 func piAgentDir() string {
@@ -46,25 +89,39 @@ func copyIgnoredPiFile(srcRoot, dstRoot string, p string, d fs.DirEntry) error {
 }
 
 // copyPiHarness carries per-worktree Pi state that git deliberately does not:
-// .mcp.json is copied when the source has one and the checkout did not, and
-// files under .pi/ are copied per-file only when git ignores them — tracked
-// ones already arrived with the checkout, untracked-and-unignored ones are
-// never touched.
+// recognized MCP configs seed whenever the source has one and the checkout does
+// not — an explicit exception to the ignore gate (pinned by
+// add-pi-committed/add-native-mcp: agent wiring follows the worktree, ignored
+// or not) — and remaining files under .pi/ are copied per-file only when git
+// ignores them — tracked ones already arrived with the checkout,
+// untracked-and-unignored ones are never touched.
 func copyPiHarness(srcRoot, dstRoot string) error {
-	if src := filepath.Join(srcRoot, piMCPFile); exists(src) {
-		if dst := filepath.Join(dstRoot, piMCPFile); !exists(dst) {
+	for _, rel := range piMCPFiles() {
+		src, dst := filepath.Join(srcRoot, rel), filepath.Join(dstRoot, rel)
+		if exists(src) && !exists(dst) {
 			if err := copyFile(src, dst); err != nil {
 				return err
 			}
 		}
 	}
+	return copyIgnoredPiTree(srcRoot, dstRoot)
+}
+
+// copyIgnoredPiTree copies the .pi tree per-file through the ignore gate,
+// except the native MCP config: the explicit seed in copyPiHarness owns it,
+// so the walk skips it and one rule owns every file.
+func copyIgnoredPiTree(srcRoot, dstRoot string) error {
 	piDir := filepath.Join(srcRoot, ".pi")
 	if !exists(piDir) {
 		return nil
 	}
+	native := filepath.Join(srcRoot, piNativeMCPFile)
 	return filepath.WalkDir(piDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if p == native {
+			return nil
 		}
 		return copyIgnoredPiFile(srcRoot, dstRoot, p, d)
 	})

@@ -16,15 +16,16 @@ const usage = `wtm — worktree manager
 
 usage:
   wtm [options]                    status of all worktrees (default command)
-  wtm add <path> [-b <branch> | --branch <branch>] [<start-point>] [--no-index] [--from <src>]
-  wtm gc [--all | --path <p> ...] [--keep-sessions]
+  wtm add <branch> [<start-point>] [-p|--path <dir>] [--no-index] [--from <src>]
+  wtm gc [--all | --path <p> ...] [--keep-sessions] [--keep-remote]
   wtm config [set unusedTTL <Nd>]
 
 options:
-  --root <dir>   repository root (default: main worktree of the current repo)
-  --json         machine-readable output
-  --color <when> color output: auto (default), always, never
-  --yes          skip confirmation (gc); use --all or --path to select non-interactively
+  --root <dir>      repository root (default: main worktree of the current repo)
+  --json            machine-readable output
+  --color <when>    color output: auto (default), always, never
+  --progress <when> progress display: auto (default), always, never
+  --yes             skip confirmation (gc, delete); use --all or --path to select non-interactively
 
 exit codes: 0 ok, 1 error, 2 usage
 `
@@ -34,18 +35,20 @@ var errHelpOK = errors.New("usage shown")
 
 // globals are flags accepted both before and after the subcommand.
 type globals struct {
-	root  string
-	json  bool
-	color string
-	yes   bool
+	root     string
+	json     bool
+	color    string
+	progress string
+	yes      bool
 }
 
 func (g *globals) register(fs *flag.FlagSet) {
 	fs.StringVar(&g.root, "root", g.root, "repository root")
 	fs.BoolVar(&g.json, "json", g.json, "machine-readable output")
 	// Default is the current value: subFlags re-registers and must not clobber
-	// a --color parsed before the subcommand.
+	// a --color/--progress parsed before the subcommand.
 	fs.StringVar(&g.color, "color", g.color, "color output: auto, always, never")
+	fs.StringVar(&g.progress, "progress", g.progress, "progress display: auto, always, never")
 	fs.BoolVar(&g.yes, "yes", g.yes, "never prompt")
 }
 
@@ -58,12 +61,14 @@ func usagef(format string, a ...any) error { return usageError(fmt.Sprintf(forma
 
 func main() { os.Exit(run(os.Args[1:])) }
 
-func dispatch(cmd string, g *globals, rest []string) error {
-	// --color is global: validate once here so every subcommand (status, add,
-	// gc, config) rejects a bogus value instead of only status enforcing it.
+func validateGlobals(g *globals) error {
 	if err := validateColor(g.color); err != nil {
 		return err
 	}
+	return validateProgress(g.progress)
+}
+
+func dispatchSubcommand(cmd string, g *globals, rest []string) error {
 	switch cmd {
 	case "status":
 		return cmdStatus(g, rest)
@@ -76,13 +81,20 @@ func dispatch(cmd string, g *globals, rest []string) error {
 	case "help":
 		fmt.Print(usage)
 		return errHelpOK
-	default:
-		return usagef("unknown command %q", cmd)
 	}
+	return usagef("unknown command %q", cmd)
+}
+
+func dispatch(cmd string, g *globals, rest []string) error {
+	// Globals are validated once here so every subcommand rejects bogus values.
+	if err := validateGlobals(g); err != nil {
+		return err
+	}
+	return dispatchSubcommand(cmd, g, rest)
 }
 
 func run(args []string) int {
-	g := &globals{color: colorAuto}
+	g := &globals{color: colorAuto, progress: progressAuto}
 	fs := flag.NewFlagSet("wtm", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	g.register(fs)
@@ -130,8 +142,11 @@ func subFlags(name string, g *globals) *flag.FlagSet {
 
 // parseSub parses subcommand arguments allowing flags and positionals to be
 // interleaved (go flag stops at the first positional; usage is
-// `wtm add <path> -b <branch>`). -h prints usage and yields errHelpOK.
-func parseSub(fs *flag.FlagSet, args []string) ([]string, error) {
+// `wtm add <branch> [<start-point>] [-p|--path <dir>]`). -h prints usage and yields errHelpOK.
+// Globals are validated here after parsing: subFlags binds them to g, so a
+// bogus --color/--progress placed after the subcommand is only visible now,
+// not in dispatch's pre-parse check.
+func parseSub(fs *flag.FlagSet, g *globals, args []string) ([]string, error) {
 	var pos []string
 	for {
 		if err := fs.Parse(args); err != nil {
@@ -143,6 +158,9 @@ func parseSub(fs *flag.FlagSet, args []string) ([]string, error) {
 		}
 		args = fs.Args()
 		if len(args) == 0 {
+			if err := validateGlobals(g); err != nil {
+				return nil, err
+			}
 			return pos, nil
 		}
 		pos = append(pos, args[0])

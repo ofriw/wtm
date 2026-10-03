@@ -36,6 +36,8 @@ func TestNativeExitCodes(t *testing.T) {
 		{"h flag", outside, []string{"-h"}, 0},
 		{"unknown command", outside, []string{"bogus"}, 2},
 		{"status outside repo", outside, []string{"status"}, 1},
+		{"invalid color after subcommand", repo, []string{"status", "--color", "bogus"}, 2},
+		{"invalid progress after subcommand", repo, []string{"status", "--progress", "bogus"}, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -77,6 +79,20 @@ func TestNativeStatusJSON(t *testing.T) {
 	if canonical(wts[0].Path) != canonical(repo) {
 		t.Fatalf("status path = %q, want %q", wts[0].Path, canonical(repo))
 	}
+}
+
+// TestNativeNoTerminalQueries pins the input-disabled contract on the host OS:
+// forced progress must not write a reply-expecting terminal query, because the
+// terminal's answer would be left in the tty and echoed by the shell after wtm
+// exits (charmbracelet/bubbletea#1590).
+func TestNativeNoTerminalQueries(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	_, errOut, rc := runWTM(t, repo, nil, "status", "--progress=always")
+	if rc != 0 {
+		t.Fatalf("status rc = %d, stderr = %s", rc, errOut)
+	}
+	assertNoTerminalQueries(t, errOut)
 }
 
 func TestNativeAddNoIndex(t *testing.T) {
@@ -171,6 +187,27 @@ func TestNativeGCJSON(t *testing.T) {
 	}
 	if strings.Contains(out, "null") {
 		t.Fatalf("gc JSON must serialize empty slices as [], got %s", out)
+	}
+}
+
+// TestNativeGCKeepRemote pins that --keep-remote parses and that a branch
+// with no upstream still removes cleanly (decision 3). KeptRemote reports an
+// actual keep, so with no remote upstream it stays false.
+func TestNativeGCKeepRemote(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	target := filepath.Join(filepath.Dir(repo), "wt-keepremote")
+	gitWorktreeAdd(t, repo, target, "wt-keepremote", "main")
+	out, errOut, rc := runWTM(t, repo, nil, "gc", "--path", target, "--yes", "--keep-remote", "--json")
+	if rc != 0 {
+		t.Fatalf("gc --keep-remote rc = %d, stderr = %s", rc, errOut)
+	}
+	var res gcResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("gc JSON invalid: %v\n%s", err, out)
+	}
+	if res.KeptRemote || len(res.RemoteDeleted) != 0 {
+		t.Fatalf("report = %+v, want keptRemote false and no remote deletions", res)
 	}
 }
 

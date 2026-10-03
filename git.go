@@ -28,6 +28,7 @@ import (
 //	locked user reason
 type gworktree struct {
 	Path     string
+	HEAD     string // resolved commit; keys start-point matching in add.go
 	Branch   string // "" when detached or bare
 	Bare     bool
 	Locked   bool
@@ -40,6 +41,8 @@ func applyPorcelainField(cur *gworktree, key, val string) {
 		return
 	}
 	switch key {
+	case "HEAD":
+		cur.HEAD = val
 	case "branch":
 		cur.Branch = strings.TrimPrefix(val, "refs/heads/")
 	case "bare":
@@ -123,6 +126,11 @@ func repoRoot(dir string) (string, error) {
 		return "", err
 	}
 	return wts[0].Path, nil
+}
+
+// gitTopLevel returns the root of the worktree containing dir (main or linked).
+func gitTopLevel(dir string) (string, error) {
+	return git(dir, "rev-parse", "--show-toplevel")
 }
 
 // worktreeAdd mirrors `git worktree add -b`: new branch at baseRef, checked
@@ -261,4 +269,95 @@ func baseRefFor(dir string) string {
 		return ref
 	}
 	return name
+}
+
+// upstream is a local branch's configured git upstream (tracking branch).
+// Short is the display form (origin/feat); Remote/Ref are the push-delete
+// target, so a differently-named upstream is deleted exactly, not guessed.
+type upstream struct {
+	Short  string // origin/feat
+	Remote string // origin
+	Ref    string // refs/heads/feat
+}
+
+// present reports whether an upstream is configured; the zero value is "none".
+// A local-branch upstream (branch.X.remote=".") also counts as present: status
+// shows the configured truth, while gc deletes only what onRemote() allows.
+func (u upstream) present() bool { return u.Remote != "" && u.Ref != "" }
+
+// onRemote reports whether the upstream branch lives on a git remote, i.e. is
+// safe to delete with push --delete. Remote "." is git's marker for an upstream
+// that is another LOCAL branch, which a push-delete would destroy as a local
+// branch — gc must skip it, not "clean it up".
+func (u upstream) onRemote() bool { return u.present() && u.Remote != "." }
+
+// key identifies the push-delete target for dedup; tab cannot appear in a ref.
+func (u upstream) key() string { return u.Remote + "\t" + u.Ref }
+
+// branchUpstreams maps each local branch to its configured upstream in one
+// offline call. Tab separates fields because a refname can hold neither tab nor
+// newline; the %(upstream:*) atoms expand empty for a branch without one.
+func branchUpstreams(dir string) (map[string]upstream, error) {
+	out, err := git(dir, "for-each-ref",
+		"--format=%(refname:short)%09%(upstream:short)%09%(upstream:remotename)%09%(upstream:remoteref)",
+		"refs/heads/")
+	if err != nil {
+		return nil, err
+	}
+	ups := map[string]upstream{}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) != 4 || f[0] == "" || f[2] == "" {
+			continue
+		}
+		ups[f[0]] = upstream{Short: f[1], Remote: f[2], Ref: f[3]}
+	}
+	return ups, nil
+}
+
+// remoteRefExists reports whether ref exists on remote, via ls-remote so no
+// fetch is needed. A failed query is an error, never a silent "absent":
+// treating an unreachable remote as already-deleted would hide the outage and
+// leave the branch behind.
+func remoteRefExists(dir, remote, ref string) (bool, error) {
+	out, err := git(dir, "ls-remote", "--heads", remote, ref)
+	if err != nil {
+		return false, err
+	}
+	return out != "", nil
+}
+
+// remoteDefaultBranchRef returns the branch a remote's HEAD points at, as a
+// local ref name (refs/heads/main); "" when the remote has no recorded HEAD.
+// Local refs only: `git remote show` would hit the network.
+func remoteDefaultBranchRef(dir, remote string) string {
+	out, err := git(dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD")
+	if err != nil {
+		return ""
+	}
+	branch := strings.TrimPrefix(out, "refs/remotes/"+remote+"/")
+	if branch == out || branch == "" {
+		return ""
+	}
+	return "refs/heads/" + branch
+}
+
+// deleteRemoteBranch deletes ref on the branch's remote. git drops the
+// matching local remote-tracking ref as part of the same push, so no separate
+// prune is needed (pinned by test/scenarios/gc-remote/expected.manifest, where
+// refs/remotes/origin/wt1 is gone while gc-remote-keep's manifest keeps it).
+// Ref stays canonical (refs/heads/...) at the call sites; only the push trims
+// to the branch name `git push --delete` expects.
+func deleteRemoteBranch(dir, remote, ref string) error {
+	_, err := git(dir, "push", remote, "--delete", strings.TrimPrefix(ref, "refs/heads/"))
+	return err
+}
+
+// deleteLocalBranch force-deletes a local branch. `delete <branch>` names the
+// branch as its target, so -D is intended: the user chose to drop it even if
+// it is unmerged. The worktree that checked it out must already be removed.
+// -- stops a branch name from being read as a git option.
+func deleteLocalBranch(dir, branch string) error {
+	_, err := git(dir, "branch", "-D", "--", branch)
+	return err
 }
