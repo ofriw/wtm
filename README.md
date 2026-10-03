@@ -57,7 +57,7 @@ sessions purged: 1
 
 Creates a worktree that's immediately ready to work in: it wires up the Pi harness, carries over the ChunkHound workspace from the worktree at the start-point, points that workspace at the new worktree, and re-indexes when ChunkHound is available.
 
-The branch is the only required input. The checkout directory is derived as `<repo>-<branch-slug>` and placed **next to the worktree you run `wtm` from** — never under the current directory — so worktrees cannot nest. A branch like `feature/login` keeps its taxonomy prefix while the directory flattens to `repo-feature-login`.
+The branch is the only required input. The checkout directory is derived as `<repo>-<branch-slug>` and placed **next to the worktree you run `wtm` from**. A branch like `feature/login` keeps its taxonomy prefix while the directory flattens to `repo-feature-login`.
 
 | Flag | Default | Meaning |
 |---|---|---|
