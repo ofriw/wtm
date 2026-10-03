@@ -1,7 +1,7 @@
-worktree: /SBX/wt-base
+worktree: /SBX/repo-wtbase
 branch:   wtbase
 base:     refs/heads/main (local)
 source:   /SBX/repo
 indexed:  true
-wt-base: 3461f36 seed
+repo-wtbase: 3461f36 seed
 main:    3461f36 seed

@@ -1,4 +1,4 @@
-worktree: /SBX/wt-fresh
+worktree: /SBX/repo-wt-fresh
 branch:   wt-fresh
 base:     refs/heads/main (local)
 source:   /SBX/repo

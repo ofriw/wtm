@@ -1,4 +1,4 @@
-worktree: /SBX/wt-from
+worktree: /SBX/repo-wt-from
 branch:   wt-from
 base:     refs/heads/main (local)
 source:   /SBX/wt-src

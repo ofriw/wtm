@@ -1,4 +1,4 @@
-worktree: /SBX/wt-pi2
+worktree: /SBX/repo-wt-pi2
 branch:   wt-pi2
 base:     refs/heads/main (local)
 source:   /SBX/repo

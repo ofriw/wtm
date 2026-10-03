@@ -1,4 +1,4 @@
-worktree: /SBX/wt-copy
+worktree: /SBX/repo-wt-copy
 branch:   wt-copy
 base:     refs/heads/main (local)
 source:   /SBX/repo

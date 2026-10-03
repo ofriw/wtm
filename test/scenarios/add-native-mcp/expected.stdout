@@ -1,5 +1,5 @@
-worktree: /SBX/repo-wt-pi
-branch:   wt-pi
+worktree: /SBX/repo-wt-native
+branch:   wt-native
 base:     refs/heads/main (local)
 source:   /SBX/repo
 indexed:  false

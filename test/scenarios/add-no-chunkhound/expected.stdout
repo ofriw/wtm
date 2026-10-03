@@ -1,0 +1,10 @@
+worktree: /SBX/repo-feature-wt-plain
+branch:   feature/wt-plain
+base:     refs/heads/main (local)
+source:   /SBX/repo
+indexed:  false
+worktree: /SBX/repo-feature-wt-stale
+branch:   feature/wt-stale
+base:     refs/heads/main (local)
+source:   /SBX/repo
+indexed:  false

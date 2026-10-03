@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // chunkhound.go — the only file that knows ChunkHound's workspace layout.
@@ -17,6 +20,22 @@ const (
 	chunkhoundDBDirName  = "db"
 	rootGuardName        = "chunks.db.root.json"
 )
+
+// indexTimeout bounds a hung indexer: the offline stub finishes in ms and a
+// real embed run in minutes, so exceeding this is a stuck child, not a slow one.
+// A var, not a const, so tests can shrink the bound without sleeping for real.
+var indexTimeout = 5 * time.Minute
+
+// errNoChunkHound means the chunkhound binary is not on PATH: ChunkHound is
+// optional, so the index step is skipped instead of failed.
+var errNoChunkHound = errors.New("chunkhound not on PATH")
+
+// hasChunkHoundWorkspace reports whether root carries a ChunkHound setup. The
+// existence paths come from the same constants as status.go's CONFIG/DB
+// columns, so the two views of "does this project use ChunkHound" cannot drift.
+func hasChunkHoundWorkspace(root string) bool {
+	return exists(filepath.Join(root, chunkhoundConfigFile)) || exists(chunkhoundDBPath(root))
+}
 
 func chunkhoundDBDir(root string) string {
 	return filepath.Join(root, chunkhoundDir, chunkhoundDBDirName)
@@ -93,9 +112,11 @@ func applyPatchedDB(p string, m, db map[string]json.RawMessage) error {
 // patchDatabasePath rewrites an absolute database.path located inside srcRoot
 // so the copied config addresses the new root's db. Relative paths already
 // resolve against the new root, and absolute paths outside srcRoot are
-// explicit user intent, so both stay verbatim.
-// Silent nil on non-object/non-absolute/unparseable database.path is deliberate:
-// explicit user intent and relative paths resolve without rewrite.
+// explicit user intent, so both stay verbatim. A missing database key, a
+// non-object database, or a non-string path is also left verbatim (absent or
+// user intent needs no rewrite). Only a present-but-unparseable config or
+// database object warns: it is treated as absent (no rewrite, no healthy
+// claim) rather than failing the run or passing silently.
 func patchDatabasePath(srcRoot, dstRoot string) error {
 	p := filepath.Join(dstRoot, chunkhoundConfigFile)
 	if !exists(p) {
@@ -103,10 +124,16 @@ func patchDatabasePath(srcRoot, dstRoot string) error {
 	}
 	var m map[string]json.RawMessage
 	if err := readJSON(p, &m); err != nil {
-		return err
+		warnf("%s is not valid JSON (%s); leaving unpatched", p, err)
+		return nil
+	}
+	raw, ok := m["database"]
+	if !ok {
+		return nil
 	}
 	var db map[string]json.RawMessage
-	if raw, ok := m["database"]; !ok || json.Unmarshal(raw, &db) != nil {
+	if json.Unmarshal(raw, &db) != nil {
+		warnf("%s has an unparseable database object; leaving unpatched", p)
 		return nil
 	}
 	if changed, err := rewriteDBPath(srcRoot, dstRoot, db); err != nil || !changed {
@@ -118,12 +145,26 @@ func patchDatabasePath(srcRoot, dstRoot string) error {
 // runIndex refreshes the copied db. PATH decides which chunkhound runs: tests
 // pin the version and inject --no-embeddings, production uses the real one.
 // chunkhound's progress goes to stderr so wtm's stdout stays machine-clean.
+// A binary missing from PATH reports errNoChunkHound so the caller can skip
+// indexing; every other failure is a real error and stays fatal.
 func runIndex(root string) error {
-	cmd := exec.Command("chunkhound", "index", root)
+	ctx, cancel := context.WithTimeout(context.Background(), indexTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "chunkhound", "index", root)
 	cmd.Dir = root
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	cmd.Env = append(os.Environ(), "CHUNKHOUND_NO_PROMPTS=1")
 	if err := cmd.Run(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return errNoChunkHound
+		}
+		// Go discards ctx.Err() when the killed child's Wait returns an ExitError,
+		// so the deadline is only visible here; otherwise the failure reads as
+		// "signal: killed", which looks like a crash rather than a bound. The
+		// deadline is the root cause, so it is what the chain wraps.
+		if ctx.Err() != nil {
+			return fmt.Errorf("chunkhound index %s: timed out after %s: %w", root, indexTimeout, ctx.Err())
+		}
 		return fmt.Errorf("chunkhound index %s: %w", root, err)
 	}
 	return nil

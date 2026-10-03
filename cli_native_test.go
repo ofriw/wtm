@@ -98,8 +98,8 @@ func TestNativeNoTerminalQueries(t *testing.T) {
 func TestNativeAddNoIndex(t *testing.T) {
 	sandbox(t)
 	repo := nativeRepo(t)
-	target := filepath.Join(filepath.Dir(repo), "wt-native")
-	out, errOut, rc := runWTM(t, repo, nil, "add", target, "--no-index", "--json")
+	target := canonical(filepath.Join(filepath.Dir(repo), "repo-wt-native"))
+	out, errOut, rc := runWTM(t, repo, nil, "add", "wt-native", "--no-index", "--json")
 	if rc != 0 {
 		t.Fatalf("add rc = %d, stderr = %s", rc, errOut)
 	}
@@ -107,7 +107,7 @@ func TestNativeAddNoIndex(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &res); err != nil {
 		t.Fatalf("add JSON invalid: %v\n%s", err, out)
 	}
-	if res.Indexed || res.Branch != "wt-native" || res.Path != canonical(target) {
+	if res.Indexed || res.Branch != "wt-native" || res.Path != target {
 		t.Fatalf("add result = %+v", res)
 	}
 	info, err := os.Stat(filepath.Join(target, ".git"))

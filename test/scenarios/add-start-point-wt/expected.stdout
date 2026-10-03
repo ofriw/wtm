@@ -1,0 +1,5 @@
+worktree: /SBX/repo-wt-child
+branch:   wt-child
+base:     refs/heads/base-branch (local)
+source:   /SBX/wt-base
+indexed:  false

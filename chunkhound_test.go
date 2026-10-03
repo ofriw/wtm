@@ -4,12 +4,39 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // chunkhound_test.go — Tier-1 contracts for chunkhound.go. runIndex shells out
-// to the real chunkhound binary and is deliberately never called here.
+// to the real chunkhound binary; apart from the timeout test below (which plants
+// a hung stub on PATH) it is deliberately never called here.
+
+func TestHasChunkHoundWorkspace(t *testing.T) {
+	t.Run("config only", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, chunkhoundConfigFile), "{}", 0o644)
+		if !hasChunkHoundWorkspace(dir) {
+			t.Fatal("config alone must count as a workspace")
+		}
+	})
+
+	t.Run("db only", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, chunkhoundDBPath(dir), "DB", 0o644)
+		if !hasChunkHoundWorkspace(dir) {
+			t.Fatal("db alone must count as a workspace")
+		}
+	})
+
+	t.Run("neither", func(t *testing.T) {
+		if hasChunkHoundWorkspace(t.TempDir()) {
+			t.Fatal("empty dir is not a workspace")
+		}
+	})
+}
 
 func TestRewriteRootGuard(t *testing.T) {
 	t.Run("rewrites canonical slash form and preserves unknown keys", func(t *testing.T) {
@@ -143,6 +170,17 @@ func TestPatchDatabasePath(t *testing.T) {
 		}
 	})
 
+	// Corrupt configs warn and stay verbatim: an unparseable file or database
+	// object is treated as absent (no rewrite), never a healthy patched claim.
+	t.Run("corrupt config or database object left verbatim", func(t *testing.T) {
+		if body := `{not json`; chRunPatch(t, srcRoot, dstRoot, body) != body {
+			t.Fatalf("corrupt config changed: %s", body)
+		}
+		if body := `{"database":[1,2]}`; chRunPatch(t, srcRoot, dstRoot, body) != body {
+			t.Fatalf("config with unparseable database object changed: %s", body)
+		}
+	})
+
 	t.Run("unknown keys preserved", func(t *testing.T) {
 		body := `{"database":{"path":` + chJSONString(t, inside) + `,"mode":"ro"},"extra":"keep"}`
 		got := chRunPatch(t, srcRoot, dstRoot, body)
@@ -223,5 +261,34 @@ func TestChunkhoundPaths(t *testing.T) {
 	}
 	if got, want := chunkhoundDBPath(root), filepath.Join(chunkhoundDBDir(root), "chunks.db"); got != want {
 		t.Fatalf("chunkhoundDBPath = %q, want %q", got, want)
+	}
+}
+
+// TestRunIndexTimeoutMessage pins that when the indexer outlives its bound, the
+// error must name the timeout. Go discards ctx.Err() once the killed process's
+// Wait returns, so without the explicit check the failure reads as
+// "signal: killed" and a bound masquerades as a crash.
+func TestRunIndexTimeoutMessage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX shell stub for a hung chunkhound")
+	}
+	dir := t.TempDir()
+	// An absolute /bin/sleep keeps the stub independent of PATH, which only has
+	// to resolve the chunkhound name.
+	writeFile(t, filepath.Join(dir, "chunkhound"), "#!/bin/sh\nexec /bin/sleep 30\n", 0o755)
+	t.Setenv("PATH", dir)
+	old := indexTimeout
+	indexTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { indexTimeout = old })
+
+	err := runIndex(t.TempDir())
+	if err == nil {
+		t.Fatal("runIndex succeeded, want a timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error %q must name the timeout", err)
+	}
+	if strings.Contains(err.Error(), "signal: killed") {
+		t.Fatalf("error %q leaked the raw kill status", err)
 	}
 }
