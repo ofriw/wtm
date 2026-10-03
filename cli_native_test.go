@@ -190,6 +190,35 @@ func TestNativeGCJSON(t *testing.T) {
 	}
 }
 
+// TestNativeDeleteSmoke pins that wtm delete removes the worktree and its local
+// branch via external binary execution.
+func TestNativeDeleteSmoke(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	target := filepath.Join(filepath.Dir(repo), "wt-del")
+	gitWorktreeAdd(t, repo, target, "feature/to-del", "main")
+	out, errOut, rc := runWTM(t, repo, nil, "delete", "feature/to-del", "--yes", "--json")
+	if rc != 0 {
+		t.Fatalf("delete --json rc = %d, stderr = %s", rc, errOut)
+	}
+	var res gcResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("delete JSON invalid: %v\n%s", err, out)
+	}
+	if len(res.Removed) != 1 || res.Removed[0] != canonical(target) {
+		t.Fatalf("Removed = %v, want [%s]", res.Removed, canonical(target))
+	}
+	if res.DeletedBranch != "feature/to-del" {
+		t.Fatalf("DeletedBranch = %q, want feature/to-del", res.DeletedBranch)
+	}
+	if exists(target) {
+		t.Fatalf("worktree %s survived delete", target)
+	}
+	if refExists(repo, "refs/heads/feature/to-del") {
+		t.Fatal("local branch feature/to-del survived delete")
+	}
+}
+
 // TestNativeGCKeepRemote pins that --keep-remote parses and that a branch
 // with no upstream still removes cleanly (decision 3). KeptRemote reports an
 // actual keep, so with no remote upstream it stays false.
