@@ -51,13 +51,6 @@ pruned
 sessions purged: 1
 ```
 
-## Migrating
-
-- `add` is branch-first: `wtm add <path> -b <branch>` → `wtm add <branch> [-p <dir>] [<start-point>]`. The first positional is always the branch; `-p`/`--path` is the only directory override.
-- `wtm add ../foo` fails fast: branch input goes through `normalizeBranch` (lowercase, hyphen-normalized, must be a valid git ref), so path-like input is rejected instead of creating a stray directory.
-- `status` gained an `UPSTREAM` column (`-` when untracked) and JSON keys `upstream`, `mcpNative`; `gc`/`delete --json` report `remoteDeleted`, `deletedBranch` (`delete` only), and `keptRemote`.
-- Default-branch guard over-protects by design: on remotes with no locally recorded HEAD, `gc`/`delete` refuse any branch matching the repo default name on any remote — a coincidental name match is kept rather than risk deleting a shared default.
-
 ## Commands
 
 ### `wtm add <branch> [<start-point>]`
