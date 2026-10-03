@@ -163,8 +163,7 @@ func TestDeleteDisclosesKeptBranchOnRemoteFailure(t *testing.T) {
 	repo, linked, origin := gcFixtureWithUpstream(t)
 	mustGit(t, origin, "config", "receive.denyDeletes", "true")
 	var err error
-	var errOut string
-	errOut = captureStderr(t, func() {
+	errOut := captureStderr(t, func() {
 		err = cmdDelete(&globals{root: repo, yes: true}, []string{"feat"})
 	})
 	if err == nil {
