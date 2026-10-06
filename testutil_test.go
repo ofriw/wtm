@@ -81,10 +81,20 @@ func gitWorktrees(t *testing.T, repo string) string {
 	return filepath.ToSlash(mustGit(t, repo, "worktree", "list", "--porcelain"))
 }
 
+// worktreeListed reports whether git's listing holds wt, and returns the
+// listing for failure messages. canonical(wt) resolves Windows 8.3 aliases
+// (RUNNER~1) and casing, so a caller may pass any spelling of an existing path;
+// git itself always emits the long canonical form.
+func worktreeListed(t *testing.T, repo, wt string) (bool, string) {
+	t.Helper()
+	list := gitWorktrees(t, repo)
+	return strings.Contains(list, filepath.ToSlash(canonical(wt))), list
+}
+
 // assertWorktreeListed asserts that git worktree list registers wt.
 func assertWorktreeListed(t *testing.T, repo, wt string) {
 	t.Helper()
-	if list := gitWorktrees(t, repo); !strings.Contains(list, filepath.ToSlash(wt)) {
+	if listed, list := worktreeListed(t, repo, wt); !listed {
 		t.Fatalf("git worktree list lost %s:\n%s", wt, list)
 	}
 }
@@ -92,7 +102,7 @@ func assertWorktreeListed(t *testing.T, repo, wt string) {
 // assertWorktreeNotListed asserts that git worktree list does not register wt.
 func assertWorktreeNotListed(t *testing.T, repo, wt string) {
 	t.Helper()
-	if list := gitWorktrees(t, repo); strings.Contains(list, filepath.ToSlash(wt)) {
+	if listed, list := worktreeListed(t, repo, wt); listed {
 		t.Fatalf("git worktree list still has %s:\n%s", wt, list)
 	}
 }
