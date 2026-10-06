@@ -169,7 +169,9 @@ func TestCorruptNativeMCPStatusConsistent(t *testing.T) {
 	writeFile(t, filepath.Join(repo, piNativeMCPFile), "{broken\n", 0o644)
 	for _, args := range [][]string{{"status"}, {"status", "--wide"}, {"status", "--json"}} {
 		out, errOut, rc := runWTM(t, repo, nil, args...)
-		if rc != 0 || !strings.Contains(errOut, piNativeMCPFile) || !strings.Contains(errOut, "treating as absent") {
+		// The warning renders an OS-native path (agents.go filepath.Join); normalize
+		// the haystack so the logical forward-slash constant still matches on Windows.
+		if rc != 0 || !strings.Contains(filepath.ToSlash(errOut), piNativeMCPFile) || !strings.Contains(errOut, "treating as absent") {
 			t.Fatalf("%v: rc=%d warning=%s", args, rc, errOut)
 		}
 		assertNativeMCPAbsent(t, args, out)
