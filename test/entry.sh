@@ -16,6 +16,7 @@ out="$HARNESS/tmp/out/$scenario"
 
 export HOME="$SBX/home"
 export PI_CODING_AGENT_DIR="$SBX/home/pi-agent"
+export CLAUDE_CONFIG_DIR="$SBX/home/claude"
 export PATH="/stub-bin:/usr/local/bin:/usr/bin:/bin"
 export TZ=UTC LC_ALL=C
 # Goldens opt into a width themselves (COLUMNS=80 wtm status); everything else
@@ -30,7 +31,7 @@ export GIT_COMMITTER_NAME=wtm GIT_COMMITTER_EMAIL=wtm@example.com
 export GIT_AUTHOR_DATE="$SEED_DATE" GIT_COMMITTER_DATE="$SEED_DATE"
 
 rm -rf "$SBX" "$out"
-mkdir -p "$PI_CODING_AGENT_DIR/sessions" "$out"
+mkdir -p "$PI_CODING_AGENT_DIR/sessions" "$CLAUDE_CONFIG_DIR/projects" "$out"
 
 cd "$SBX"
 if ! bash "$dir/setup.sh" >"$out/setup.log" 2>&1; then

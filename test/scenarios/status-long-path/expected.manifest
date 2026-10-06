@@ -13,6 +13,8 @@ d	755	-	/SBX/a/very/long/nested/checkout/path/that/keeps/going/and/going/repo-ch
 f	644	c3ffc0b677acec1e5673fb868722689e97d4ccfe764ed44c40ab9d73f6ea4040	/SBX/a/very/long/nested/checkout/path/that/keeps/going/and/going/repo-checkout/.git
 f	644	5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03	/SBX/a/very/long/nested/checkout/path/that/keeps/going/and/going/repo-checkout/README.md
 d	755	-	/SBX/home
+d	755	-	/SBX/home/claude
+d	755	-	/SBX/home/claude/projects
 d	755	-	/SBX/home/pi-agent
 d	755	-	/SBX/home/pi-agent/sessions
 d	755	-	/SBX/repo

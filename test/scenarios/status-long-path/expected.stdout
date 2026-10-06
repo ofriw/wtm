@@ -1,3 +1,3 @@
-PATH             BRANCH            UPSTREAM   LAST USED  STATUS  CONFIG  DB  MCP
-/SBX/repo        main              -         2020-01-01  UNUSED  -       -   -
-/SBX/a/…heckout  long-path-branch  -         2020-01-01  UNUSED  -       -   -
+PATH                BRANCH            UPSTREAM   LAST USED  STATUS  INTEGRATIONS
+/SBX/repo           main              -         2020-01-01  UNUSED  -
+/SBX/a/v…-checkout  long-path-branch  -         2020-01-01  UNUSED  -

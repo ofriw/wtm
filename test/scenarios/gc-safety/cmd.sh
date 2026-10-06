@@ -1,4 +1,4 @@
-# A fresh worktree is protected from --all even without a Pi session. Explicitly
+# A fresh worktree is protected from --all even without an agent session. Explicitly
 # selecting the active, dirty worktree is consent: it is removed. The picker
 # surfaces dirty state so the interactive choice is informed.
 wtm gc --all --yes </dev/null

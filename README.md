@@ -2,7 +2,7 @@
 
 **A new git worktree, ready to work in — in one command. And the worktrees you've abandoned, reclaimed safely.**
 
-`wtm` manages the worktree lifecycle of a [ChunkHound](https://chunkhound.ai) + [Pi.dev](https://pi.dev) software factory.
+`wtm` manages the worktree lifecycle of a [ChunkHound](https://chunkhound.ai) + [Pi.dev](https://pi.dev) + Claude Code software factory.
 
 [![ci](https://github.com/ofriw/wtm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ofriw/wtm/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)
@@ -14,7 +14,7 @@ A fresh `git worktree add` gives you checked-out files and nothing else — no a
 
 ## What it does
 
-- **`add`** — create a worktree that's ready to work in: Pi harness wired up, ChunkHound index seeded and refreshed.
+- **`add`** — create a worktree that's ready to work in: agent harness wired up, ChunkHound index seeded and refreshed.
 - **`status`** — see every worktree at a glance, and whether it's `ACTIVE` or `UNUSED`.
 - **`delete`** — reclaim a single worktree by branch, even if it's `ACTIVE`.
 - **`gc`** — reclaim the `UNUSED` ones, and nothing else, with every destructive step disclosed first.
@@ -43,10 +43,10 @@ source:   /Users/you/dev/app
 indexed:  true
 
 $ wtm                      # bare `wtm` is `wtm status`
-PATH                            BRANCH                UPSTREAM               LAST USED   STATUS  CONFIG  DB   MCP
-~/dev/app                       main                  origin/main            2026-09-30  ACTIVE  yes     yes  yes
-~/dev/app-feature-billing-fix   feature/billing-fix   origin/feature/...     2026-09-28  ACTIVE  yes     yes  yes
-~/dev/old-spike                 spike-search          -                      2026-03-02  UNUSED  yes     -    yes
+PATH                            BRANCH                UPSTREAM               LAST USED   STATUS  INTEGRATIONS
+~/dev/app                       main                  origin/main            2026-09-30  ACTIVE  chunk mcp claude
+~/dev/app-feature-billing-fix   feature/billing-fix   origin/feature/...     2026-09-28  ACTIVE  chunk mcp claude
+~/dev/old-spike                 spike-search          -                      2026-03-02  UNUSED  chunk~ mcp
 
 $ wtm gc --all --yes
 removed /Users/you/dev/old-spike
@@ -57,6 +57,10 @@ sessions purged: 1
 ## Commands
 
 `add` · `delete` · `gc` · `status` · `config` — run **`wtm --help`** for usage, flags, and exit codes.
+
+`INTEGRATIONS` lists what each worktree carries (`~` marks a partial setup, e.g. a ChunkHound config without a database). `wtm status --wide` expands one column per integration; `--json` reports the same states in an `integrations` map (`yes` / `partial` / `-` / `n/a`).
+
+**Breaking:** the `config`, `db`, `mcp`, and `mcpNative` boolean keys were removed. Update consumers to use the `integrations` string map instead (`wtm status --json | jq '.[].integrations'`). `mcp` keeps its old meaning — any recognized MCP config counts (`yes`); a harness's own config (`.pi/mcp.json`, `.claude/settings*.json`) also lights that harness's key. `chunk~` (and `partial` in `--wide`/JSON) is config-xor-database: exactly one side is present. `wtm` no longer reports which side — inspect the worktree to find out.
 
 Copied worktree configs may hold API keys. `wtm` never commits them — add them to `.gitignore` if they do.
 

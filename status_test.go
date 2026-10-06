@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -170,7 +171,7 @@ func TestWorktreeLastUsed(t *testing.T) {
 			repo := initRepo(t, "main")
 			gitTestCommit(t, repo)
 			want := tc.setup(t, repo, now)
-			idx := indexSessions(t)
+			idx := mustIndexSessions(t)
 			if got := worktreeLastUsed(repo, idx); !got.Equal(want) {
 				t.Fatalf("worktreeLastUsed = %v, want %v", got, want)
 			}
@@ -180,7 +181,7 @@ func TestWorktreeLastUsed(t *testing.T) {
 		repo := initRepo(t, "main")
 		gitTestCommit(t, repo)
 		mkSession(t, repo, "future", now.Add(48*time.Hour))
-		idx := indexSessions(t)
+		idx := mustIndexSessions(t)
 		got := worktreeLastUsed(repo, idx)
 		if got.After(time.Now()) {
 			t.Fatalf("future timestamp not clamped: %v", got)
@@ -204,7 +205,7 @@ func TestDiscover(t *testing.T) {
 	// Inventory: main has config+db, linked-a has mcp, linked-b has none.
 	writeFile(t, filepath.Join(repo, chunkhoundConfigFile), "{}", 0o644)
 	writeFile(t, chunkhoundDBPath(repo), "db", 0o644)
-	writeFile(t, filepath.Join(linkedA, piMCPFile), "{}", 0o644)
+	writeFile(t, filepath.Join(linkedA, projectMCPFile), "{}", 0o644)
 	mkSession(t, repo, "main-s", now.Add(-3*time.Hour))
 	mkSession(t, linkedA, "a-s", now.Add(-time.Hour))
 	mkSession(t, linkedB, "b-s", now.Add(-2*time.Hour))
@@ -215,9 +216,9 @@ func TestDiscover(t *testing.T) {
 	}
 	setMtime(t, filepath.Join(repo, chunkhoundConfigFile), now.Add(-10*time.Hour))
 	setMtime(t, chunkhoundDBPath(repo), now.Add(-10*time.Hour))
-	setMtime(t, filepath.Join(linkedA, piMCPFile), now.Add(-10*time.Hour))
+	setMtime(t, filepath.Join(linkedA, projectMCPFile), now.Add(-10*time.Hour))
 
-	wts, err := discover(repo, nil)
+	wts, _, err := discover(repo, nil, false)
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
@@ -233,14 +234,14 @@ func TestDiscover(t *testing.T) {
 	if !wts[0].Main || wts[1].Main || wts[2].Main {
 		t.Fatalf("Main flag = %v/%v/%v, want true/false/false", wts[0].Main, wts[1].Main, wts[2].Main)
 	}
-	if !wts[0].Config || !wts[0].DB || wts[0].MCP {
-		t.Fatalf("main inventory = config:%v db:%v mcp:%v", wts[0].Config, wts[0].DB, wts[0].MCP)
+	if wts[0].Caps["chunkhound"] != capPresent || wts[0].Caps["mcp"] != capAbsent {
+		t.Fatalf("main inventory = %v", wts[0].Caps)
 	}
-	if !wts[1].MCP || wts[1].Config || wts[1].DB {
-		t.Fatalf("linked-a inventory = config:%v db:%v mcp:%v", wts[1].Config, wts[1].DB, wts[1].MCP)
+	if wts[1].Caps["mcp"] != capPresent || wts[1].Caps["chunkhound"] != capAbsent {
+		t.Fatalf("linked-a inventory = %v", wts[1].Caps)
 	}
-	if wts[2].Config || wts[2].DB || wts[2].MCP {
-		t.Fatalf("linked-b must have empty inventory: %+v", wts[2])
+	if wts[2].Caps["chunkhound"] != capAbsent || wts[2].Caps["mcp"] != capAbsent {
+		t.Fatalf("linked-b must have empty inventory: %v", wts[2].Caps)
 	}
 }
 
@@ -259,7 +260,7 @@ func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 
 	events := make(chan progressEvent, 64)
 	p := &progress{ctx: context.Background(), events: events}
-	if _, err := discover(repo, p); err != nil {
+	if _, _, err := discover(repo, p, false); err != nil {
 		t.Fatalf("discover must degrade on a bad upstream query, not fail: %v", err)
 	}
 	close(events)
@@ -274,7 +275,7 @@ func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 	}
 
 	stderr := captureStderr(t, func() {
-		if _, err := discover(repo, nil); err != nil {
+		if _, _, err := discover(repo, nil, false); err != nil {
 			t.Fatalf("discover(nil progress): %v", err)
 		}
 	})
@@ -283,18 +284,36 @@ func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 	}
 }
 
-// TestBuildWorktreeNativeMCP proves the MCP signal keys off the shared
-// piMCPFiles SSOT, not just the adapter's .mcp.json.
-func TestBuildWorktreeNativeMCP(t *testing.T) {
-	for _, rel := range append([]string{""}, piMCPFiles()...) {
+// TestBuildWorktreeMCPFiles proves each recognized MCP config lights the
+// mcp integration equally, plus the harness capability that owns it, keyed off
+// mcpConfigFiles as the SSOT. Pinning the exact light-up pairs catches a swap
+// that an "either capability" check would miss.
+func TestBuildWorktreeMCPFiles(t *testing.T) {
+	empty := buildWorktree(gworktree{Path: t.TempDir(), Main: true}, sessionIndex{}, nil, nil)
+	for _, c := range capabilities() {
+		if empty.Caps[c.id] != capAbsent {
+			t.Fatalf("empty root: %s = %v, want absent", c.id, empty.Caps[c.id])
+		}
+	}
+	// Every MCP config lights mcp; it also lights the harness that reads it.
+	owners := map[string][]string{projectMCPFile: {"mcp"}, piNativeMCPFile: {"mcp", "pi"}}
+	for _, rel := range mcpConfigFiles() {
 		t.Run(rel, func(t *testing.T) {
-			root := t.TempDir()
-			if rel != "" {
-				writeFile(t, filepath.Join(root, rel), "{}", 0o644)
+			want, ok := owners[rel]
+			if !ok {
+				t.Fatalf("no capability light-up pinned for %s", rel)
 			}
+			root := t.TempDir()
+			writeFile(t, filepath.Join(root, rel), "{}", 0o644)
 			w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil)
-			if w.MCP != (rel != "") || w.MCPNative != (rel == piNativeMCPFile) {
-				t.Fatalf("%s: MCP = %v, MCPNative = %v", rel, w.MCP, w.MCPNative)
+			for _, c := range []string{"mcp", "pi"} {
+				wantState := capAbsent
+				if slices.Contains(want, c) {
+					wantState = capPresent
+				}
+				if w.Caps[c] != wantState {
+					t.Fatalf("%s: %s = %v, want %v", rel, c, w.Caps[c], wantState)
+				}
 			}
 		})
 	}
@@ -333,32 +352,22 @@ func TestPrintTable(t *testing.T) {
 // policy is derived from the same registry: a rename or a new rank cannot pass
 // without updating this contract.
 func TestStatusHeadersSSOT(t *testing.T) {
-	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "STATUS", "CONFIG", "DB", "MCP"}
-	if !slices.Equal(statusTableHeaders, want) {
-		t.Fatalf("statusTableHeaders = %v, want %v", statusTableHeaders, want)
+	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "STATUS", "INTEGRATIONS"}
+	if !slices.Equal(columnHeaders(statusColumns), want) {
+		t.Fatalf("status headers = %v, want %v", columnHeaders(statusColumns), want)
 	}
-	for _, name := range shrinkPriority {
-		if !slices.Contains(want, name) {
-			t.Errorf("shrink column %q is not a status header; shrink policy leaked from another grid", name)
-		}
-	}
-	// The derived elision order is a contract, not an implementation detail.
-	wantShrink := []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED"}
-	if !slices.Equal(shrinkPriority, wantShrink) {
-		t.Errorf("shrinkPriority = %v, want %v", shrinkPriority, wantShrink)
-	}
-	for _, c := range allColumns {
-		if c.shrinkRank == 0 {
-			continue
-		}
-		if shrinkFloor[c.header] != c.floor {
-			t.Errorf("column %q floor = %d, want the registered %d", c.header, shrinkFloor[c.header], c.floor)
-		}
+	// The elision order production derives for this table is a contract, not an
+	// implementation detail.
+	registry := columnRegistry()
+	priority := dynamicShrinkPriority(want, registry)
+	wantShrink := []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED", "INTEGRATIONS"}
+	if !slices.Equal(priority, wantShrink) {
+		t.Errorf("shrink priority = %v, want %v", priority, wantShrink)
 	}
 	// Every column a grid uses must be registered in allColumns, or it silently
 	// escapes the shared shrink policy.
 	registered := map[string]bool{}
-	for _, c := range allColumns {
+	for _, c := range allColumns() {
 		registered[c.header] = true
 	}
 	for _, cols := range [][]worktreeColumn{statusColumns, gcPickerColumns} {
@@ -366,6 +375,48 @@ func TestStatusHeadersSSOT(t *testing.T) {
 			if !registered[c.header] {
 				t.Errorf("column %q is used by a grid but missing from allColumns", c.header)
 			}
+		}
+	}
+}
+
+// TestWideColumnsShareCorePrefix pins that --wide reuses the shared core
+// prefix, so a new core column can never silently vanish from the wide view.
+func TestWideColumnsShareCorePrefix(t *testing.T) {
+	want := columnHeaders(coreColumns)
+	wide := columnHeaders(statusColumnsFor(true))
+	if len(wide) < len(want) || !slices.Equal(wide[:len(want)], want) {
+		t.Fatalf("--wide core prefix = %v, want %v", wide, want)
+	}
+}
+
+// TestWideColumnsShrinkable pins that --wide capability columns participate in
+// the shrink policy: they are in the column registry, have a shrink rank, and
+// appear in the dynamic shrink priority alongside core columns.
+func TestWideColumnsShrinkable(t *testing.T) {
+	wideCols := statusColumnsFor(true)
+	registry := columnRegistry()
+	for _, c := range wideCols {
+		if _, ok := registry[c.header]; !ok {
+			t.Errorf("--wide column %q is not in columnRegistry", c.header)
+		}
+	}
+	// Capability columns must have a shrink rank so they elide in narrow
+	// terminals instead of overflowing the budget.
+	for _, c := range capabilities() {
+		col := c.column()
+		if col.shrinkRank == 0 {
+			t.Errorf("capability column %q has shrinkRank 0 (pinned); want > 0", col.header)
+		}
+		if _, ok := registry[col.header]; !ok {
+			t.Errorf("capability column %q is not in columnRegistry", col.header)
+		}
+	}
+	// Dynamic shrink priority must include capability columns when present.
+	headers := columnHeaders(wideCols)
+	priority := dynamicShrinkPriority(headers, registry)
+	for _, c := range capabilities() {
+		if !slices.Contains(priority, strings.ToUpper(c.id)) {
+			t.Errorf("capability column %q not in dynamic shrink priority", strings.ToUpper(c.id))
 		}
 	}
 }
@@ -393,9 +444,9 @@ func TestPrintStatusTableFits(t *testing.T) {
 		Path:   filepath.Join(home, "very", "long", "checkout", "that", "never", "ends", "repo"),
 		Branch: "feature/a-rather-long-branch-name", LastUsed: time.Now(),
 		Upstream: upstream{Short: "origin/feature/a-rather-long-branch-name", Remote: "origin", Ref: "refs/heads/x"},
-		Config:   true, DB: true, MCP: true,
+		Caps:     map[string]capState{"chunkhound": capPresent, "mcp": capPresent},
 	}}
-	out := captureStdout(t, func() { printStatusTable(wts, time.Now(), 10*time.Hour, colorAuto) })
+	out := captureStdout(t, func() { printStatusTable(statusColumns, wts, time.Now(), 10*time.Hour, colorNever) })
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		if w := dispWidth(line); w > 80 {
 			t.Errorf("line exceeds 80 cells: %d\n%q", w, line)
@@ -417,8 +468,8 @@ func TestPrintStatusJSON(t *testing.T) {
 	ttl := 10 * time.Hour
 	last := time.Date(2021, 2, 3, 4, 5, 6, 0, time.UTC)
 	wts := []worktree{
-		{Path: "/detached", LastUsed: last, Config: true, MCP: true, MCPNative: true},
-		{Path: "/main", Branch: "main", Main: true, DB: true, Upstream: upstream{Short: "origin/main", Remote: "origin", Ref: "refs/heads/main"}},
+		{Path: "/detached", LastUsed: last, Caps: map[string]capState{"chunkhound": capPartial, "mcp": capPresent, "pi": capPresent, "claude": capPresent}},
+		{Path: "/main", Branch: "main", Main: true, Caps: map[string]capState{"chunkhound": capPartial}, Upstream: upstream{Short: "origin/main", Remote: "origin", Ref: "refs/heads/main"}},
 	}
 	out := captureStdout(t, func() {
 		if err := printStatusJSON(wts, now, ttl); err != nil {
@@ -447,23 +498,54 @@ func TestPrintStatusJSON(t *testing.T) {
 	if got[1].LastUsed != nil {
 		t.Fatalf("zero LastUsed = %v, want nil", *got[1].LastUsed)
 	}
-	if !got[1].Main || !got[1].DB || !got[0].Config || !got[0].MCP || !got[0].MCPNative || got[1].MCPNative {
-		t.Fatalf("flags lost in JSON: %+v", got)
+	if !got[1].Main {
+		t.Fatalf("Main lost in JSON: %+v", got)
 	}
 	if got[1].Upstream != "origin/main" || got[0].Upstream != "" {
 		t.Fatalf("upstream lost in JSON: %+v", got)
 	}
-	// Field names are the script contract: decode to maps so a rename fails
-	// fast even when the struct tags follow.
+	// The integrations contract: present->yes, partial->partial, an applicable
+	// absence->-. Expectation is derived from capabilities() so registering a
+	// new integration needs no test edit; the pinned state->word mapping is the
+	// contract. wts[0] carries mcp/pi/claude, so they are applicable (not n/a)
+	// and read "-" for wts[1].
+	integrations := func(state map[string]capState) map[string]string {
+		want := make(map[string]string, len(capabilities()))
+		for _, c := range capabilities() {
+			want[c.id] = "-"
+			switch state[c.id] {
+			case capPresent:
+				want[c.id] = "yes"
+			case capPartial:
+				want[c.id] = "partial"
+			}
+		}
+		return want
+	}
+	wantDetached := integrations(wts[0].Caps)
+	wantMain := integrations(wts[1].Caps)
+	if !maps.Equal(got[0].Integrations, wantDetached) {
+		t.Fatalf("detached integrations = %v, want %v", got[0].Integrations, wantDetached)
+	}
+	if !maps.Equal(got[1].Integrations, wantMain) {
+		t.Fatalf("main integrations = %v, want %v", got[1].Integrations, wantMain)
+	}
+	// Field names are the script contract: decode to maps and assert the exact
+	// key set, which also proves the removed config/db/mcp/mcpNative keys stay
+	// gone even when the struct tags follow.
 	var raw []map[string]any
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		t.Fatalf("re-decode JSON: %v", err)
 	}
-	for _, key := range []string{"upstream", "mcpNative"} {
-		for i, m := range raw {
-			if _, ok := m[key]; !ok {
-				t.Fatalf("row %d missing key %q: %v", i, key, m)
-			}
+	wantKeys := []string{"branch", "integrations", "lastUsed", "main", "path", "status", "upstream"}
+	for i, m := range raw {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		if !slices.Equal(keys, wantKeys) {
+			t.Fatalf("row %d keys = %v, want %v", i, keys, wantKeys)
 		}
 	}
 }
@@ -491,5 +573,53 @@ func TestParseSubRejectsInvalidGlobalsAfterSubcommand(t *testing.T) {
 		if err := cmdStatus(&globals{root: t.TempDir()}, args); !isUsage(err) {
 			t.Errorf("cmdStatus(%v) = %v, want usageError", args, err)
 		}
+	}
+}
+
+// TestGCPickerExcludesIntegrations pins that the gc picker never shows the
+// INTEGRATIONS column: the picker builds columnContext without active, so the
+// grouped cell would misreport every worktree as "-".
+func TestGCPickerExcludesIntegrations(t *testing.T) {
+	for _, c := range gcPickerColumns {
+		if c.header == colIntegrations.header {
+			t.Fatalf("gcPickerColumns must not contain %q", colIntegrations.header)
+		}
+	}
+}
+
+// TestWideColumnOrder pins the --wide column order: project integrations first
+// (chunkhound, mcp), then agents in agents() order (pi, claude).
+func TestWideColumnOrder(t *testing.T) {
+	wide := statusColumnsFor(true)
+	var headers []string
+	for _, c := range wide {
+		headers = append(headers, c.header)
+	}
+	core := columnHeaders(coreColumns)
+	if len(headers) < len(core) || !slices.Equal(headers[:len(core)], core) {
+		t.Fatalf("--wide core prefix = %v, want %v", headers[:len(core)], core)
+	}
+	var caps []string
+	for _, c := range capabilities() {
+		caps = append(caps, strings.ToUpper(c.id))
+	}
+	for i, want := range caps {
+		if headers[len(core)+i] != want {
+			t.Fatalf("--wide cap[%d] = %q, want %q", i, headers[len(core)+i], want)
+		}
+	}
+}
+
+// TestStatusColumnsForNoAliasing pins that the default schema is never returned
+// by reference: callers must not be able to mutate the global statusColumns.
+func TestStatusColumnsForNoAliasing(t *testing.T) {
+	got := statusColumnsFor(false)
+	got[0] = worktreeColumn{header: "PAD"}
+	fresh := columnHeaders(statusColumns)
+	if !slices.Equal(fresh, columnHeaders(statusColumnsFor(false))) {
+		t.Fatalf("statusColumns mutated: %v", fresh)
+	}
+	if fresh[0] == "PAD" {
+		t.Fatalf("fresh schema carries mutation: %v", fresh)
 	}
 }

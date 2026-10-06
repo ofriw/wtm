@@ -1,0 +1,5 @@
+worktree: /SBX/repo-wt-claude
+branch:   wt-claude
+base:     refs/heads/main (local)
+source:   /SBX/repo
+indexed:  true

@@ -1,6 +1,6 @@
-PATH       BRANCH  UPSTREAM     LAST USED  STATUS  CONFIG  DB  MCP
-/SBX/repo  main    -           2020-01-01  UNUSED  -       -   -
-/SBX/wt1   wt1     origin/wt1  2020-01-01  UNUSED  -       -   -
+PATH       BRANCH  UPSTREAM     LAST USED  STATUS  INTEGRATIONS
+/SBX/repo  main    -           2020-01-01  UNUSED  -
+/SBX/wt1   wt1     origin/wt1  2020-01-01  UNUSED  -
 [
   {
     "path": "/SBX/repo",
@@ -9,10 +9,12 @@ PATH       BRANCH  UPSTREAM     LAST USED  STATUS  CONFIG  DB  MCP
     "main": true,
     "lastUsed": "2020-01-01T00:00:00Z",
     "status": "UNUSED",
-    "config": false,
-    "db": false,
-    "mcp": false,
-    "mcpNative": false
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    }
   },
   {
     "path": "/SBX/wt1",
@@ -21,9 +23,11 @@ PATH       BRANCH  UPSTREAM     LAST USED  STATUS  CONFIG  DB  MCP
     "main": false,
     "lastUsed": "2020-01-01T00:00:00Z",
     "status": "UNUSED",
-    "config": false,
-    "db": false,
-    "mcp": false,
-    "mcpNative": false
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    }
   }
 ]

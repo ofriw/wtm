@@ -296,7 +296,7 @@ func gcRunRemove(t *testing.T, g *globals, repo string, selected []worktree, kee
 	var res gcResult
 	var runErr error
 	out := captureStdout(t, func() {
-		res, runErr = gcRemove(repo, selected, planRemotes(selected, nil, keepRemote, repo), keepSessions, nil)
+		res, runErr = gcRemove(repo, selected, planRemotes(selected, nil, keepRemote, repo), keepSessions, mustIndexSessions(t), nil)
 		if rerr := gcReport(g, res); rerr != nil {
 			runErr = rerr
 		}
@@ -317,7 +317,7 @@ func gcRunRemoveNotices(t *testing.T, repo string, selected []worktree, keepSess
 	t.Helper()
 	events := make(chan progressEvent, 64)
 	p := &progress{ctx: context.Background(), events: events}
-	res, err := gcRemove(repo, selected, planRemotes(selected, nil, keepRemote, repo), keepSessions, p)
+	res, err := gcRemove(repo, selected, planRemotes(selected, nil, keepRemote, repo), keepSessions, mustIndexSessions(t), p)
 	close(events)
 	var notices []string
 	for ev := range events {
@@ -606,7 +606,7 @@ func gcFixtureWithUpstream(t *testing.T) (repo, linked, origin string) {
 // discovered returns the one discovered worktree at path, with its upstream.
 func discovered(t *testing.T, repo, path string) worktree {
 	t.Helper()
-	wts, err := discover(repo, nil)
+	wts, _, err := discover(repo, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -993,7 +993,7 @@ func TestGCRemoteSurvivesWhenTrackedByActiveWorktree(t *testing.T) {
 
 	events := make(chan progressEvent, 64)
 	p := &progress{ctx: context.Background(), events: events}
-	res, err := gcRemove(repo, []worktree{w1}, planRemotes([]worktree{w1}, []worktree{w2}, false, repo), false, p)
+	res, err := gcRemove(repo, []worktree{w1}, planRemotes([]worktree{w1}, []worktree{w2}, false, repo), false, mustIndexSessions(t), p)
 	close(events)
 	var notices []string
 	for ev := range events {
@@ -1036,7 +1036,7 @@ func TestGCRemoteSharedVetoedUpstreamWarnsOnce(t *testing.T) {
 
 	events := make(chan progressEvent, 64)
 	p := &progress{ctx: context.Background(), events: events}
-	res, err := gcRemove(repo, []worktree{w1, w2}, planRemotes([]worktree{w1, w2}, []worktree{w3}, false, repo), false, p)
+	res, err := gcRemove(repo, []worktree{w1, w2}, planRemotes([]worktree{w1, w2}, []worktree{w3}, false, repo), false, mustIndexSessions(t), p)
 	close(events)
 	var notices []string
 	for ev := range events {

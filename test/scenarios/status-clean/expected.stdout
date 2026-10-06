@@ -1,5 +1,5 @@
-PATH       BRANCH  UPSTREAM   LAST USED  STATUS  CONFIG  DB   MCP
-/SBX/repo  main    -         2020-01-01  ACTIVE  -       yes  yes
+PATH       BRANCH  UPSTREAM   LAST USED  STATUS  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  ACTIVE  chunk~ mcp
 [
   {
     "path": "/SBX/repo",
@@ -8,9 +8,11 @@ PATH       BRANCH  UPSTREAM   LAST USED  STATUS  CONFIG  DB   MCP
     "main": true,
     "lastUsed": "2020-01-01T00:00:00Z",
     "status": "ACTIVE",
-    "config": false,
-    "db": true,
-    "mcp": true,
-    "mcpNative": false
+    "integrations": {
+      "chunkhound": "partial",
+      "claude": "n/a",
+      "mcp": "yes",
+      "pi": "n/a"
+    }
   }
 ]

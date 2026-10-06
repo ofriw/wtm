@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// gc.go — remove UNUSED worktrees and their Pi session history.
+// gc.go — remove UNUSED worktrees and their agent session history.
 
 type gcOptions struct {
 	all          bool
@@ -157,7 +157,7 @@ func parseGCFlags(g *globals, args []string) (gcOptions, error) {
 	fs := subFlags("gc", g)
 	var o gcOptions
 	fs.BoolVar(&o.all, "all", false, "remove all UNUSED worktrees")
-	fs.BoolVar(&o.keepSessions, "keep-sessions", false, "keep Pi session history")
+	fs.BoolVar(&o.keepSessions, "keep-sessions", false, "keep agent session history")
 	fs.BoolVar(&o.keepRemote, "keep-remote", false, "keep remote upstream branches")
 	fs.Func("path", "worktree to remove (repeatable)", func(v string) error {
 		o.paths = append(o.paths, v)
@@ -235,18 +235,18 @@ func cmdGC(g *globals, args []string) error {
 	if err != nil {
 		return err
 	}
-	root, ttl, wts, err := loadWorkspace(g, true)
+	ws, err := loadWorkspace(g, true, true)
 	if err != nil {
 		return err
 	}
-	selected, plan, err := selectAndConfirmGC(g, wts, o, ttl, root)
+	selected, plan, err := selectAndConfirmGC(g, ws.wts, o, ws.ttl, ws.root)
 	if err != nil {
 		return handleGCAbort(g, o, err)
 	}
 	if len(selected) == 0 {
 		return gcReport(g, abortGCResult(o))
 	}
-	return runGCRemove(g, root, selected, plan, o)
+	return runGCRemove(g, ws.root, selected, plan, o, ws.idx)
 }
 
 // reportResult dispatches the report if removals, remote deletes, branch
@@ -267,11 +267,11 @@ func reportResult(g *globals, res gcResult, runErr error) error {
 // runGCRemove removes the selected worktrees under the renderer, then prints the
 // report only after the renderer exits: a raw stdout write would land mid-frame
 // and corrupt the inline display.
-func runGCRemove(g *globals, root string, selected []worktree, plan remotePlan, o gcOptions) error {
+func runGCRemove(g *globals, root string, selected []worktree, plan remotePlan, o gcOptions, idx sessionIndex) error {
 	var res gcResult
 	runErr := withProgress(g, true, func(p *progress) error {
 		var rerr error
-		res, rerr = gcRemove(root, selected, plan, o.keepSessions, p)
+		res, rerr = gcRemove(root, selected, plan, o.keepSessions, idx, p)
 		return rerr
 	})
 	return reportResult(g, res, runErr)
@@ -319,7 +319,7 @@ func gcPickerDescription(keepRemote bool, header string) string {
 
 // gcPickerColumns is the picker's projection of the shared worktree grid.
 // STATUS is dropped because every candidate is UNUSED (said once in the title),
-// and UNCOMMITTED replaces the inventory columns: it is the only field whose
+// and UNCOMMITTED replaces the integration columns: it is the only field whose
 // value changes the consequence of the choice.
 var gcPickerColumns = []worktreeColumn{colPath, colBranch, colLastUsed, colUncommitted, colUpstream}
 
@@ -436,7 +436,7 @@ func removeOneWorktree(root string, w worktree, plan remotePlan, keepSessions bo
 }
 
 // purgeWorktree cleans up after a successful removal: the remote upstream
-// (unless kept), then the Pi session history (unless kept).
+// (unless kept), then the agent session history (unless kept).
 func purgeWorktree(root string, w worktree, plan remotePlan, keepSessions bool, res *gcResult, idx sessionIndex, p *progress, outcomes map[string]error) {
 	// Remote delete runs only after the local worktree is gone, so a failed
 	// local removal never orphans a still-needed remote branch.
@@ -481,7 +481,7 @@ func purgeRemoteWorktree(root string, w worktree, plan remotePlan, res *gcResult
 }
 
 func purgeWorktreeSessions(path string, res *gcResult, idx sessionIndex) {
-	n, err := purgePiSessions(path, idx)
+	n, err := purgeSessions(path, idx)
 	res.SessionsPurged += n
 	if err != nil {
 		res.Failed = append(res.Failed, gcFailure{Path: path, Error: "purge sessions: " + err.Error()})
@@ -587,14 +587,10 @@ func worktreeRemoveRecovering(root, path string) error {
 	return worktreeRemove(root, path)
 }
 
-func gcRemove(root string, selected []worktree, plan remotePlan, keepSessions bool, p *progress) (gcResult, error) {
+// gcRemove consumes the session index built by discovery: one walk per command,
+// never one per worktree plus a second pass for reclamation.
+func gcRemove(root string, selected []worktree, plan remotePlan, keepSessions bool, idx sessionIndex, p *progress) (gcResult, error) {
 	res := emptyGCResult(keepSessions, plan.keptRemote())
-	// One session walk for all removals instead of one per worktree.
-	p.phase("indexing sessions", 0)
-	idx, err := indexPiSessions()
-	if err != nil {
-		return res, fmt.Errorf("index pi sessions: %w", err)
-	}
 	removeSelected(root, selected, plan, keepSessions, &res, idx, p)
 	pruneWorktrees(&res, root, p)
 	if len(res.Failed) > 0 {
