@@ -195,17 +195,20 @@ func isIgnored(dir, rel string) bool {
 // refs/remotes/origin/main; origin is preferred when several exist. Only local
 // refs are inspected — `git remote show` would hit the network.
 func remoteDefaultRef(dir string) string {
-	out, err := git(dir, "for-each-ref", "--format=%(refname:short) %(symref)", "refs/remotes/*/HEAD")
+	// Full %(refname): %(refname:short) shortens refs/remotes/<r>/HEAD to the
+	// bare remote name (git ref_rev_parse_rules ends with "refs/remotes/%.*s/HEAD"),
+	// which would hide which remote a HEAD belongs to and break the origin check.
+	out, err := git(dir, "for-each-ref", "--format=%(refname) %(symref)", "refs/remotes/*/HEAD")
 	if err != nil || out == "" {
 		return ""
 	}
 	best := ""
 	for _, line := range strings.Split(out, "\n") {
-		short, sym, ok := strings.Cut(line, " ")
+		ref, sym, ok := strings.Cut(line, " ")
 		if !ok || sym == "" {
 			continue
 		}
-		if short == "origin/HEAD" {
+		if ref == "refs/remotes/origin/HEAD" {
 			return sym
 		}
 		if best == "" {
