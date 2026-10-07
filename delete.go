@@ -160,7 +160,7 @@ func finishLocalDelete(root, branch string, res *gcResult, runErr error) error {
 		warnf("kept local branch %s due to deletion failure; fix the cause and retry `delete %s --yes`", branch, branch)
 		return runErr
 	}
-	if derr := deleteLocalBranch(root, branch); derr != nil {
+	if derr := branchDelete(root, branch); derr != nil {
 		res.Failed = append(res.Failed, gcFailure{Path: root, Error: "delete local branch: " + derr.Error()})
 		return fmt.Errorf("delete local branch %s: %w", branch, derr)
 	}
