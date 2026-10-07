@@ -16,7 +16,7 @@ const usage = `wtm — worktree manager
 
 usage:
   wtm [options]                    status of all worktrees (default command)
-  wtm add <branch> [<start-point>] [-p|--path <dir>] [--no-index] [--from <src>]
+  wtm add <branch> [<start-point>] [-p|--path <dir>] [--no-index] [--from <src>] [--temp] [--ttl <dur>]
   wtm delete <branch> [--keep-remote] [--keep-sessions] [--yes]
   wtm gc [--all | --path <p> ...] [--keep-sessions] [--keep-remote]
   wtm config [set unusedTTL <Nd>]

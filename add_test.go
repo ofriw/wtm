@@ -418,3 +418,81 @@ func TestAddDerivedTargetRefusesNesting(t *testing.T) {
 		t.Fatalf("derived target under a nested worktree = %v, want nesting refusal", err)
 	}
 }
+
+// TestAddTTLImpliesTemp pins that --ttl alone opts into a temp worktree: a TTL
+// without --temp would otherwise be silently ignored.
+func TestAddTTLImpliesTemp(t *testing.T) {
+	sandbox(t)
+	repo := addTestRepo(t)
+	res := addResultOf(t, &globals{root: repo}, "wt-ttl", "--no-index", "--ttl", "30m")
+	if !res.Temp || res.Branch != "tmp/wt-ttl" || res.TTL != "30m0s" {
+		t.Fatalf("--ttl add = %+v, want tmp/wt-ttl with 30m", res)
+	}
+	if res.ExpiresAt == nil {
+		t.Fatal("--ttl implies temp and must report an expiry")
+	}
+}
+
+// TestTempBranchPrefix pins the tmp/ namespace and its idempotence: an
+// already-temp name must not double-prefix.
+func TestTempBranchPrefix(t *testing.T) {
+	cases := map[string]string{
+		"x":         "tmp/x",
+		"tmp/x":     "tmp/x",
+		"Tmp/X":     "tmp/x",
+		"tmp/tmp/x": "tmp/tmp/x",
+	}
+	for in, want := range cases {
+		got, err := tempBranch(in)
+		if err != nil || got != want {
+			t.Fatalf("tempBranch(%q) = (%q,%v), want %q", in, got, err, want)
+		}
+	}
+}
+
+func TestAddTempBranchIdempotent(t *testing.T) {
+	sandbox(t)
+	repo := addTestRepo(t)
+	res := addResultOf(t, &globals{root: repo}, "tmp/already", "--temp", "--no-index")
+	if res.Branch != "tmp/already" {
+		t.Fatalf("branch = %q, want tmp/already (no double prefix)", res.Branch)
+	}
+}
+
+// TestAddTempWritesRecord pins the store write: a successful temp add records
+// the canonical checkout path and the default window, last, after seeding.
+func TestAddTempWritesRecord(t *testing.T) {
+	sandbox(t)
+	repo := addTestRepo(t)
+	target := addTarget(repo, "tmp/wt-rec")
+	res := addResultOf(t, &globals{root: repo}, "wt-rec", "--temp", "--no-index")
+	if !res.Temp || res.Path != target {
+		t.Fatalf("add = %+v, want temp at %s", res, target)
+	}
+	rec, ok := mustReadTempStore(t)[target]
+	if !ok {
+		t.Fatalf("no temp record for %s", target)
+	}
+	if rec.Branch != "tmp/wt-rec" || rec.TTL != defaultTempTTL.String() {
+		t.Fatalf("record = %+v, want tmp/wt-rec with %s", rec, defaultTempTTL)
+	}
+	if rec.CreatedAt.IsZero() {
+		t.Fatal("record createdAt must be set")
+	}
+}
+
+// TestAddTempFailedSeedLeavesNoRecord pins the write-last ordering: a seed that
+// fails must leave a durable (permanent) checkout, never a tracked temp.
+func TestAddTempFailedSeedLeavesNoRecord(t *testing.T) {
+	sandbox(t)
+	repo := addTestRepo(t)
+	writeFile(t, filepath.Join(chunkhoundDBDir(repo), rootGuardName), "{not json", 0o644)
+	target := addTarget(repo, "tmp/wt-badtemp")
+	err := addWorktree(&globals{root: repo}, "wt-badtemp", addOptions{temp: true, ttl: "30m", noIndex: true})
+	if err == nil {
+		t.Fatal("malformed root guard must fail the temp add")
+	}
+	if _, ok := mustReadTempStore(t)[target]; ok {
+		t.Fatalf("failed seed must not record a temp for %s", target)
+	}
+}

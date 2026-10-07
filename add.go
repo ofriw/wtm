@@ -2,10 +2,12 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // add.go — create a worktree, then seed it with the source's Pi harness and
@@ -16,23 +18,25 @@ type addOptions struct {
 	start   string
 	from    string
 	noIndex bool
+	temp    bool   // ephemeral: branch as tmp/<name>, recorded for gc to reclaim
+	ttl     string // idle window for a temp worktree; implies temp
 }
 
 type addResult struct {
-	Path    string `json:"path"`
-	Branch  string `json:"branch"`
-	Base    string `json:"base"`
-	Source  string `json:"source"`
-	Indexed bool   `json:"indexed"`
+	Path      string  `json:"path"`
+	Branch    string  `json:"branch"`
+	Base      string  `json:"base"`
+	Source    string  `json:"source"`
+	Indexed   bool    `json:"indexed"`
+	Temp      bool    `json:"temp"`
+	TTL       string  `json:"ttl,omitempty"`
+	ExpiresAt *string `json:"expiresAt,omitempty"`
 }
 
 func cmdAdd(g *globals, args []string) error {
 	fs := subFlags("add", g)
 	var o addOptions
-	fs.StringVar(&o.path, "p", "", "worktree directory (default: sibling of the current worktree)")
-	fs.StringVar(&o.path, "path", "", "alias of -p")
-	fs.StringVar(&o.from, "from", "", "source worktree to seed from (default: the worktree at the start-point)")
-	fs.BoolVar(&o.noIndex, "no-index", false, "skip `chunkhound index` after seeding (also skipped when chunkhound is absent)")
+	bindAddFlags(fs, &o)
 	pos, err := parseSub(fs, g, args)
 	if err != nil {
 		return err
@@ -43,7 +47,35 @@ func cmdAdd(g *globals, args []string) error {
 	if len(pos) == 2 {
 		o.start = pos[1]
 	}
+	resolveAddOptions(&o)
 	return addWorktree(g, pos[0], o)
+}
+
+// resolveAddOptions applies derived flag implications after parsing.
+func resolveAddOptions(o *addOptions) {
+	// A TTL implies temp so the requested window cannot be silently ignored.
+	o.temp = o.temp || o.ttl != ""
+}
+
+func bindAddFlags(fs *flag.FlagSet, o *addOptions) {
+	fs.StringVar(&o.path, "p", "", "worktree directory (default: sibling of the current worktree)")
+	fs.StringVar(&o.path, "path", "", "alias of -p")
+	fs.StringVar(&o.from, "from", "", "source worktree to seed from (default: the worktree at the start-point)")
+	fs.BoolVar(&o.noIndex, "no-index", false, "skip `chunkhound index` after seeding (also skipped when chunkhound is absent)")
+	fs.BoolVar(&o.temp, "temp", false, "ephemeral worktree on a tmp/ branch that gc reclaims once idle")
+	fs.StringVar(&o.ttl, "ttl", "", "temp idle window (e.g. 30m, 1h, 7d); implies --temp; temp defaults to 1h")
+}
+
+// tempTTL resolves the idle window for an add: zero when not temp, the default
+// when temp without --ttl, else the parsed --ttl.
+func tempTTL(o addOptions) (time.Duration, error) {
+	if !o.temp {
+		return 0, nil
+	}
+	if o.ttl == "" {
+		return defaultTempTTL, nil
+	}
+	return parseTTL(o.ttl)
 }
 
 func seedWorktree(src, path string, noIndex bool) (bool, error) {
@@ -226,7 +258,7 @@ func rollbackAdd(root, path, branch string, seedErr error) error {
 	return seedErr
 }
 
-func reportAddResult(g *globals, res addResult) error {
+func reportAddResult(g *globals, res addResult, ttl time.Duration) error {
 	if g.json {
 		return printJSON(res)
 	}
@@ -236,11 +268,16 @@ func reportAddResult(g *globals, res addResult) error {
 	}
 	fmt.Printf("worktree: %s\nbranch:   %s\nbase:     %s (%s)\nsource:   %s\nindexed:  %v\n",
 		res.Path, res.Branch, res.Base, origin, res.Source, res.Indexed)
+	if res.Temp {
+		fmt.Printf("temp:     true (expires in %s)\n", compactWindow(ttl))
+	}
 	return nil
 }
 
 type addParams struct {
 	root, src, path, branch, base string
+	temp                          bool
+	ttl                           time.Duration
 }
 
 func prepareAdd(g *globals, branchArg string, o addOptions) (addParams, error) {
@@ -248,28 +285,45 @@ func prepareAdd(g *globals, branchArg string, o addOptions) (addParams, error) {
 	if err != nil {
 		return addParams{}, err
 	}
-	branch, err := normalizeBranch(branchArg)
+	ttl, err := tempTTL(o)
+	if err != nil {
+		return addParams{}, usagef("add: %v", err)
+	}
+	branch, err := branchForAdd(branchArg, o)
 	if err != nil {
 		return addParams{}, usagef("add: %v", err)
 	}
 	warnBranchConvention(branch)
-	wts, err := worktrees(root)
+	return resolveAddParams(addParams{root: root, branch: branch, temp: o.temp, ttl: ttl}, o)
+}
+
+func resolveAddParams(p addParams, o addOptions) (addParams, error) {
+	wts, err := worktrees(p.root)
 	if err != nil {
 		return addParams{}, err
 	}
-	path, err := resolveAddTarget(root, wts, branch, o.path)
+	p.path, err = resolveAddTarget(p.root, wts, p.branch, o.path)
 	if err != nil {
 		return addParams{}, err
 	}
-	base := o.start
-	if base == "" {
-		base = baseRefFor(root)
+	p.base = o.start
+	if p.base == "" {
+		p.base = baseRefFor(p.root)
 	}
-	src, err := resolveAddSource(root, wts, base, o.from, path)
+	p.src, err = resolveAddSource(p.root, wts, p.base, o.from, p.path)
 	if err != nil {
 		return addParams{}, err
 	}
-	return addParams{root: root, src: src, path: path, branch: branch, base: base}, nil
+	return p, nil
+}
+
+// branchForAdd picks the branch identity: a temp add owns the tmp/ namespace,
+// a permanent add keeps the requested name.
+func branchForAdd(arg string, o addOptions) (string, error) {
+	if o.temp {
+		return tempBranch(arg)
+	}
+	return normalizeBranch(arg)
 }
 
 // addWorktree creates the branch and its sibling checkout, then replicates the
@@ -287,5 +341,30 @@ func addWorktree(g *globals, branchArg string, o addOptions) error {
 	if err != nil {
 		return rollbackAdd(p.root, p.path, p.branch, err)
 	}
-	return reportAddResult(g, addResult{Path: p.path, Branch: p.branch, Base: p.base, Source: p.src, Indexed: indexed})
+	res := addResult{Path: p.path, Branch: p.branch, Base: p.base, Source: p.src, Indexed: indexed}
+	trackAddTemp(p, &res)
+	return reportAddResult(g, res, p.ttl)
+}
+
+// Record only after seeding: failed seeds or records leave durable checkouts.
+// expiresAt equals the effective deadline only because seeding just finished,
+// so lastUsed cannot exceed createdAt; status recomputes via tempDeadline,
+// which stays the single source of truth for the deadline.
+func trackAddTemp(p addParams, res *addResult) {
+	if !p.temp {
+		return
+	}
+	rec, err := recordTemp(p.path, p.branch, p.ttl)
+	if err != nil {
+		warnf("%s is not tracked as temp and will persist: %v", p.path, err)
+		return
+	}
+	expires := formatTempDeadline(rec.CreatedAt.Add(p.ttl))
+	res.Temp, res.TTL, res.ExpiresAt = true, p.ttl.String(), &expires
+}
+
+// recordTemp writes the store record for a freshly seeded temp worktree, keyed
+// by canonical path so lookups from git, Pi and the filesystem compare equal.
+func recordTemp(path, branch string, ttl time.Duration) (tempRecord, error) {
+	return addTempRecord(path, tempRecord{CreatedAt: time.Now(), TTL: ttl.String(), Branch: branch})
 }
