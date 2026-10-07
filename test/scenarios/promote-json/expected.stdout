@@ -1,0 +1,10 @@
+{
+  "path": "/SBX/repo-tmp-x",
+  "branch": "tmp/x",
+  "promoted": true
+}
+{
+  "path": "/SBX/repo-tmp-x",
+  "branch": "tmp/x",
+  "promoted": false
+}

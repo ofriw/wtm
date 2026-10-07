@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -148,6 +149,42 @@ func TestPromotionUnreadableRegistry(t *testing.T) {
 	}
 }
 
+func TestPromotionJSONAndIdentityRemoval(t *testing.T) {
+	repo, path, w := identityCheckout(t)
+	out := captureStdout(t, func() {
+		if err := promoteWorktree(&globals{root: repo, json: true}, w.Branch); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var result promoteResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Promoted || result.Path != canonical(path) || result.Branch != w.Branch {
+		t.Fatalf("promotion JSON: %+v", result)
+	}
+	assertPromotionState(t, path, w.Branch)
+}
+
+// A temp worktree is addressed by its bare name: `promote review` resolves to
+// tmp/review, the same way `delete review` does.
+func TestPromoteMatchesTempPrefix(t *testing.T) {
+	repo, path, w := identityCheckout(t)
+	out := captureStdout(t, func() {
+		if err := promoteWorktree(&globals{root: repo, json: true}, "test"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var result promoteResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Promoted || result.Branch != w.Branch {
+		t.Fatalf("promotion JSON: %+v", result)
+	}
+	assertPromotionState(t, path, w.Branch)
+}
+
 func assertPromotionState(t *testing.T, path, branch string) {
 	t.Helper()
 	tokenPath, _ := tempIdentityPath(path)
@@ -184,6 +221,23 @@ func restrictRegistryWrites(t *testing.T) {
 		}
 		t.Skip("process bypasses permissions")
 	}
+}
+
+func TestPromotionCommandRejectsCorruptTargetRecord(t *testing.T) {
+	repo, path, w := identityCheckout(t)
+	registry, _ := tempPath()
+	data, err := json.Marshal(map[string]any{canonical(path): map[string]any{"ttl": "broken"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registry, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	captureStderr(t, func() {
+		if err := promoteWorktree(&globals{root: repo, json: true}, w.Branch); err == nil {
+			t.Fatal("corrupt target record was silently reported permanent")
+		}
+	})
 }
 
 func TestClearTempRecordWriteFailure(t *testing.T) {

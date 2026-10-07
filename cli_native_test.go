@@ -426,3 +426,75 @@ func TestNativeAddTempJSON(t *testing.T) {
 		t.Fatalf("temp record = %+v, want a record for %s", rec, target)
 	}
 }
+
+// Promotion must switch an expired temporary checkout to the longer permanent
+// idle window, not merely preserve a checkout that was already fresh.
+func TestNativePromoteTempThenGCIdle(t *testing.T) {
+	sandbox(t)
+	setTTL(t, "7d")
+	repo := nativeRepo(t)
+	linked := addNativeExpiredTemp(t, repo)
+	assertNativeTempPromotion(t, repo, linked)
+	out, errOut, rc := runWTM(t, repo, nil, "gc", "--all", "--yes")
+	if rc != 0 || !strings.Contains(out, "nothing to do") {
+		t.Fatalf("gc after promote = (%q, rc %d, stderr %s), want nothing to do", out, rc, errOut)
+	}
+	if _, err := os.Stat(linked); err != nil {
+		t.Fatalf("promoted checkout was collected: %v", err)
+	}
+	if !refExists(repo, "refs/heads/tmp/promo") {
+		t.Fatal("promotion or GC removed the retained branch")
+	}
+}
+
+func addNativeExpiredTemp(t *testing.T, repo string) string {
+	t.Helper()
+	if _, errOut, rc := runWTM(t, repo, nil, "add", "promo", "--ttl", "1h", "--no-index"); rc != 0 {
+		t.Fatalf("add --temp rc = %d, stderr = %s", rc, errOut)
+	}
+	linked := canonical(filepath.Join(filepath.Dir(repo), "repo-tmp-promo"))
+	lastUsed := time.Now().Add(-2 * time.Hour)
+	seedTempRecord(t, linked, "tmp/promo", "1h", lastUsed.Add(-time.Hour))
+	backdateGitActivity(t, linked, lastUsed)
+	mkSession(t, linked, "promotion", lastUsed)
+	w := discovered(t, repo, linked)
+	if !w.Temp || !w.unused(time.Now(), 7*24*time.Hour) {
+		t.Fatalf("promotion fixture is not expired under temp TTL: %+v", w)
+	}
+	w.Temp = false
+	if w.unused(time.Now(), 7*24*time.Hour) {
+		t.Fatalf("promotion fixture is expired under permanent TTL: %+v", w)
+	}
+	return linked
+}
+
+func assertNativeTempPromotion(t *testing.T, repo, linked string) {
+	t.Helper()
+	out, errOut, rc := runWTM(t, repo, nil, "promote", "tmp/promo")
+	if rc != 0 {
+		t.Fatalf("promote rc = %d, stderr = %s", rc, errOut)
+	}
+	if !strings.Contains(out, "promoted") {
+		t.Fatalf("promote output = %q, want promoted", out)
+	}
+	if _, ok := mustReadTempStore(t)[linked]; ok {
+		t.Fatalf("promote left temp record for %s", linked)
+	}
+}
+
+// TestNativePromotePermanentIsIdempotent pins the already-permanent contract:
+// the desired end state, so it succeeds with a message and exit 0.
+func TestNativePromotePermanentIsIdempotent(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	if _, errOut, rc := runWTM(t, repo, nil, "add", "perm", "--no-index"); rc != 0 {
+		t.Fatalf("add rc = %d, stderr = %s", rc, errOut)
+	}
+	out, errOut, rc := runWTM(t, repo, nil, "promote", "perm")
+	if rc != 0 {
+		t.Fatalf("promote(permanent) rc = %d, stderr = %s", rc, errOut)
+	}
+	if !strings.Contains(out, "already permanent") {
+		t.Fatalf("promote(permanent) output = %q, want already permanent", out)
+	}
+}

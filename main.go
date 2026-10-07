@@ -17,6 +17,7 @@ const usage = `wtm — worktree manager
 usage:
   wtm [options]                    status of all worktrees (default command)
   wtm add <branch> [<start-point>] [-p|--path <dir>] [--no-index] [--from <src>] [--temp] [--ttl <dur>]
+  wtm promote <branch>
   wtm delete <branch> [--keep-remote] [--keep-sessions] [--yes]
   wtm gc [--all | --path <p> ...] [--keep-sessions] [--keep-remote]
   wtm config [set unusedTTL <Nd>]
@@ -75,6 +76,8 @@ func dispatchSubcommand(cmd string, g *globals, rest []string) error {
 		return cmdStatus(g, rest)
 	case "add":
 		return cmdAdd(g, rest)
+	case "promote":
+		return cmdPromote(g, rest)
 	case "delete":
 		return cmdDelete(g, rest)
 	case "gc":
