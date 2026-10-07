@@ -18,6 +18,7 @@ A fresh `git worktree add` gives you checked-out files and nothing else — no a
 - **`status`** — see every worktree at a glance, and whether it's `ACTIVE` or `UNUSED`.
 - **`delete`** — reclaim a single worktree by branch, even if it's `ACTIVE`.
 - **`gc`** — reclaim the `UNUSED` ones, and nothing else, with every destructive step disclosed first.
+- **`add --temp` / `promote`** — `add --temp` makes a throwaway checkout on a `tmp/` branch for collection by `gc`; `promote` makes it permanent.
 
 ## Install
 
@@ -54,9 +55,20 @@ pruned
 sessions purged: 1
 ```
 
+## Temporary worktrees
+
+For short-lived tasks — PR reviews, repros, throwaway experiments — `wtm add <name> --temp`
+creates a checkout on a `tmp/<name>` branch that `wtm gc` reclaims once it has been idle longer
+than its window (`--ttl`, default `1h`). Activity pushes the deadline forward, so the window
+measures idleness, not age. `wtm promote <branch>` makes a temp worktree permanent, and
+`wtm status` shows a `TEMP` countdown column — always present, `-` for permanent checkouts.
+
+See [temp-worktrees.md](temp-worktrees.md) for the full contract: registry and identity,
+reclamation and safety rules, and promotion.
+
 ## Commands
 
-`add` · `delete` · `gc` · `status` · `config` — run **`wtm --help`** for usage, flags, and exit codes.
+`add` · `promote` · `delete` · `gc` · `status` · `config` — run **`wtm --help`** for usage, flags, and exit codes.
 
 Copied worktree configs may hold API keys. `wtm` never commits them — add them to `.gitignore` if they do.
 
