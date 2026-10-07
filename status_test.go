@@ -170,6 +170,7 @@ func TestWorktreeLastUsed(t *testing.T) {
 			repo := initRepo(t, "main")
 			gitTestCommit(t, repo)
 			want := tc.setup(t, repo, now)
+			backdateActivityIndex(t, repo, now.Add(-6*time.Hour))
 			idx := indexSessions(t)
 			if got := worktreeLastUsed(repo, idx); !got.Equal(want) {
 				t.Fatalf("worktreeLastUsed = %v, want %v", got, want)
@@ -211,7 +212,7 @@ func TestDiscover(t *testing.T) {
 
 	// Pin non-session activity old so the sessions above decide ordering.
 	for _, p := range []string{repo, linkedA, linkedB} {
-		setMtime(t, filepath.Join(p, ".git"), now.Add(-10*time.Hour))
+		backdateGitActivity(t, p, now.Add(-10*time.Hour))
 	}
 	setMtime(t, filepath.Join(repo, chunkhoundConfigFile), now.Add(-10*time.Hour))
 	setMtime(t, chunkhoundDBPath(repo), now.Add(-10*time.Hour))
@@ -292,7 +293,7 @@ func TestBuildWorktreeNativeMCP(t *testing.T) {
 			if rel != "" {
 				writeFile(t, filepath.Join(root, rel), "{}", 0o644)
 			}
-			w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil)
+			w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, tempStore{}, nil)
 			if w.MCP != (rel != "") || w.MCPNative != (rel == piNativeMCPFile) {
 				t.Fatalf("%s: MCP = %v, MCPNative = %v", rel, w.MCP, w.MCPNative)
 			}
@@ -333,9 +334,9 @@ func TestPrintTable(t *testing.T) {
 // policy is derived from the same registry: a rename or a new rank cannot pass
 // without updating this contract.
 func TestStatusHeadersSSOT(t *testing.T) {
-	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "STATUS", "CONFIG", "DB", "MCP"}
-	if !slices.Equal(statusTableHeaders, want) {
-		t.Fatalf("statusTableHeaders = %v, want %v", statusTableHeaders, want)
+	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "STATUS", "TEMP", "CONFIG", "DB", "MCP"}
+	if got := columnHeaders(statusColumns); !slices.Equal(got, want) {
+		t.Fatalf("statusColumns = %v, want %v", got, want)
 	}
 	for _, name := range shrinkPriority {
 		if !slices.Contains(want, name) {
@@ -487,5 +488,52 @@ func TestParseSubRejectsInvalidGlobalsAfterSubcommand(t *testing.T) {
 		if err := cmdStatus(&globals{root: t.TempDir()}, args); !isUsage(err) {
 			t.Errorf("cmdStatus(%v) = %v, want usageError", args, err)
 		}
+	}
+}
+
+// TestCellTemp pins the shared TEMP cell: a dash for permanent worktrees, the
+// compact remaining window while active, "expired" once the window has passed.
+func TestCellTemp(t *testing.T) {
+	now := tempTestTime
+	cases := []struct {
+		name string
+		w    worktree
+		want string
+	}{
+		{"permanent is dash", worktree{Branch: "main"}, "-"},
+		{"active temp shows remaining window", worktree{Temp: true, TempCreated: now.Add(-2 * time.Hour), TempTTL: 3 * time.Hour}, "1h"},
+		{"lapsed temp reads expired", worktree{Temp: true, TempCreated: now.Add(-3 * time.Hour), TempTTL: time.Hour}, "expired"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cellTemp(tc.w, columnContext{now: now}); got != tc.want {
+				t.Fatalf("cellTemp = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTempDeadlineStatusAndSelectionAgree(t *testing.T) {
+	w := worktree{Temp: true, TempCreated: tempTestTime, LastUsed: tempTestTime.Add(time.Second), TempTTL: 1500 * time.Millisecond}
+	deadline := tempTestTime.Add(2500 * time.Millisecond)
+	if got := w.tempExpiresAt(); !got.Equal(deadline) {
+		t.Fatalf("deadline = %s, want %s", got, deadline)
+	}
+	if w.unused(deadline, time.Hour) || !w.unused(deadline.Add(time.Nanosecond), time.Hour) {
+		t.Fatal("status and selection disagree at the fractional deadline")
+	}
+}
+
+// TestBuildWorktreeInvalidTempTTL pins the defensive skip: a record with an
+// unparsable TTL must not mark the worktree temp, even if the store bypassed
+// decode validation.
+func TestBuildWorktreeInvalidTempTTL(t *testing.T) {
+	sandbox(t)
+	dir := t.TempDir()
+	pth := canonical(dir)
+	temps := tempStore{pth: tempRecord{CreatedAt: tempTestTime, TTL: "bogus", Branch: "tmp/x"}}
+	w := buildWorktree(gworktree{Path: dir}, sessionIndex{}, nil, temps, nil)
+	if w.Temp {
+		t.Fatalf("invalid TTL record marked temp: %+v", w)
 	}
 }

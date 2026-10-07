@@ -44,7 +44,9 @@ func prepareDelete(g *globals, o deleteOptions) (string, worktree, remotePlan, e
 		return "", worktree{}, remotePlan{}, err
 	}
 	def, _ := defaultBranch(root)
-	w, err := findWorktreeByBranch(wts, o.branch, def)
+	// An exact orphan ref must win over an alias that has a checkout.
+	branch, _ := orphanBranchName(root, o.branch)
+	w, err := checkedDeleteTarget(exactBranch(wts, branch), o.branch, def)
 	if err != nil {
 		return "", worktree{}, remotePlan{}, err
 	}
@@ -80,29 +82,47 @@ func deleteWorktree(g *globals, o deleteOptions) error {
 // matchBranch is pure: name resolution only, no Dirty probe. The caller
 // computes Dirty so matching stays side-effect free and testable.
 func matchBranch(wts []worktree, branch string) *worktree {
+	var match *worktree
+	resolveBranchName(branch, func(name string) bool {
+		match = exactBranch(wts, name)
+		return match != nil
+	})
+	return match
+}
+
+func exactBranch(wts []worktree, branch string) *worktree {
 	for i := range wts {
-		if wts[i].Branch == branch {
+		if branch != "" && wts[i].Branch == branch {
 			return &wts[i]
-		}
-	}
-	if norm, _ := normalizeBranch(branch); norm != "" && norm != branch {
-		for i := range wts {
-			if wts[i].Branch == norm {
-				return &wts[i]
-			}
 		}
 	}
 	return nil
 }
 
+// Checkout lookup and orphan recovery must use the same precedence. A real
+// branch wins over its normalized name and the bare-name tmp/ alias.
+func resolveBranchName(raw string, exists func(string) bool) string {
+	if raw == "" {
+		return ""
+	}
+	norm, _ := normalizeBranch(raw)
+	temp, _ := tempBranch(raw)
+	for _, name := range []string{raw, norm, temp} {
+		// Leading '-' cannot name a branch and must not become a git option.
+		if name != "" && name[0] != '-' && exists(name) {
+			return name
+		}
+	}
+	return ""
+}
+
 // findWorktreeByBranch resolves the branch-addressed target and refuses the
 // main worktree or default branch, which must never be removed.
 func findWorktreeByBranch(wts []worktree, branch, defBranch string) (*worktree, error) {
-	// Empty must never match a detached worktree (Branch == "").
-	if branch == "" {
-		return nil, fmt.Errorf("%w %q", errNoWorktreeForBranch, branch)
-	}
-	w := matchBranch(wts, branch)
+	return checkedDeleteTarget(matchBranch(wts, branch), branch, defBranch)
+}
+
+func checkedDeleteTarget(w *worktree, branch, defBranch string) (*worktree, error) {
 	if w == nil {
 		return nil, fmt.Errorf("%w %q", errNoWorktreeForBranch, branch)
 	}
@@ -230,18 +250,10 @@ func runBranchOnlyDelete(g *globals, o deleteOptions, root string, wts []worktre
 // orphanBranchName maps the delete argument onto the surviving local branch,
 // trying the raw name first so an already-valid ref is never renormalized.
 func orphanBranchName(root, raw string) (string, bool) {
-	if raw == "" {
-		return "", false
-	}
-	// A refname cannot start with '-', so a leading-hyphen argument is never a
-	// raw local branch; skipping it also keeps git from reading it as an option.
-	if raw[0] != '-' && refExists(root, "refs/heads/"+raw) {
-		return raw, true
-	}
-	if norm, err := normalizeBranch(raw); err == nil && norm != raw && refExists(root, "refs/heads/"+norm) {
-		return norm, true
-	}
-	return "", false
+	branch := resolveBranchName(raw, func(name string) bool {
+		return refExists(root, "refs/heads/"+name)
+	})
+	return branch, branch != ""
 }
 
 // runOrphanDelete deletes the orphan's remote upstream (unless kept) and the

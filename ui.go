@@ -62,6 +62,8 @@ func statusCellStyle(header, value string) lipgloss.Style {
 			return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Green)
 		}
 		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+	case "TEMP":
+		return tempCellStyle(value)
 	case "CONFIG", "DB", "MCP":
 		return booleanStyle(value == "yes")
 	case "UPSTREAM":
@@ -72,6 +74,16 @@ func statusCellStyle(header, value string) lipgloss.Style {
 		}
 	}
 	return lipgloss.NewStyle()
+}
+
+func tempCellStyle(value string) lipgloss.Style {
+	if value == "-" {
+		return lipgloss.NewStyle().Faint(true)
+	}
+	if value == "expired" {
+		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Cyan)
 }
 
 // cellStyleFunc maps a column header and plain cell value to its style.

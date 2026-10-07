@@ -12,7 +12,7 @@ import (
 
 // ui_test.go — pure width-budget and color contracts for ui.go. No TTY, no clock.
 
-func statusHeaders() []string { return statusTableHeaders }
+func statusHeaders() []string { return columnHeaders(statusColumns) }
 
 func TestWidthBudget(t *testing.T) {
 	cases := []struct {
@@ -217,8 +217,8 @@ func TestStatusCellStyle(t *testing.T) {
 func TestStyledCellsStripToPlain(t *testing.T) {
 	headers := statusHeaders()
 	rows := [][]string{
-		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "yes", "-", "yes"},
-		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "-", "yes", "-"},
+		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "-", "yes", "-", "yes"},
+		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "-", "-", "yes", "-"},
 	}
 	_, styled := styleCells(headers, rows, statusCellStyle)
 	for r := range rows {
@@ -240,11 +240,11 @@ func TestStyledCellsStripToPlain(t *testing.T) {
 func TestStyledTableStripsToPlain(t *testing.T) {
 	headers := statusHeaders()
 	rows := [][]string{
-		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "yes", "-", "yes"},
-		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "-", "yes", "-"},
+		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "-", "yes", "-", "yes"},
+		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "-", "-", "yes", "-"},
 	}
 	widths := naturalWidths(headers, rows)
-	aligns := columnAligns(headers, statusRightAlign)
+	aligns := columnAligns(headers, columnRightAligns(statusColumns))
 	plain := renderTable(headers, rows, widths, aligns)
 	styledHeaders, styledRows := styleCells(headers, rows, statusCellStyle)
 	if got := ansi.Strip(renderTable(styledHeaders, styledRows, widths, aligns)); got != plain {

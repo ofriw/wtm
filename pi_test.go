@@ -124,19 +124,19 @@ func TestIndexPiSessions(t *testing.T) {
 	})
 }
 
-func TestLastUsed(t *testing.T) {
+func TestSessionLastUsed(t *testing.T) {
 	sandbox(t)
 	wt := t.TempDir()
 	idx := indexSessions(t)
-	if got := lastUsed(wt, idx); !got.IsZero() {
-		t.Fatalf("lastUsed with no sessions = %v, want zero", got)
+	if got, err := sessionLastUsed(wt, idx, false); err != nil || !got.IsZero() {
+		t.Fatalf("sessionLastUsed with no sessions = %v, %v; want zero", got, err)
 	}
 	newest := time.Unix(2_000_000, 0)
 	mkSession(t, wt, "old", time.Unix(1_000_000, 0))
 	mkSession(t, wt, "new", newest)
 	idx = indexSessions(t)
-	if got := lastUsed(wt, idx); !got.Equal(newest) {
-		t.Fatalf("lastUsed = %v, want %v", got, newest)
+	if got, err := sessionLastUsed(wt, idx, false); err != nil || !got.Equal(newest) {
+		t.Fatalf("sessionLastUsed = %v, %v; want %v", got, err, newest)
 	}
 }
 

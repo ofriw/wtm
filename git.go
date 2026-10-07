@@ -169,8 +169,8 @@ func worktreeAdd(repoDir, path, branch, baseRef string) error {
 // worktreeDirty reports whether git would refuse `worktree remove` for
 // uncommitted changes. It mirrors git's check_clean_worktree predicate
 // (builtin/worktree.c): non-empty `status --porcelain --ignore-submodules=none`.
-// --no-optional-locks keeps this query read-only: a plain status refreshes
-// .git/index, bumping the .git mtime that worktreeLastUsed reads as creation.
+// --no-optional-locks prevents index refresh from becoming false activity;
+// scanIndexTime uses the private index mtime to protect staged changes.
 // Best-effort: a failed status read reports clean, like isIgnored.
 func worktreeDirty(dir string) bool {
 	out, err := git(dir, "--no-optional-locks", "status", "--porcelain", "--ignore-submodules=none")

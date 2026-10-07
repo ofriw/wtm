@@ -1,5 +1,5 @@
-PATH              BRANCH      UPSTREAM   LAST USED  STATUS  CONFIG  DB   MCP
-/SBX/repo         main        -         <DATE>      ACTIVE  yes     yes  yes
-/SBX/wt-detached  (detached)  -         2020-01-01  UNUSED  yes     -    -
-/SBX/wt-linked    linked      -         2020-01-01  UNUSED  yes     yes  -
-/SBX/wt-locked    locked      -         2020-01-01  UNUSED  -       -    -
+PATH              BRANCH      UPSTREAM   LAST USED  STATUS  TEMP  CONFIG  DB   MCP
+/SBX/repo         main        -         <DATE>      ACTIVE  -     yes     yes  yes
+/SBX/wt-detached  (detached)  -         2020-01-01  UNUSED  -     yes     -    -
+/SBX/wt-linked    linked      -         2020-01-01  UNUSED  -     yes     yes  -
+/SBX/wt-locked    locked      -         2020-01-01  UNUSED  -     -       -    -

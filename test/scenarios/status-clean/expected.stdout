@@ -1,5 +1,5 @@
-PATH       BRANCH  UPSTREAM   LAST USED  STATUS  CONFIG  DB   MCP
-/SBX/repo  main    -         2020-01-01  ACTIVE  -       yes  yes
+PATH       BRANCH  UPSTREAM   LAST USED  STATUS  TEMP  CONFIG  DB   MCP
+/SBX/repo  main    -         2020-01-01  ACTIVE  -     -       yes  yes
 [
   {
     "path": "/SBX/repo",
@@ -8,6 +8,8 @@ PATH       BRANCH  UPSTREAM   LAST USED  STATUS  CONFIG  DB   MCP
     "main": true,
     "lastUsed": "2020-01-01T00:00:00Z",
     "status": "ACTIVE",
+    "temp": false,
+    "expiresAt": null,
     "config": false,
     "db": true,
     "mcp": true,
