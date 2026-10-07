@@ -353,6 +353,23 @@ func holdTempTransaction(role, path string) error {
 		return nil
 	})
 }
+
+// Process-level idle-check contention: the holder occupies the registry lock
+// while the contender runs a full idle removal and must wait.
+func TestTempRegistryProcessIdleCheckContention(t *testing.T) {
+	sandboxTempProcesses(t)
+	repo, w, _ := idleTempCheckout(t)
+	holder := startTempProcess(t, "hold-lock", repo)
+	holder.expect(t, "locked")
+	contender := startTempProcess(t, "idle-remove", w.Path)
+	contender.expect(t, "ready")
+	assertTempProcessContention(t, repo)
+	releaseTempProcess(t, holder)
+	contender.skipLines(t, "done")
+	contender.finish(t)
+	assertRemovedTempCheckout(t, w.Path)
+}
+
 // Process-level reconcile contention: the holder occupies the registry lock
 // while the contender runs reconcileTempStore and must wait.
 func TestTempRegistryProcessReconcileContention(t *testing.T) {

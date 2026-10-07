@@ -148,6 +148,20 @@ func TestPromotionUnreadableRegistry(t *testing.T) {
 	}
 }
 
+func assertPromotionState(t *testing.T, path, branch string) {
+	t.Helper()
+	tokenPath, _ := tempIdentityPath(path)
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Fatalf("identity remains: %v", err)
+	}
+	if promoted, err := promoteTempRecord(canonical(path)); err != nil || promoted {
+		t.Fatalf("retry = %v, %v", promoted, err)
+	}
+	if got := mustGit(t, path, "branch", "--show-current"); strings.TrimSpace(got) != branch {
+		t.Fatal("promotion changed branch")
+	}
+}
+
 func restrictRegistryWrites(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {

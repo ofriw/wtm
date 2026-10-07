@@ -189,8 +189,7 @@ func finishLocalDelete(root, branch string, res *gcResult, runErr error) error {
 }
 
 // runDelete performs the gc removal, then force-deletes the local branch the
-// command is addressed by. gc deliberately keeps local branches; delete names
-// one, so it removes it — after the worktree is gone, so the branch is free.
+// command is addressed by. Keep this recovery ref until all cleanup succeeds.
 func runDelete(g *globals, root string, w worktree, plan remotePlan, keepSessions bool) (gcResult, error) {
 	// confirmDelete already disclosed uncommitted changes before consent, so
 	// clear Dirty to keep removeOneWorktree from warning a second time.
@@ -198,7 +197,7 @@ func runDelete(g *globals, root string, w worktree, plan remotePlan, keepSession
 	var res gcResult
 	runErr := withProgress(g, true, func(p *progress) error {
 		var rerr error
-		res, rerr = gcRemove(root, []worktree{w}, plan, keepSessions, p)
+		res, rerr = gcRemoveKeepingLocalBranches(root, []worktree{w}, plan, keepSessions, p)
 		return rerr
 	})
 	if len(res.Removed) > 0 {

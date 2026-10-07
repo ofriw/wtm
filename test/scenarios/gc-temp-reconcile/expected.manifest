@@ -1,5 +1,7 @@
 d	755	-	/SBX/home
 d	700	-	/SBX/home/.wtm
+f	600	c368425f4df5027d980de4c74a51707f902c4be3f5b0b872741917b4a2373b41	/SBX/home/.wtm/settings.json
+f	600	ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356	/SBX/home/.wtm/temp.json
 f	600	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	/SBX/home/.wtm/temp.lock
 d	755	-	/SBX/home/pi-agent
 d	755	-	/SBX/home/pi-agent/sessions
@@ -41,7 +43,6 @@ d	755	-	/SBX/repo/.git/objects/ce
 f	444	f619a4e2af93fa7a910cdcf963722a0cdb06e0e3bb9620d6fc7ec06808e73e1d	/SBX/repo/.git/objects/ce/013625030ba8dba906f756967f9e9ca394464a
 d	755	-	/SBX/repo/.git/objects/info
 d	755	-	/SBX/repo/.git/objects/pack
-f	644	6110899c7adc374885f9552bddfb76fa28a7f7ca3c05fb8b74471a457e1e57c8	/SBX/repo/.git/packed-refs
 d	755	-	/SBX/repo/.git/refs
 d	755	-	/SBX/repo/.git/refs/heads
 f	644	df8be9babff81bdd9ac6bfdc48b1a44b00b92483e364950add7225fc51eb2407	/SBX/repo/.git/refs/heads/main

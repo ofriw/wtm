@@ -338,3 +338,35 @@ func TestReconcileDuringRemove(t *testing.T) {
 		t.Fatal("concurrent reconcile/remove retained temp record")
 	}
 }
+
+// TestIdleCheckContention verifies gcCleanup with an idle temp waits when
+// another process holds the registry lock.
+func TestIdleCheckContention(t *testing.T) {
+	sandboxTempProcesses(t)
+	repo, w, _ := idleTempCheckout(t)
+	holder := startTempProcess(t, "hold-lock", repo)
+	holder.expect(t, "locked")
+	gcDone := make(chan gcResult, 1)
+	startContender(func() {
+		var res gcResult
+		var err error
+		err = withProgress(&globals{json: true}, true, func(p *progress) error {
+			res, err = gcCleanup(repo, []worktree{w}, remotePlan{keep: true}, false, gcMode{deleteTemp: true, idleOnly: true}, tempNow, p)
+			return err
+		})
+		if err != nil {
+			gcDone <- gcResult{}
+			return
+		}
+		gcDone <- res
+	})
+	assertTempProcessContention(t, repo)
+	releaseTempProcess(t, holder)
+	res := <-gcDone
+	if len(res.Removed) != 1 || res.Removed[0] != w.Path {
+		t.Fatalf("idle gc under contention = %+v", res)
+	}
+	if len(mustReadTempStore(t)) != 0 {
+		t.Fatal("idle gc did not clear the temp record")
+	}
+}
