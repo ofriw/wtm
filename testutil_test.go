@@ -74,6 +74,52 @@ func mustGit(t *testing.T, dir string, args ...string) string {
 	return out
 }
 
+// gitWorktrees returns git's worktree listing with all paths normalized to
+// forward slashes, matching the format required for cross-platform comparisons.
+func gitWorktrees(t *testing.T, repo string) string {
+	t.Helper()
+	return filepath.ToSlash(mustGit(t, repo, "worktree", "list", "--porcelain"))
+}
+
+// worktreeListed reports whether git's listing holds wt, and returns the
+// listing for failure messages. canonical(wt) resolves Windows 8.3 aliases
+// (RUNNER~1) and casing, so a caller may pass any spelling of an existing path;
+// git itself always emits the long canonical form.
+func worktreeListed(t *testing.T, repo, wt string) (bool, string) {
+	t.Helper()
+	list := gitWorktrees(t, repo)
+	return strings.Contains(list, filepath.ToSlash(canonical(wt))), list
+}
+
+// assertWorktreeListed asserts that git worktree list registers wt.
+func assertWorktreeListed(t *testing.T, repo, wt string) {
+	t.Helper()
+	if listed, list := worktreeListed(t, repo, wt); !listed {
+		t.Fatalf("git worktree list lost %s:\n%s", wt, list)
+	}
+}
+
+// assertWorktreeNotListed asserts that git worktree list does not register wt.
+func assertWorktreeNotListed(t *testing.T, repo, wt string) {
+	t.Helper()
+	if listed, list := worktreeListed(t, repo, wt); listed {
+		t.Fatalf("git worktree list still has %s:\n%s", wt, list)
+	}
+}
+
+// setHomeEnv points os.UserHomeDir at home on every OS: it reads HOME on Unix
+// and USERPROFILE on Windows, so tests must set both or the rewrite is a no-op.
+func setHomeEnv(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if runtime.GOOS == "windows" {
+		vol := filepath.VolumeName(home)
+		t.Setenv("HOMEDRIVE", vol)
+		t.Setenv("HOMEPATH", strings.TrimPrefix(home, vol))
+	}
+}
+
 // initRepo creates a repo named "repo" inside a per-test temp dir so sibling
 // worktrees live under the same cleaned-up tree.
 func initRepo(t *testing.T, branch string) string {
@@ -112,8 +158,9 @@ func gitWorktreeAdd(t *testing.T, repo, path, branch, start string) {
 }
 
 type sandboxEnv struct {
-	Home     string
-	AgentDir string
+	Home      string
+	AgentDir  string
+	ClaudeDir string
 }
 
 // sandbox isolates HOME/agent dirs and pins locale/timezone. On Windows
@@ -125,17 +172,16 @@ func sandbox(t *testing.T) sandboxEnv {
 	if err := os.MkdirAll(filepath.Join(agent, "sessions"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	if runtime.GOOS == "windows" {
-		vol := filepath.VolumeName(home)
-		t.Setenv("HOMEDRIVE", vol)
-		t.Setenv("HOMEPATH", strings.TrimPrefix(home, vol))
+	claude := filepath.Join(home, "claude")
+	if err := os.MkdirAll(filepath.Join(claude, "projects"), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	setHomeEnv(t, home)
 	t.Setenv("PI_CODING_AGENT_DIR", agent)
+	t.Setenv("CLAUDE_CONFIG_DIR", claude)
 	t.Setenv("TZ", "UTC")
 	t.Setenv("LC_ALL", "C")
-	return sandboxEnv{Home: home, AgentDir: agent}
+	return sandboxEnv{Home: home, AgentDir: agent, ClaudeDir: claude}
 }
 
 // settingsFile is the single SSOT for where cmdConfig persists settings.
@@ -167,15 +213,31 @@ func writeFile(t *testing.T, path, content string, mode os.FileMode) {
 // mkSession writes a Pi session header pointing at wtPath and pins its mtime.
 func mkSession(t *testing.T, wtPath, dirName string, mtime time.Time) string {
 	t.Helper()
-	dir := filepath.Join(piAgentDir(), "sessions", dirName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	p := filepath.Join(dir, dirName+".jsonl")
+	return mkAgentSession(t, piAgent.configDir(), "sessions", wtPath, dirName, mtime)
+}
+
+// mkClaudeSession writes Claude metadata before the cwd-bearing conversation
+// record, matching transcripts where the first record cannot identify an owner.
+func mkClaudeSession(t *testing.T, wtPath, dirName string, mtime time.Time) string {
+	t.Helper()
+	return mkAgentSession(t, claudeAgent.configDir(), "projects", wtPath, dirName, mtime)
+}
+
+func claudeTranscript(wtPath string) string {
+	return "{\"type\":\"queue-operation\",\"operation\":\"dequeue\",\"cwd\":null}\n" +
+		fmt.Sprintf("{\"type\":\"user\",\"cwd\":%q,\"message\":{\"role\":\"user\",\"content\":\"seed\"}}\n", wtPath)
+}
+
+// mkAgentSession writes one JSONL session header under the harness session
+// subdir, pins its mtime, and returns the file path.
+func mkAgentSession(t *testing.T, configDir, subdir, wtPath, dirName string, mtime time.Time) string {
+	t.Helper()
+	p := filepath.Join(configDir, subdir, dirName, dirName+".jsonl")
 	line := fmt.Sprintf("{\"id\":%q,\"cwd\":%q}\n", dirName, wtPath)
-	if err := os.WriteFile(p, []byte(line), 0o644); err != nil {
-		t.Fatal(err)
+	if subdir == claudeAgent.sessionSubdir {
+		line = claudeTranscript(wtPath)
 	}
+	writeFile(t, p, line, 0o644)
 	if err := os.Chtimes(p, mtime, mtime); err != nil {
 		t.Fatal(err)
 	}
@@ -184,6 +246,8 @@ func mkSession(t *testing.T, wtPath, dirName string, mtime time.Time) string {
 
 // capture redirects *target (os.Stdout/os.Stderr) for the duration of fn and
 // returns everything written; a reader goroutine prevents pipe-buffer deadlock.
+// Cleanup runs in a nested defer so t.Fatal/panic cannot leave the process
+// with a redirected stdout/stderr.
 func capture(t *testing.T, target **os.File, fn func()) string {
 	t.Helper()
 	old := *target
@@ -192,16 +256,24 @@ func capture(t *testing.T, target **os.File, fn func()) string {
 		t.Fatal(err)
 	}
 	*target = w
+	defer func() {
+		*target = old
+		_ = w.Close()
+	}()
 	done := make(chan string, 1)
 	go func() {
 		b, _ := io.ReadAll(r)
 		done <- string(b)
 	}()
-	fn()
-	*target = old
-	_ = w.Close()
-	out := <-done
-	_ = r.Close()
+	var out string
+	func() {
+		defer func() {
+			_ = w.Close()
+			out = <-done
+			_ = r.Close()
+		}()
+		fn()
+	}()
 	return out
 }
 

@@ -127,7 +127,7 @@ func TestStrictActivityRejectsMissingSessionCWD(t *testing.T) {
 
 func TestStrictActivityRejectsInvalidSessionsDirectory(t *testing.T) {
 	repo, store := strictActivityFixture(t)
-	base := filepath.Join(piAgentDir(), "sessions")
+	base := filepath.Join(piAgent.configDir(), "sessions")
 	if err := os.Remove(base); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestStrictActivityRejectsSessionHeaderReadFailure(t *testing.T) {
 func TestStrictActivityRejectsSessionStatFailure(t *testing.T) {
 	repo, _ := strictActivityFixture(t)
 	p := mkSession(t, repo, "removed", time.Unix(1, 0))
-	idx, _, err := indexPiSessionsStrict()
+	idx, _, err := indexSessionsStrict(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,10 +179,10 @@ func TestStrictActivityRejectsSessionStatFailure(t *testing.T) {
 
 func TestStrictActivityAllowsAbsentSessionsDirectory(t *testing.T) {
 	repo, _ := strictActivityFixture(t)
-	if err := os.Remove(filepath.Join(piAgentDir(), "sessions")); err != nil {
+	if err := os.Remove(filepath.Join(piAgent.configDir(), "sessions")); err != nil {
 		t.Fatal(err)
 	}
-	idx, unverified, err := indexPiSessionsStrict()
+	idx, unverified, err := indexSessionsStrict(nil)
 	if err != nil || len(idx) != 0 || len(unverified) != 0 {
 		t.Fatalf("missing sessions = %v, %v, %v", idx, unverified, err)
 	}

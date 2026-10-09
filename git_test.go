@@ -178,6 +178,10 @@ func defaultBranchCases() []defaultBranchCase {
 			gitTestRemoteHead(t, r, "origin", "main")
 			gitTestRemoteHead(t, r, "upstream", "release")
 		}, "main", "origin"},
+		{"origin preferred over earlier-sorting remote", func(t *testing.T, r string) {
+			gitTestRemoteHead(t, r, "fork-5", "release")
+			gitTestRemoteHead(t, r, "origin", "trunk")
+		}, "trunk", "origin"},
 		{"local main", func(t *testing.T, r string) { gitTestBranch(t, r, "main") }, "main", ""},
 		{"local master beats develop and trunk", func(t *testing.T, r string) {
 			gitTestBranch(t, r, "master")
@@ -228,6 +232,10 @@ func TestRemoteDefaultRef(t *testing.T) {
 			gitTestRemoteHead(t, r, "origin", "main")
 			gitTestRemoteHead(t, r, "upstream", "release")
 		}, "refs/remotes/origin/main"},
+		{"origin HEAD wins over earlier-sorting remotes", func(t *testing.T, r string) {
+			gitTestRemoteHead(t, r, "fork-5", "develop")
+			gitTestRemoteHead(t, r, "origin", "main")
+		}, "refs/remotes/origin/main"},
 		{"non-symbolic HEAD is ignored", func(t *testing.T, r string) {
 			mustGit(t, r, "update-ref", "refs/remotes/origin/HEAD", "HEAD")
 		}, ""},
@@ -256,6 +264,10 @@ func TestBaseRefFor(t *testing.T) {
 			gitTestRemoteHead(t, r, "origin", "main")
 			gitTestBranch(t, r, "main")
 		}, "refs/remotes/origin/main"},
+		{"origin remote-tracking beats earlier-sorting remote", func(t *testing.T, r string) {
+			gitTestRemoteHead(t, r, "fork-5", "main")
+			gitTestRemoteHead(t, r, "origin", "trunk")
+		}, "refs/remotes/origin/trunk"},
 		{"local branch without remote", func(t *testing.T, r string) { gitTestBranch(t, r, "main") }, "refs/heads/main"},
 		{"non-origin remote-tracking", func(t *testing.T, r string) { gitTestRemoteHead(t, r, "upstream", "trunk") }, "refs/remotes/upstream/trunk"},
 		{"literal name when nothing resolves", func(t *testing.T, r string) {

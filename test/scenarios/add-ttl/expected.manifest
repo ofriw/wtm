@@ -2,6 +2,8 @@ d	755	-	/SBX/home
 d	700	-	/SBX/home/.wtm
 f	600	becbdcaf69b8488147c76f868930e74bff3c199110eb8a8412656c4f2b4e4379	/SBX/home/.wtm/temp.json
 f	600	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	/SBX/home/.wtm/temp.lock
+d	755	-	/SBX/home/claude
+d	755	-	/SBX/home/claude/projects
 d	755	-	/SBX/home/pi-agent
 d	755	-	/SBX/home/pi-agent/sessions
 d	755	-	/SBX/repo

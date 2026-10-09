@@ -201,7 +201,7 @@ func TestAddFromSource(t *testing.T) {
 }
 
 // TestAddSeedsFromStartPointWorktree pins the seed-source contract: the harness
-// — gitignored db/pi/mcp state — comes from the worktree at the start-point, so
+// — gitignored db/agent/mcp state — comes from the worktree at the start-point, so
 // the copied index matches the new checkout and indexing is a no-op. The
 // start-point branch must win over the main worktree even when both share a
 // commit (the branch is created from main).
@@ -392,6 +392,21 @@ func TestAddHumanOutputAnnotatesOrigin(t *testing.T) {
 		res := addResultOf(t, &globals{root: repo}, "wt-remote-json", "--no-index")
 		if res.Base != "refs/remotes/origin/main" {
 			t.Fatalf("--json must keep the raw base ref, got %q", res.Base)
+		}
+	})
+	t.Run("origin base wins over earlier-sorting stale remote", func(t *testing.T) {
+		repo := addTestRepo(t)                       // commit A on main
+		gitTestRemoteHead(t, repo, "fork-5", "main") // fork-5/main -> A (stale)
+		writeFile(t, filepath.Join(repo, "next.txt"), "next\n", 0o644)
+		gitCommit(t, repo, "next", "next.txt") // commit B on main
+		gitTestRemoteHead(t, repo, "origin", "main")
+		res := addResultOf(t, &globals{root: repo}, "wt-remote-order", "--no-index")
+		if res.Base != "refs/remotes/origin/main" {
+			t.Fatalf("base = %q, want refs/remotes/origin/main", res.Base)
+		}
+		want := mustGit(t, repo, "rev-parse", "refs/remotes/origin/main")
+		if got := mustGit(t, repo, "rev-parse", "wt-remote-order"); got != want {
+			t.Fatalf("branch tip = %s, want %s (origin/main)", got, want)
 		}
 	})
 }

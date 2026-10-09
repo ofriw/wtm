@@ -8,7 +8,7 @@ import (
 )
 
 // delete.go — branch-addressed reclamation. `delete <branch>` runs the same
-// destructive path as gc (worktree, remote upstream, Pi sessions, prune), but
+// destructive path as gc (worktree, remote upstream, agent sessions, prune), but
 // for one explicit worktree and regardless of the unused TTL: naming the
 // branch is the consent, so the UNUSED gate does not apply.
 
@@ -25,7 +25,7 @@ type deleteOptions struct {
 func cmdDelete(g *globals, args []string) error {
 	fs := subFlags("delete", g)
 	var o deleteOptions
-	fs.BoolVar(&o.keepSessions, "keep-sessions", false, "keep Pi session history")
+	fs.BoolVar(&o.keepSessions, "keep-sessions", false, "keep agent session history")
 	fs.BoolVar(&o.keepRemote, "keep-remote", false, "keep the remote upstream branch")
 	pos, err := parseSub(fs, g, args)
 	if err != nil {
@@ -38,32 +38,32 @@ func cmdDelete(g *globals, args []string) error {
 	return deleteWorktree(g, o)
 }
 
-func prepareDelete(g *globals, o deleteOptions) (string, worktree, remotePlan, error) {
-	root, ttl, wts, err := loadWorkspace(g, true)
+func prepareDelete(g *globals, o deleteOptions) (workspace, worktree, remotePlan, error) {
+	ws, err := loadWorkspace(g, true, true)
 	if err != nil {
-		return "", worktree{}, remotePlan{}, err
+		return workspace{}, worktree{}, remotePlan{}, err
 	}
-	def, _ := defaultBranch(root)
+	def, _ := defaultBranch(ws.root)
 	// An exact orphan ref must win over an alias that has a checkout.
-	branch, _ := orphanBranchName(root, o.branch)
-	w, err := checkedDeleteTarget(exactBranch(wts, branch), o.branch, def)
+	branch, _ := orphanBranchName(ws.root, o.branch)
+	w, err := checkedDeleteTarget(exactBranch(ws.wts, branch), o.branch, def)
 	if err != nil {
-		return "", worktree{}, remotePlan{}, err
+		return workspace{}, worktree{}, remotePlan{}, err
 	}
 	now := time.Now()
 	// Same ACTIVE disclosure as gc --path (findWorktreeByPath).
-	if !w.unused(now, ttl) {
-		warnf("%s is ACTIVE (%s)", w.Path, w.status(now, ttl))
+	if !w.unused(now, ws.ttl) {
+		warnf("%s is ACTIVE (%s)", w.Path, w.status(now, ws.ttl))
 	}
 	// Dirty is computed here, not inside the pure matchBranch.
 	w.Dirty = worktreeDirty(w.Path)
 	selected := []worktree{*w}
-	plan := planRemotes(selected, survivingWorktrees(wts, selected), o.keepRemote, root)
-	return root, *w, plan, nil
+	plan := planRemotes(selected, survivingWorktrees(ws.wts, selected), o.keepRemote, ws.root)
+	return ws, *w, plan, nil
 }
 
 func deleteWorktree(g *globals, o deleteOptions) error {
-	root, w, plan, err := prepareDelete(g, o)
+	ws, w, plan, err := prepareDelete(g, o)
 	if err != nil {
 		// The worktree may already be gone while the branch
 		// remains (remote failure keeps it); retry branch-only.
@@ -75,7 +75,7 @@ func deleteWorktree(g *globals, o deleteOptions) error {
 		}
 		return err
 	}
-	res, runErr := runDelete(g, root, w, plan, o.keepSessions)
+	res, runErr := runDelete(g, ws.root, w, plan, o.keepSessions, ws.idx)
 	return reportResult(g, res, runErr)
 }
 
@@ -190,14 +190,14 @@ func finishLocalDelete(root, branch string, res *gcResult, runErr error) error {
 
 // runDelete performs the gc removal, then force-deletes the local branch the
 // command is addressed by. Keep this recovery ref until all cleanup succeeds.
-func runDelete(g *globals, root string, w worktree, plan remotePlan, keepSessions bool) (gcResult, error) {
+func runDelete(g *globals, root string, w worktree, plan remotePlan, keepSessions bool, idx sessionIndex) (gcResult, error) {
 	// confirmDelete already disclosed uncommitted changes before consent, so
 	// clear Dirty to keep removeOneWorktree from warning a second time.
 	w.Dirty = false
 	var res gcResult
 	runErr := withProgress(g, true, func(p *progress) error {
 		var rerr error
-		res, rerr = gcRemoveKeepingLocalBranches(root, []worktree{w}, plan, keepSessions, p)
+		res, rerr = gcCleanup(root, []worktree{w}, plan, keepSessions, idx, gcMode{}, time.Now(), p)
 		return rerr
 	})
 	if len(res.Removed) > 0 {
@@ -215,18 +215,18 @@ func deleteOrphanFallback(g *globals, o deleteOptions, cause error) error {
 	if cause == nil || !errors.Is(cause, errNoWorktreeForBranch) {
 		return cause
 	}
-	root, _, wts, err := loadWorkspace(g, true)
+	ws, err := loadWorkspace(g, true, true)
 	if err != nil {
-		return cause
+		return err
 	}
-	branch, ok := orphanBranchName(root, o.branch)
+	branch, ok := orphanBranchName(ws.root, o.branch)
 	if !ok {
 		return cause
 	}
-	if def, _ := defaultBranch(root); branch == def {
+	if def, _ := defaultBranch(ws.root); branch == def {
 		return fmt.Errorf("refusing to delete default branch %q", branch)
 	}
-	return runBranchOnlyDelete(g, o, root, wts, branch)
+	return runBranchOnlyDelete(g, o, ws.root, ws.wts, branch)
 }
 
 // runBranchOnlyDelete confirms and runs the worktree-less retry: the remote

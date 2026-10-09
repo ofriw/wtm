@@ -3,6 +3,8 @@ d	700	-	/SBX/home/.wtm
 f	600	c368425f4df5027d980de4c74a51707f902c4be3f5b0b872741917b4a2373b41	/SBX/home/.wtm/settings.json
 f	600	ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356	/SBX/home/.wtm/temp.json
 f	600	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	/SBX/home/.wtm/temp.lock
+d	755	-	/SBX/home/claude
+d	755	-	/SBX/home/claude/projects
 d	755	-	/SBX/home/pi-agent
 d	755	-	/SBX/home/pi-agent/sessions
 d	755	-	/SBX/repo

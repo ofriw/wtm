@@ -1,7 +1,8 @@
-// wtm — worktree manager for the ChunkHound + Pi.dev software factory.
+// wtm — worktree manager for the ChunkHound + Pi.dev + Claude Code software factory.
 //
-// One package, no sub-packages, no interfaces: external invariants are pinned
-// by the container FS-diff harness under test/, not by Go unit tests.
+// One package, no sub-packages, no interfaces: the container FS-diff harness
+// under test/ is authoritative for integration, while Go unit tests pin the
+// pure contracts (inventory, JSON schema, width policy).
 package main
 
 import (
@@ -16,6 +17,7 @@ const usage = `wtm — worktree manager
 
 usage:
   wtm [options]                    status of all worktrees (default command)
+  wtm status --wide                one column per integration, not the grouped cell
   wtm add <branch> [<start-point>] [-p|--path <dir>] [--no-index] [--from <src>] [--temp] [--ttl <dur>]
   wtm promote <branch>
   wtm delete <branch> [--keep-remote] [--keep-sessions] [--yes]

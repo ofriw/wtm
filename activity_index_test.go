@@ -57,8 +57,9 @@ func assertStagedSurvives(t *testing.T, kind, source string) {
 	t.Helper()
 	repo, w, session := idleTempCheckout(t)
 	before := mustReadTempStore(t)
+	idx := cleanupSessionIndex(t, repo)
 	pinStagedActivity(t, w, kind, source)
-	res, _ := runIdleCleanup(t, repo, w)
+	res, _ := runIdleCleanup(t, repo, w, idx)
 	assertTempStore(t, before)
 	if len(res.Skipped) != 1 || !exists(w.Path) || !exists(session) || !refExists(repo, "refs/heads/"+w.Branch) {
 		t.Fatalf("staged activity lost resources: %+v", res)
@@ -101,7 +102,7 @@ func TestActivityInspectionDoesNotRefreshIndex(t *testing.T) {
 	if err != nil || !info.ModTime().Equal(tempTestTime) {
 		t.Fatalf("inspection changed index: %v, %v", info, err)
 	}
-	res, _ := runIdleCleanup(t, repo, w)
+	res, _ := runIdleCleanup(t, repo, w, cleanupSessionIndex(t, repo))
 	if len(res.Removed) != 1 || exists(w.Path) {
 		t.Fatalf("abandoned staged checkout survived: %+v", res)
 	}

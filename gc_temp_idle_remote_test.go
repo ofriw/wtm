@@ -57,23 +57,24 @@ func testSharedTempActivity(t *testing.T, activeFirst bool) {
 	}
 	want := mustReadTempStore(t)
 	delete(want, idle.Path)
+	idx := cleanupSessionIndex(t, repo)
 	fresh := mkSession(t, active.Path, "fresh", tempNow)
 	if !activeFirst {
 		selected[0], selected[1] = selected[1], selected[0]
 	}
-	res, warnings := cleanupSharedIdleTemps(t, repo, selected, plan)
+	res, warnings := cleanupSharedIdleTemps(t, repo, selected, plan, idx)
 	assertTempStore(t, want)
 	assertSharedActiveSurvives(t, repo, origin, active, []string{sessions[0], fresh}, warnings)
 	assertSharedIdleRemoved(t, repo, idle, sessions[1], res)
 }
 
-func cleanupSharedIdleTemps(t *testing.T, repo string, selected []worktree, plan remotePlan) (gcResult, string) {
+func cleanupSharedIdleTemps(t *testing.T, repo string, selected []worktree, plan remotePlan, idx sessionIndex) (gcResult, string) {
 	t.Helper()
 	var res gcResult
 	warnings := captureStderr(t, func() {
 		err := withProgress(&globals{json: true}, true, func(p *progress) error {
 			var err error
-			res, err = gcCleanup(repo, selected, plan, false, gcMode{deleteTemp: true, idleOnly: true}, tempNow, p)
+			res, err = gcCleanup(repo, selected, plan, false, idx, gcMode{deleteTemp: true, idleOnly: true}, tempNow, p)
 			return err
 		})
 		if err != nil {

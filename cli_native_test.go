@@ -21,6 +21,14 @@ func nativeRepo(t *testing.T) string {
 	return repo
 }
 
+// TestUsageDocumentsWide pins the help contract: the --wide flag must stay
+// discoverable in the usage text.
+func TestUsageDocumentsWide(t *testing.T) {
+	if !strings.Contains(usage, "wtm status --wide") {
+		t.Fatalf("usage must document `wtm status --wide`:\n%s", usage)
+	}
+}
+
 func TestNativeExitCodes(t *testing.T) {
 	sandbox(t)
 	outside := t.TempDir()
@@ -36,6 +44,7 @@ func TestNativeExitCodes(t *testing.T) {
 		{"h flag", outside, []string{"-h"}, 0},
 		{"unknown command", outside, []string{"bogus"}, 2},
 		{"status outside repo", outside, []string{"status"}, 1},
+		{"wide with json is a usage error", repo, []string{"status", "--wide", "--json"}, 2},
 		{"invalid color after subcommand", repo, []string{"status", "--color", "bogus"}, 2},
 		{"invalid progress after subcommand", repo, []string{"status", "--progress", "bogus"}, 2},
 	}

@@ -47,13 +47,23 @@ func activateTemp(t *testing.T, w worktree, activity string) {
 	}
 }
 
-func runIdleCleanup(t *testing.T, repo string, w worktree) (gcResult, string) {
+// Cleanup reuses discovery's real ownership index, independent of idle refresh.
+func cleanupSessionIndex(t *testing.T, repo string) sessionIndex {
+	t.Helper()
+	_, idx, err := discover(repo, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return idx
+}
+
+func runIdleCleanup(t *testing.T, repo string, w worktree, idx sessionIndex) (gcResult, string) {
 	t.Helper()
 	var res gcResult
 	warnings := captureStderr(t, func() {
 		err := withProgress(&globals{json: true}, true, func(p *progress) error {
 			var err error
-			res, err = gcCleanup(repo, []worktree{w}, remotePlan{keep: true}, false, gcMode{deleteTemp: true, idleOnly: true}, tempNow, p)
+			res, err = gcCleanup(repo, []worktree{w}, remotePlan{keep: true}, false, idx, gcMode{deleteTemp: true, idleOnly: true}, tempNow, p)
 			return err
 		})
 		if err != nil {
@@ -68,8 +78,9 @@ func TestGCRefreshesTempActivityAfterSelection(t *testing.T) {
 		t.Run(activity, func(t *testing.T) {
 			repo, w, session := idleTempCheckout(t)
 			before := mustReadTempStore(t)
+			idx := cleanupSessionIndex(t, repo)
 			activateTemp(t, w, activity)
-			res, warnings := runIdleCleanup(t, repo, w)
+			res, warnings := runIdleCleanup(t, repo, w, idx)
 			assertTempStore(t, before)
 			if !exists(w.Path) || !exists(session) || !refExists(repo, "refs/heads/"+w.Branch) {
 				t.Fatal("ACTIVE checkout resources were removed")
@@ -89,7 +100,7 @@ func TestGCRefreshesTempActivityAfterSelection(t *testing.T) {
 
 func TestGCRemovesStillIdleTemp(t *testing.T) {
 	repo, w, session := idleTempCheckout(t)
-	res, _ := runIdleCleanup(t, repo, w)
+	res, _ := runIdleCleanup(t, repo, w, cleanupSessionIndex(t, repo))
 	if exists(w.Path) || exists(session) || refExists(repo, "refs/heads/"+w.Branch) {
 		t.Fatal("idle checkout resources survived")
 	}

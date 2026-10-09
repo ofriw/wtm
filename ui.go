@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -64,13 +65,24 @@ func statusCellStyle(header, value string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
 	case "TEMP":
 		return tempCellStyle(value)
-	case "CONFIG", "DB", "MCP":
-		return booleanStyle(value == "yes")
 	case "UPSTREAM":
 		return booleanStyle(value != "-")
 	case "BRANCH", "LAST USED":
 		if value == "(detached)" || value == "never" {
 			return lipgloss.NewStyle().Faint(true)
+		}
+	}
+	// Capability columns only appear in the opt-in --wide view.
+	if isCapabilityHeader(header) {
+		// WHY: the state word is the state, so it maps straight to the one
+		// semantic color scheme instead of through a value-string wrapper.
+		switch value {
+		case "yes":
+			return capStateStyle(capPresent)
+		case "partial":
+			return capStateStyle(capPartial)
+		default: // "-" and "n/a"
+			return capStateStyle(capAbsent)
 		}
 	}
 	return lipgloss.NewStyle()
@@ -86,8 +98,51 @@ func tempCellStyle(value string) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Cyan)
 }
 
-// cellStyleFunc maps a column header and plain cell value to its style.
-type cellStyleFunc func(header, value string) lipgloss.Style
+// capStateStyle is the one semantic color scheme: present green, partial yellow,
+// absent/n-a faint. A word or a shape carries the state; color only reinforces it.
+func capStateStyle(s capState) lipgloss.Style {
+	switch s {
+	case capPresent:
+		return lipgloss.NewStyle().Foreground(lipgloss.Green)
+	case capPartial:
+		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+	default:
+		return lipgloss.NewStyle().Faint(true)
+	}
+}
+
+// cellRenderer renders one plain cell value into its colored form. printTable
+// calls it only when the profile supports styling, so it may always decorate.
+type cellRenderer func(header, value string) string
+
+// statusCell renders one plain status cell with its color. The grouped
+// INTEGRATIONS cell colors token-by-token; every other column takes one style.
+func statusCell(header, value string) string {
+	if header == colIntegrations.header {
+		return groupedCellStyle(value)
+	}
+	return statusCellStyle(header, value).Render(value)
+}
+
+// groupedCellStyle colors a grouped INTEGRATIONS cell token by token: present
+// green, partial yellow, absent faint. Shape (via the shared markers) carries
+// the state; color only reinforces it.
+func groupedCellStyle(value string) string {
+	if value == "-" {
+		return capStateStyle(capAbsent).Render(value)
+	}
+	tokens := strings.Fields(value)
+	for i, tok := range tokens {
+		// WHY: the ~ suffix groupedToken writes is the state, so color keys
+		// off it directly instead of through a token-string wrapper.
+		state := capPresent
+		if strings.HasSuffix(tok, partialMarker) {
+			state = capPartial
+		}
+		tokens[i] = capStateStyle(state).Render(tok)
+	}
+	return strings.Join(tokens, " ")
+}
 
 // printTable renders a width-fitted table. Deterministic output is a test
 // contract: the budget comes from COLUMNS or a TTY only, and cells are sized
@@ -95,11 +150,11 @@ type cellStyleFunc func(header, value string) lipgloss.Style
 // shrink-column choice we cannot observe or pin. Styles are applied only when
 // the resolved profile supports them; NoTTY output stays pure ASCII so pipes,
 // --json and goldens remain byte-stable.
-func printTable(headers []string, rows [][]string, colorMode string, style cellStyleFunc, rightAlign []string) {
+func printTable(headers []string, rows [][]string, colorMode string, render cellRenderer, rightAlign []string) {
 	headers, rows, widths, aligns := sizedGrid(headers, rows, widthBudget(), rightAlign)
 	profile := resolveColorProfile(colorMode)
-	if profile > colorprofile.NoTTY && style != nil {
-		headers, rows = styleCells(headers, rows, style)
+	if profile > colorprofile.NoTTY && render != nil {
+		headers, rows = renderCells(headers, rows, render)
 	}
 	header, body := renderGrid(headers, rows, widths, aligns)
 	writeTable(gridString(header, body), profile)
@@ -112,6 +167,7 @@ func printTable(headers []string, rows [][]string, colorMode string, style cellS
 // composes.
 func sizedGrid(headers []string, rows [][]string, budget int, rightAlign []string) ([]string, [][]string, []int, []lipgloss.Position) {
 	widths := columnWidths(headers, rows, budget)
+	headers, rows, widths = dropZeroColumns(headers, rows, widths)
 	aligns := columnAligns(headers, rightAlign)
 	headers, rows = elideCells(headers, rows, widths)
 	return headers, rows, widths, aligns
@@ -204,9 +260,9 @@ func truthy(v string) bool {
 	return err == nil && b
 }
 
-// styleCells pre-renders the header row bold and each body cell through style.
+// renderCells bolds the header row and renders each body cell through render.
 // It runs after elision so widths are measured on plain text.
-func styleCells(headers []string, rows [][]string, style cellStyleFunc) ([]string, [][]string) {
+func renderCells(headers []string, rows [][]string, render cellRenderer) ([]string, [][]string) {
 	styled := make([]string, len(headers))
 	for i, h := range headers {
 		styled[i] = lipgloss.NewStyle().Bold(true).Render(h)
@@ -215,7 +271,7 @@ func styleCells(headers []string, rows [][]string, style cellStyleFunc) ([]strin
 	for r, row := range rows {
 		cells := make([]string, len(row))
 		for i, c := range row {
-			cells[i] = style(headers[i], c).Render(c)
+			cells[i] = render(headers[i], c)
 		}
 		out[r] = cells
 	}
@@ -284,23 +340,133 @@ func middleElide(s string, w int) string {
 }
 
 // columnWidths sizes each column to natural width when the budget allows, else
-// shrinks the shrinkPriority columns in order down to their floor and, only if
-// that is still not enough, down to a single cell. Pinned columns never change.
+// shrinks the shrinkable columns in rank order down to their floor and, only
+// if that is still not enough, down to a single cell. Pinned columns never
+// change. A floor-0 column is all-or-nothing: it renders at natural width or
+// is dropped whole, never elided to a useless sliver. Shrink priority is
+// derived from the actual headers via columnRegistry(), so --wide capability
+// columns participate alongside the core columns.
 func columnWidths(headers []string, rows [][]string, budget int) []int {
 	widths := naturalWidths(headers, rows)
 	if budget <= 0 || lineWidth(widths) <= budget {
 		return widths
 	}
-	over := lineWidth(widths) - budget
-	for _, name := range shrinkPriority {
-		over = shrinkColumn(widths, slices.Index(headers, name), over, shrinkFloor[name])
-	}
+	registry := columnRegistry()
+	priority := dynamicShrinkPriority(headers, registry)
+	floors := dynamicShrinkFloor(headers, registry)
+	over := shrinkToFloors(headers, widths, priority, floors, budget)
 	if over > 0 {
-		for _, name := range shrinkPriority {
+		for _, name := range priority {
 			over = shrinkColumn(widths, slices.Index(headers, name), over, 1)
 		}
 	}
 	return widths
+}
+
+func shrinkToFloors(headers []string, widths []int, priority []string, floors map[string]int, budget int) int {
+	over := lineWidth(widths) - budget
+	for _, name := range priority {
+		if over <= 0 {
+			break
+		}
+		i := slices.Index(headers, name)
+		if floors[name] == 0 {
+			// Dropping a column also reclaims its gutter.
+			widths[i] = 0
+			over = lineWidth(widths) - budget
+		} else {
+			over = shrinkColumn(widths, i, over, floors[name])
+		}
+	}
+	return over
+}
+
+// dropZeroColumns removes columns sized to zero, so a dropped column leaves no
+// gutter or empty cell behind. Cells, widths and headers stay index-aligned.
+// Capability columns dropped from a narrow --wide view are disclosed on stderr
+// (stdout stays machine-clean for pipes and goldens), so a missing column reads
+// as hidden, not absent.
+func dropZeroColumns(headers []string, rows [][]string, widths []int) ([]string, [][]string, []int) {
+	keep := positiveWidthColumns(widths)
+	if len(keep) == len(widths) {
+		return headers, rows, widths
+	}
+	var hidden []string
+	for i, h := range headers {
+		if widths[i] == 0 && isCapabilityHeader(h) {
+			hidden = append(hidden, h)
+		}
+	}
+	if len(hidden) > 0 {
+		warnf("terminal too narrow; hid %s; widen the terminal or drop --wide", strings.Join(hidden, ", "))
+	}
+	out := make([][]string, len(rows))
+	for r, row := range rows {
+		out[r] = selectStrings(row, keep)
+	}
+	return selectStrings(headers, keep), out, selectInts(widths, keep)
+}
+
+func positiveWidthColumns(widths []int) []int {
+	var keep []int
+	for i, w := range widths {
+		if w > 0 {
+			keep = append(keep, i)
+		}
+	}
+	return keep
+}
+
+// selectStrings keeps the columns at keep indices. Concrete (not generic): only
+// dropZeroColumns calls these, so one tiny function per element type is simpler
+// than a type parameter.
+func selectStrings(values []string, keep []int) []string {
+	out := make([]string, len(keep))
+	for j, i := range keep {
+		out[j] = values[i]
+	}
+	return out
+}
+
+func selectInts(values []int, keep []int) []int {
+	out := make([]int, len(keep))
+	for j, i := range keep {
+		out[j] = values[i]
+	}
+	return out
+}
+
+// dynamicShrinkPriority returns the headers that can shrink, sorted by rank,
+// drawn from registry so --wide capability columns participate.
+func dynamicShrinkPriority(headers []string, registry map[string]worktreeColumn) []string {
+	type ranked struct {
+		header string
+		rank   int
+	}
+	var shrinkable []ranked
+	for _, h := range headers {
+		if c, ok := registry[h]; ok && c.shrinkRank > 0 {
+			shrinkable = append(shrinkable, ranked{h, c.shrinkRank})
+		}
+	}
+	sort.SliceStable(shrinkable, func(i, j int) bool { return shrinkable[i].rank < shrinkable[j].rank })
+	out := make([]string, len(shrinkable))
+	for i, r := range shrinkable {
+		out[i] = r.header
+	}
+	return out
+}
+
+// dynamicShrinkFloor returns the floor for each shrinkable header, drawn from
+// registry so --wide capability columns participate.
+func dynamicShrinkFloor(headers []string, registry map[string]worktreeColumn) map[string]int {
+	floors := make(map[string]int)
+	for _, h := range headers {
+		if c, ok := registry[h]; ok && c.shrinkRank > 0 {
+			floors[h] = c.floor
+		}
+	}
+	return floors
 }
 
 func naturalWidths(headers []string, rows [][]string) []int {
@@ -318,14 +484,18 @@ func naturalWidths(headers []string, rows [][]string) []int {
 	return widths
 }
 
-// lineWidth is a rendered row's width: cells plus the two-cell gutters.
+// lineWidth is a rendered row's width: cells plus the two-cell gutters. A
+// zero-width column is dropped on render, so it adds neither cells nor gutter.
 func lineWidth(widths []int) int {
-	total := 0
+	total, n := 0, 0
 	for _, w := range widths {
-		total += w
+		if w > 0 {
+			total += w
+			n++
+		}
 	}
-	if len(widths) > 1 {
-		total += 2 * (len(widths) - 1)
+	if n > 1 {
+		total += 2 * (n - 1)
 	}
 	return total
 }

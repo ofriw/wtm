@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// add.go — create a worktree, then seed it with the source's Pi harness and
+// add.go — create a worktree, then seed it with the source's agent harness and
 // ChunkHound workspace.
 
 type addOptions struct {
@@ -79,8 +79,8 @@ func tempTTL(o addOptions) (time.Duration, error) {
 }
 
 func seedWorktree(src, path string, noIndex bool) (bool, error) {
-	if err := copyPiHarness(src, path); err != nil {
-		return false, fmt.Errorf("copy Pi harness: %w", err)
+	if err := copyHarness(src, path); err != nil {
+		return false, fmt.Errorf("copy agent harness: %w", err)
 	}
 	if err := copyChunkHound(src, path); err != nil {
 		return false, fmt.Errorf("copy ChunkHound workspace: %w", err)
@@ -122,7 +122,7 @@ func warnIfChunkHoundExpected(path string) {
 
 // resolveAddSource picks the worktree to seed from. An explicit --from wins.
 // Otherwise the source is the worktree checked out at the start-point, so the
-// seeded harness — gitignored db/pi/mcp state git cannot carry — matches the
+// seeded harness — gitignored db/agent/mcp state git cannot carry — matches the
 // tree the new worktree is created from. When no worktree sits at the
 // start-point, the ref is checked out nowhere and no faithful index exists, so
 // the main worktree is the fallback and the mismatch is disclosed: the copied

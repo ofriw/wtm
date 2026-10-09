@@ -19,17 +19,17 @@ func hiddenSessionDirectory(t *testing.T) string {
 	}
 	// Updating an existing session leaves its containing directory old.
 	writeFile(t, file, "{}\n{}\n", 0o600)
-	link := filepath.Join(piAgentDir(), "sessions", "hidden")
+	link := filepath.Join(piAgent.configDir(), "sessions", "hidden")
 	mustSymlink(t, target, link)
 	return link
 }
 
-func cleanupHiddenSession(t *testing.T, repo string, w worktree) (gcResult, []string, error) {
+func cleanupHiddenSession(t *testing.T, repo string, w worktree, idx sessionIndex) (gcResult, []string, error) {
 	t.Helper()
 	var res gcResult
 	events := make(chan progressEvent, 64)
 	p := &progress{ctx: context.Background(), events: events}
-	res, err := gcCleanup(repo, []worktree{w}, remotePlan{keep: true}, false, gcMode{deleteTemp: true, idleOnly: true}, tempNow, p)
+	res, err := gcCleanup(repo, []worktree{w}, remotePlan{keep: true}, false, idx, gcMode{deleteTemp: true, idleOnly: true}, tempNow, p)
 	close(events)
 	var notices []string
 	for ev := range events {
@@ -43,8 +43,9 @@ func cleanupHiddenSession(t *testing.T, repo string, w worktree) (gcResult, []st
 func TestPiSymlinkDirectoryBlocksIdleGC(t *testing.T) {
 	repo, w, session := idleTempCheckout(t)
 	before := mustReadTempStore(t)
+	idx := cleanupSessionIndex(t, repo)
 	link := hiddenSessionDirectory(t)
-	res, notices, err := cleanupHiddenSession(t, repo, w)
+	res, notices, err := cleanupHiddenSession(t, repo, w, idx)
 	assertTempStore(t, before)
 	if !exists(w.Path) || !exists(session) || !refExists(repo, "refs/heads/"+w.Branch) {
 		t.Fatal("unknown-age session directory must preserve checkout, sessions and branch")
@@ -65,7 +66,7 @@ func TestPiSymlinkDirectoryHasUnknownAge(t *testing.T) {
 	if err != nil || !info.ModTime().Equal(tempTestTime) {
 		t.Fatalf("fixture directory age = %v, %v", info, err)
 	}
-	_, unverified, err := indexPiSessionsStrict()
+	_, unverified, err := indexSessionsStrict(nil)
 	if err != nil || len(unverified) != 1 {
 		t.Fatalf("symlink discovery = %v, %v", unverified, err)
 	}
@@ -83,9 +84,9 @@ func TestPiSymlinkFileRetainsTargetAge(t *testing.T) {
 			if err := os.Chtimes(target, age, age); err != nil {
 				t.Fatal(err)
 			}
-			link := filepath.Join(piAgentDir(), "sessions", "linked.jsonl")
+			link := filepath.Join(piAgent.configDir(), "sessions", "linked.jsonl")
 			mustSymlink(t, target, link)
-			_, unverified, err := indexPiSessionsStrict()
+			_, unverified, err := indexSessionsStrict(nil)
 			if err != nil || len(unverified) != 1 || !unverified[0].ModTime.Equal(age) {
 				t.Fatalf("file symlink target age = %+v, %v; want %v", unverified, err, age)
 			}

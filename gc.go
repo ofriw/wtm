@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// gc.go — remove UNUSED worktrees and their Pi session history.
+// gc.go — remove UNUSED worktrees and their agent session history.
 
 type gcOptions struct {
 	all          bool
@@ -184,7 +184,7 @@ func parseGCFlags(g *globals, args []string) (gcOptions, error) {
 	fs := subFlags("gc", g)
 	var o gcOptions
 	fs.BoolVar(&o.all, "all", false, "remove all UNUSED worktrees")
-	fs.BoolVar(&o.keepSessions, "keep-sessions", false, "keep Pi session history")
+	fs.BoolVar(&o.keepSessions, "keep-sessions", false, "keep agent session history")
 	fs.BoolVar(&o.keepRemote, "keep-remote", false, "keep remote upstream branches")
 	fs.Func("path", "worktree to remove (repeatable)", func(v string) error {
 		o.paths = append(o.paths, v)
@@ -262,24 +262,22 @@ func cmdGC(g *globals, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Reconcile before discovery: a record whose checkout is proven gone must
-	// not survive into candidate selection, and discovery reads the store here.
+	// Reconcile before discovery so missing checkouts cannot remain candidates.
 	reconcileGCTempStore()
-	root, ttl, wts, err := loadWorkspace(g, true)
+	ws, err := loadGCWorkspace(g, o.paths)
 	if err != nil {
 		return err
 	}
-	// One clock reading per run: selection and the under-lock idle re-check
-	// must agree on "now".
+	// Selection and the fresh under-lock idle check share one clock reading.
 	now := time.Now()
-	selected, plan, err := selectAndConfirmGC(g, wts, o, ttl, root, now)
+	selected, plan, err := selectAndConfirmGC(g, ws.wts, o, ws.ttl, ws.root, now)
 	if err != nil {
 		return handleGCAbort(g, o, err)
 	}
 	if len(selected) == 0 {
 		return gcReport(g, abortGCResult(o))
 	}
-	return runGCRemove(g, root, selected, plan, o, now)
+	return runGCRemove(g, ws.root, selected, plan, o, ws.idx, now)
 }
 
 // A vanished checkout leaves only stale metadata; failure must not block gc.
@@ -307,11 +305,11 @@ func reportResult(g *globals, res gcResult, runErr error) error {
 // runGCRemove removes the selected worktrees under the renderer, then prints the
 // report only after the renderer exits: a raw stdout write would land mid-frame
 // and corrupt the inline display.
-func runGCRemove(g *globals, root string, selected []worktree, plan remotePlan, o gcOptions, now time.Time) error {
+func runGCRemove(g *globals, root string, selected []worktree, plan remotePlan, o gcOptions, idx sessionIndex, now time.Time) error {
 	var res gcResult
 	runErr := withProgress(g, true, func(p *progress) error {
 		var rerr error
-		res, rerr = gcCleanup(root, selected, plan, o.keepSessions, gcMode{deleteTemp: true, idleOnly: len(o.paths) == 0}, now, p)
+		res, rerr = gcCleanup(root, selected, plan, o.keepSessions, idx, gcMode{deleteTemp: true, idleOnly: len(o.paths) == 0}, now, p)
 		return rerr
 	})
 	return reportResult(g, res, runErr)
@@ -361,9 +359,8 @@ func gcPickerDescription(candidates []worktree, keepRemote bool, header string) 
 
 // gcPickerColumns is the picker's projection of the shared worktree grid.
 // STATUS is dropped because every candidate is UNUSED (said once in the title),
-// and UNCOMMITTED replaces the inventory columns: it is the only field whose
-// value changes the consequence of the choice. TEMP labels a candidate with its
-// remaining idle window, the fact that makes it reclaimable.
+// and UNCOMMITTED replaces the integration columns. TEMP shows the idle window
+// that makes a temporary checkout reclaimable.
 var gcPickerColumns = []worktreeColumn{colPath, colBranch, colLastUsed, colTemp, colUncommitted, colUpstream}
 
 // gcPickerTitle keeps the "Select worktrees to remove" contract (pinned by the
@@ -473,7 +470,7 @@ func removeOneWorktree(root string, w worktree, idleOnly bool, now time.Time, re
 	reportRemovalError(w, err, res, p)
 	// Stale unverified sessions cannot change the verdict; disclose the ignores.
 	for _, path := range stale {
-		warnProgress(p, "unverified pi session %s predates known activity; ignoring", path)
+		warnProgress(p, "unverified agent session %s predates known activity; ignoring", path)
 	}
 	if !removed {
 		return false
@@ -525,7 +522,7 @@ func purgeTempBranch(root string, w worktree, res *gcResult) {
 }
 
 // purgeWorktree cleans up after a successful removal: the remote upstream
-// (unless kept), then the Pi session history (unless kept).
+// (unless kept), then the agent session history (unless kept).
 func purgeWorktree(root string, w worktree, plan remotePlan, keepSessions bool, res *gcResult, idx sessionIndex, p *progress, outcomes map[string]error) {
 	// Remote delete runs only after the local worktree is gone, so a failed
 	// local removal never orphans a still-needed remote branch.
@@ -570,7 +567,7 @@ func purgeRemoteWorktree(root string, w worktree, plan remotePlan, res *gcResult
 }
 
 func purgeWorktreeSessions(path string, res *gcResult, idx sessionIndex) {
-	n, err := purgePiSessions(path, idx)
+	n, err := purgeSessions(path, idx)
 	res.SessionsPurged += n
 	if err != nil {
 		res.Failed = append(res.Failed, gcFailure{Path: path, Error: "purge sessions: " + err.Error()})
@@ -680,27 +677,17 @@ func worktreeRemoveRecovering(root, path string) error {
 	return worktreeRemove(root, path)
 }
 
-// gcMode selects the removal policy. idleOnly rechecks the temp idle window
-// under the registry lock (gc --all and the picker); deleteTemp force-deletes
-// each removed checkout's local tmp/ branch (every caller but `delete`).
+// gcMode selects the removal policy. idleOnly rechecks temp activity under the
+// registry lock; deleteTemp deletes the local temp branch after cleanup.
 type gcMode struct {
 	deleteTemp bool
 	idleOnly   bool
 }
 
-// Delete controls its addressed branch separately, including ordinary branches.
-func gcRemoveKeepingLocalBranches(root string, selected []worktree, plan remotePlan, keepSessions bool, p *progress) (gcResult, error) {
-	return gcCleanup(root, selected, plan, keepSessions, gcMode{}, time.Now(), p)
-}
-
-func gcCleanup(root string, selected []worktree, plan remotePlan, keepSessions bool, mode gcMode, now time.Time, p *progress) (gcResult, error) {
+// Discovery supplies the purge index. Temp removal separately reads fresh
+// activity under its registry lock; cached evidence never authorizes removal.
+func gcCleanup(root string, selected []worktree, plan remotePlan, keepSessions bool, idx sessionIndex, mode gcMode, now time.Time, p *progress) (gcResult, error) {
 	res := emptyGCResult(keepSessions, plan.keptRemote())
-	// One session walk for all removals instead of one per worktree.
-	p.phase("indexing sessions", 0)
-	idx, err := indexPiSessions()
-	if err != nil {
-		return res, fmt.Errorf("index pi sessions: %w", err)
-	}
 	removeSelected(root, selected, plan, keepSessions, mode, now, &res, idx, p)
 	if len(res.Failed) > 0 {
 		return res, fmt.Errorf("%d cleanup failure(s)", len(res.Failed))
@@ -743,7 +730,7 @@ func finishSelectedCleanup(root string, selected, removed []worktree, plan remot
 	for _, w := range removed {
 		purgeWorktree(root, w, plan, keepSessions, res, idx, p, outcomes)
 	}
-	// Prune before temp branch deletion: if prune fails, recovery branches remain.
+	// Prune precedes branch deletion; finishTempCleanup defines recovery policy.
 	pruneWorktrees(res, root, p)
 	if !mode.deleteTemp {
 		return

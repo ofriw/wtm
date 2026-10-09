@@ -44,6 +44,15 @@ mk_session() { # mk_session <worktree> <session-dir> <touch-stamp>
   touch -t "$stamp" "$d/$dir.jsonl"
 }
 
+mk_claude_session() { # mk_claude_session <worktree> <session-id> <touch-stamp>
+  local wt=$1 id=$2 stamp=$3 project
+  project=$(printf '%s' "$wt" | sed 's/[^[:alnum:]]/-/g')
+  project="$CLAUDE_CONFIG_DIR/projects/$project"
+  mkdir -p "$project"
+  printf '{"type":"queue-operation","operation":"dequeue","cwd":null}\n{"type":"user","cwd":"%s","message":{"role":"user","content":"seed"}}\n' "$wt" >"$project/$id.jsonl"
+  touch -t "$stamp" "$project/$id.jsonl"
+}
+
 touch_git_activity() { # touch_git_activity <checkout> <touch options>...
   local root=$1 private
   shift

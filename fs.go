@@ -19,7 +19,7 @@ func exists(p string) bool {
 }
 
 // canonical resolves symlinks on the deepest existing ancestor so paths from
-// git, Pi sessions, and the filesystem compare equal (macOS /tmp is
+// git, agent sessions, and the filesystem compare equal (macOS /tmp is
 // /private/tmp). Non-existent tails are preserved.
 func canonical(p string) string {
 	p = filepath.Clean(p)

@@ -285,7 +285,7 @@ func verifyTempSnapshot(store tempStore, w worktree) error {
 
 var (
 	errTempActive     = errors.New("temp worktree is now ACTIVE")
-	errTempUnverified = errors.New("unverified pi session is newer than known activity")
+	errTempUnverified = errors.New("unverified agent session is newer than known activity")
 )
 
 // Idle GC refreshes activity under the lock; explicit removals bypass idleness.
@@ -327,7 +327,7 @@ func splitUnverifiedSessions(unverified []unverifiedSession, knownNewest time.Ti
 // Removed stays true when the checkout is gone but registry persistence fails.
 // removeTempWorktreeIf holds the exclusive registry lock for the entire
 // idle verification + checkout removal sequence.  Verification refreshes
-// external state (git activity, Pi sessions) and removal runs a blocking
+// external state (Git activity, agent sessions) and removal runs a blocking
 // git command; callers should not expect the lock to be short-lived.
 func removeTempWorktreeIf(w worktree, idleOnly bool, now time.Time) (removed bool, stale []string, err error) {
 	err = withLockedTempStore(func(store tempStore, registry string) error {

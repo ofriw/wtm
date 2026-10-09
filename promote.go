@@ -30,12 +30,12 @@ func cmdPromote(g *globals, args []string) error {
 // record. A worktree that is already permanent is the desired end state, so it
 // succeeds with promoted=false rather than erroring (safe for retries).
 func promoteWorktree(g *globals, branch string) error {
-	root, _, wts, err := loadWorkspace(g, true)
+	ws, err := loadWorkspace(g, true, false)
 	if err != nil {
 		return err
 	}
-	def, _ := defaultBranch(root)
-	w, err := findWorktreeByBranch(wts, branch, def)
+	def, _ := defaultBranch(ws.root)
+	w, err := findWorktreeByBranch(ws.wts, branch, def)
 	if err != nil {
 		return err
 	}

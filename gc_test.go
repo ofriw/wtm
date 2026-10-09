@@ -124,7 +124,7 @@ func TestGCPickerGrid(t *testing.T) {
 	now := tempNow
 	ttl := 10 * time.Hour
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeEnv(t, home)
 	candidates := []worktree{
 		{Path: filepath.Join(home, "wt1"), Branch: "feat", LastUsed: time.Time{}},
 		{Path: filepath.Join(home, "wt2"), Branch: "bug/x", Dirty: true,
@@ -197,9 +197,10 @@ func TestGCPickerDescription(t *testing.T) {
 func TestGCPickerColumnBudget(t *testing.T) {
 	now := tempNow
 	ttl := 10 * time.Hour
-	t.Setenv("HOME", "/home/nobody")
+	home := t.TempDir()
+	setHomeEnv(t, home)
 	candidates := []worktree{{
-		Path:   "/home/nobody/very/long/checkout/path/that/keeps/going/on/and/on/wt",
+		Path:   filepath.Join(home, "very", "long", "checkout", "path", "that", "keeps", "going", "on", "and", "on", "wt"),
 		Branch: "feature/a-rather-long-branch-name", Dirty: true,
 		Upstream: upstream{Short: "origin/feature/a-rather-long-branch-name", Remote: "origin", Ref: "refs/heads/x"},
 	}}
@@ -314,7 +315,7 @@ func gcRunRemove(t *testing.T, g *globals, repo string, selected []worktree, kee
 	var res gcResult
 	var runErr error
 	out := captureStdout(t, func() {
-		res, runErr = gcCleanup(repo, selected, planRemotes(selected, nil, keepRemote, repo), keepSessions, gcMode{deleteTemp: true}, tempNow, nil)
+		res, runErr = gcCleanup(repo, selected, planRemotes(selected, nil, keepRemote, repo), keepSessions, mustIndexSessions(t), gcMode{deleteTemp: true}, tempNow, nil)
 		if rerr := gcReport(g, res); rerr != nil {
 			runErr = rerr
 		}
@@ -335,7 +336,7 @@ func gcRunRemoveNotices(t *testing.T, repo string, selected []worktree, keepSess
 	t.Helper()
 	events := make(chan progressEvent, 64)
 	p := &progress{ctx: context.Background(), events: events}
-	res, err := gcCleanup(repo, selected, planRemotes(selected, nil, keepRemote, repo), keepSessions, gcMode{deleteTemp: true}, tempNow, p)
+	res, err := gcCleanup(repo, selected, planRemotes(selected, nil, keepRemote, repo), keepSessions, mustIndexSessions(t), gcMode{deleteTemp: true}, tempNow, p)
 	close(events)
 	var notices []string
 	for ev := range events {
@@ -446,9 +447,7 @@ func TestGCRemoveMissingGitLink(t *testing.T) {
 	if exists(linked) {
 		t.Fatalf("broken worktree survived: %s", linked)
 	}
-	if out := mustGit(t, repo, "worktree", "list", "--porcelain"); strings.Contains(out, linked) {
-		t.Fatalf("worktree still registered after gc:\n%s", out)
-	}
+	assertWorktreeNotListed(t, repo, linked)
 }
 
 // A temp checkout whose .git backlink is deleted out-of-band must be repaired
@@ -535,13 +534,8 @@ func TestGCRemovePrunesWhenNothingRemoved(t *testing.T) {
 	if !res.Pruned {
 		t.Fatal("Pruned must be true: prune must run even when nothing was removed")
 	}
-	out := mustGit(t, repo, "worktree", "list", "--porcelain")
-	if strings.Contains(out, stale) {
-		t.Fatalf("stale worktree not pruned:\n%s", out)
-	}
-	if !strings.Contains(out, locked) {
-		t.Fatalf("locked worktree must remain registered:\n%s", out)
-	}
+	assertWorktreeNotListed(t, repo, stale)
+	assertWorktreeListed(t, repo, locked)
 }
 
 func TestGCReport(t *testing.T) {
@@ -690,7 +684,7 @@ func gcFixtureWithUpstream(t *testing.T) (repo, linked, origin string) {
 // discovered returns the one discovered worktree at path, with its upstream.
 func discovered(t *testing.T, repo, path string) worktree {
 	t.Helper()
-	wts, err := discover(repo, nil)
+	wts, _, err := discover(repo, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1071,7 +1065,7 @@ func TestGCRemoteSurvivesWhenTrackedByActiveWorktree(t *testing.T) {
 
 	events := make(chan progressEvent, 64)
 	p := &progress{ctx: context.Background(), events: events}
-	res, err := gcCleanup(repo, []worktree{w1}, planRemotes([]worktree{w1}, []worktree{w2}, false, repo), false, gcMode{deleteTemp: true}, tempNow, p)
+	res, err := gcCleanup(repo, []worktree{w1}, planRemotes([]worktree{w1}, []worktree{w2}, false, repo), false, mustIndexSessions(t), gcMode{deleteTemp: true}, tempNow, p)
 	close(events)
 	var notices []string
 	for ev := range events {
@@ -1114,7 +1108,7 @@ func TestGCRemoteSharedVetoedUpstreamWarnsOnce(t *testing.T) {
 
 	events := make(chan progressEvent, 64)
 	p := &progress{ctx: context.Background(), events: events}
-	res, err := gcCleanup(repo, []worktree{w1, w2}, planRemotes([]worktree{w1, w2}, []worktree{w3}, false, repo), false, gcMode{deleteTemp: true}, tempNow, p)
+	res, err := gcCleanup(repo, []worktree{w1, w2}, planRemotes([]worktree{w1, w2}, []worktree{w3}, false, repo), false, mustIndexSessions(t), gcMode{deleteTemp: true}, tempNow, p)
 	close(events)
 	var notices []string
 	for ev := range events {

@@ -344,6 +344,7 @@ func TestReconcileDuringRemove(t *testing.T) {
 func TestIdleCheckContention(t *testing.T) {
 	sandboxTempProcesses(t)
 	repo, w, _ := idleTempCheckout(t)
+	idx := cleanupSessionIndex(t, repo)
 	holder := startTempProcess(t, "hold-lock", repo)
 	holder.expect(t, "locked")
 	gcDone := make(chan gcResult, 1)
@@ -351,7 +352,7 @@ func TestIdleCheckContention(t *testing.T) {
 		var res gcResult
 		var err error
 		err = withProgress(&globals{json: true}, true, func(p *progress) error {
-			res, err = gcCleanup(repo, []worktree{w}, remotePlan{keep: true}, false, gcMode{deleteTemp: true, idleOnly: true}, tempNow, p)
+			res, err = gcCleanup(repo, []worktree{w}, remotePlan{keep: true}, false, idx, gcMode{deleteTemp: true, idleOnly: true}, tempNow, p)
 			return err
 		})
 		if err != nil {

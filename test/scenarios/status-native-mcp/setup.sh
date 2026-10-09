@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Seed: main worktree whose only MCP config is the built-in .pi/mcp.json. The
-# MCP column must report it through the shared presence helper, not just
-# .mcp.json. A very long TTL keeps the fixed 2020 session ACTIVE so the LAST
+# pi capability must report it through the shared MCP inventory, not just
+# .mcp.json, and the mcp integration must count it equally ("chunk~ mcp pi",
+# mcp:"yes"). A very long TTL keeps the fixed 2020 session ACTIVE so the LAST
 # USED cell is deterministic.
 . "${HARNESS:-/harness}/lib.sh"
 
