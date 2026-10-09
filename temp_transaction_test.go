@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -227,10 +226,7 @@ func TestReconcilePreservesUnrelatedRepositoryGitFailure(t *testing.T) {
 	}
 	gone := canonical(filepath.Join(t.TempDir(), "gone"))
 	seedTempRecord(t, gone, "tmp/gone", "1h", tempTestTime)
-	err := reconcileTempStore()
-	if err == nil || !strings.Contains(err.Error(), other) {
-		t.Fatalf("unrelated Git failure was not reported with path: %v", err)
-	}
+	assertErrorNamesPath(t, "unrelated Git failure was not reported", reconcileTempStore(), other)
 	assertTempStore(t, want)
 }
 
@@ -247,9 +243,7 @@ func TestReconcilePreservesFilesystemFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := mustReadTempStore(t)
-	if err := reconcileTempStore(); err == nil || !strings.Contains(err.Error(), path) {
-		t.Fatalf("identity read failure was not reported: %v", err)
-	}
+	assertErrorNamesPath(t, "identity read failure was not reported", reconcileTempStore(), path)
 	assertTempStore(t, want)
 }
 
