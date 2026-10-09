@@ -95,9 +95,16 @@ func TestStrictActivityRejectsGitLogFailure(t *testing.T) {
 	requireProbeError(t, repo, store, tempNow)
 }
 
+// A corrupt private index is a portable Git listing failure: Git for Windows
+// opens a directory-valued core.excludesFile as an empty file, so that trigger
+// only fails on Unix.
 func TestStrictActivityRejectsGitFileListingFailure(t *testing.T) {
 	repo, store := strictActivityFixture(t)
-	mustGit(t, repo, "config", "core.excludesFile", filepath.Dir(repo))
+	dir, err := gitPrivateDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "index"), "corrupt\n", 0o600)
 	requireProbeError(t, repo, store, tempNow)
 }
 
