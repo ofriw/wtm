@@ -27,8 +27,9 @@ type gcResult struct {
 	RemoteDeleted   []string `json:"remoteDeleted"`
 	DeletedBranch   string   `json:"deletedBranch,omitempty"` // set only by `delete`
 	DeletedBranches []string `json:"deletedBranches,omitempty"`
-	// Skipped lists temp candidates that went ACTIVE between selection and
-	// removal; stderr carries the warning, JSON carries the fact.
+	// Skipped lists candidates the locked verification refused to remove;
+	// reportRemovalError owns the skip reasons. stderr carries the warning,
+	// JSON carries the fact.
 	Skipped        []string    `json:"skipped,omitempty"`
 	Failed         []gcFailure `json:"failed"`
 	SessionsPurged int         `json:"sessionsPurged"`
@@ -486,8 +487,10 @@ func removeOneWorktree(root string, w worktree, idleOnly bool, now time.Time, re
 	return true
 }
 
+// reportRemovalError classifies temp races as skips: promotion or identity
+// drift between discovery and locked verification is not a tooling failure.
 func reportRemovalError(w worktree, err error, res *gcResult, p *progress) {
-	if errors.Is(err, errTempActive) || errors.Is(err, errTempUnverified) {
+	if errors.Is(err, errTempActive) || errors.Is(err, errTempUnverified) || errors.Is(err, errTempPromoted) || errors.Is(err, errTempMetadataChanged) {
 		warnProgress(p, "skipping %s: %s", w.Path, err)
 		res.Skipped = append(res.Skipped, w.Path)
 	} else if err != nil {
@@ -806,9 +809,10 @@ func printGCOutcomes(res gcResult) {
 
 func printGCSummary(res gcResult) {
 	printGCOutcomes(res)
-	// A skip is a real outcome: the user asked for candidates that went ACTIVE.
+	// A skip is a real outcome; each reason is disclosed on stderr as it
+	// happens, so the summary stays reason-neutral.
 	if len(res.Skipped) > 0 {
-		fmt.Printf("skipped %d: now ACTIVE\n", len(res.Skipped))
+		fmt.Printf("skipped %d\n", len(res.Skipped))
 	}
 	if res.KeptSessions {
 		fmt.Println("sessions kept")

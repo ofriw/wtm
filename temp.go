@@ -256,6 +256,9 @@ func verifyTempIdentity(path string, rec tempRecord) error {
 	}
 	data, err := os.ReadFile(p)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%w: missing identity for %s", errTempMetadataChanged, path)
+		}
 		return err
 	}
 	if string(data) != rec.Identity {
@@ -277,8 +280,11 @@ func verifyTempBranch(path, expected string) error {
 
 func verifyTempSnapshot(store tempStore, w worktree) error {
 	rec, ok := store[w.Path]
-	if !ok || rec.Identity != w.TempIdentity || rec.Branch != w.Branch {
-		return fmt.Errorf("temp record changed for %s", w.Path)
+	if !ok {
+		return fmt.Errorf("%w: %s", errTempPromoted, w.Path)
+	}
+	if rec.Identity != w.TempIdentity || rec.Branch != w.Branch {
+		return fmt.Errorf("%w: identity or branch changed for %s", errTempMetadataChanged, w.Path)
 	}
 	return verifyTempIdentity(w.Path, rec)
 }
@@ -286,6 +292,7 @@ func verifyTempSnapshot(store tempStore, w worktree) error {
 var (
 	errTempActive     = errors.New("temp worktree is now ACTIVE")
 	errTempUnverified = errors.New("unverified agent session is newer than known activity")
+	errTempPromoted   = errors.New("temp record was promoted or removed")
 )
 
 // Idle GC refreshes activity under the lock; explicit removals bypass idleness.

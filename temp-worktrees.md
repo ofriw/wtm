@@ -34,9 +34,10 @@ Permanent worktrees use the configured `unusedTTL` instead.
 Normal GC, including `gc --all`, removes only idle candidates. Before removing
 each temporary candidate, GC holds the registry lock and reads current Git,
 file, and Pi activity again. It checks the deadline against that fresh activity.
-If the checkout is now ACTIVE, GC reports the skip and keeps the checkout,
-record, local and remote branches, and sessions. Activity after initial selection
-therefore protects the checkout.
+If the locked verification refuses the removal (the checkout is now ACTIVE,
+was promoted, or its temp metadata changed), GC reports the skip and keeps the
+checkout, record, local and remote branches, and sessions. Activity after
+initial selection therefore protects the checkout.
 
 Session files that cannot be read or attributed to a worktree (unreadable,
 corrupt, symlinked, header without cwd) are unverifiable, not fatal by
@@ -130,4 +131,6 @@ absence is evidence, git errors alone are not.
 `status` includes a `TEMP` countdown column. JSON includes `temp` and `expiresAt`.
 At the exact deadline second, TEMP shows `0s` and the worktree is not yet a
 candidate; the next gc run collects it. GC reports deleted local branches,
-all cleanup failures, and every candidate skipped for becoming ACTIVE again.
+all cleanup failures, and every candidate the locked check refused (now ACTIVE
+again, promoted, or changed temp metadata). A refused removal is a skip, not a
+cleanup failure: it keeps the checkout and exits 0.

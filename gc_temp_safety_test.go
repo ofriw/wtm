@@ -24,8 +24,11 @@ func TestGCRejectsChangedTempIdentity(t *testing.T) {
 			repo, linked, w := tempSafetyFixture(t)
 			changeTempCheckout(t, repo, linked, change)
 			res, err := gcRunRemove(t, &globals{json: true}, repo, []worktree{w}, false, true)
-			if err == nil || len(res.Removed) != 0 || len(res.Failed) != 1 {
+			if err != nil || len(res.Removed) != 0 {
 				t.Fatalf("changed identity removal: result=%+v error=%v", res, err)
+			}
+			if len(res.Skipped) != 1 {
+				t.Fatalf("%s drift must skip: result=%+v", change, res)
 			}
 			if !exists(linked) || !refExists(repo, "refs/heads/tmp/safety") {
 				t.Fatal("changed checkout or original branch was removed")
@@ -112,6 +115,29 @@ func TestGCTempConsentNamesLocalBranches(t *testing.T) {
 		if !strings.Contains(gcPickerPolicy(keep, true), "Temp LOCAL branches will be force-deleted") {
 			t.Fatalf("picker does not disclose local branch deletion (keep=%v)", keep)
 		}
+	}
+}
+
+func TestGCTempPromotedBeforeRemovalSkips(t *testing.T) {
+	repo, linked, w := tempSafetyFixture(t)
+	// Promote the temp record before the locked verification, simulating
+	// a concurrent promote between discovery and removal.
+	_, err := promoteTempRecord(linked)
+	if err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	res, err := gcRunRemove(t, &globals{json: true}, repo, []worktree{w}, false, true)
+	if err != nil {
+		t.Fatalf("gc after promote: %v", err)
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0] != linked {
+		t.Fatalf("skipped = %v, want [%s]", res.Skipped, linked)
+	}
+	if len(res.Failed) != 0 {
+		t.Fatalf("failed = %v, want none after promote", res.Failed)
+	}
+	if !exists(linked) || !refExists(repo, "refs/heads/tmp/safety") {
+		t.Fatal("promoted worktree or branch was removed")
 	}
 }
 
