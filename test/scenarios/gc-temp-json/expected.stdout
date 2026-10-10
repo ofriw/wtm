@@ -1,0 +1,14 @@
+{
+  "removed": [
+    "/SBX/repo-tmp-x"
+  ],
+  "remoteDeleted": [],
+  "deletedBranches": [
+    "tmp/x"
+  ],
+  "failed": [],
+  "sessionsPurged": 0,
+  "keptSessions": false,
+  "keptRemote": false,
+  "pruned": true
+}

@@ -311,3 +311,199 @@ func TestNativeGCDoesNotSelectFresh(t *testing.T) {
 		t.Fatalf("fresh worktree was collected: %v", err)
 	}
 }
+
+// TestNativeAddInvalidTTL pins the usage exit for a bad --ttl: an unparsable
+// window is a command-line error (rc 2), never a silent default.
+func TestNativeAddInvalidTTL(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	_, errOut, rc := runWTM(t, repo, nil, "add", "badttl", "--ttl", "nope")
+	if rc != 2 || !strings.Contains(errOut, "ttl") {
+		t.Fatalf("add --ttl nope = (rc %d, stderr %q), want rc 2 mentioning ttl", rc, errOut)
+	}
+}
+
+// TestNativeAddTTLAccepted drives every accepted --ttl form through the real
+// binary and pins the JSON deadline against the persisted record.
+func TestNativeAddTTLAccepted(t *testing.T) {
+	// Go durations accept a leading +; pin the real contract, not a stricter one.
+	cases := []struct {
+		name  string
+		ttl   string
+		delta time.Duration
+	}{
+		{"minutes", "30m", 30 * time.Minute},
+		{"hours", "1h", time.Hour},
+		{"compound", "1h30m", 90 * time.Minute},
+		{"days", "7d", 7 * 24 * time.Hour},
+		{"fractional", "1.5s", 1500 * time.Millisecond},
+		{"signedplus", "+1h", time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox(t)
+			repo := nativeRepo(t)
+			out, errOut, rc := runWTM(t, repo, nil, "add", tc.name, "--ttl", tc.ttl, "--no-index", "--json")
+			if rc != 0 {
+				t.Fatalf("add --ttl %s rc = %d, stderr = %s", tc.ttl, rc, errOut)
+			}
+			assertNativeTempDeadline(t, decodeAddResult(t, out), "tmp/"+tc.name, tc.delta)
+		})
+	}
+}
+
+// TestNativeAddTTLRejected pins the usage exit for every malformed window.
+func TestNativeAddTTLRejected(t *testing.T) {
+	cases := []struct{ name, ttl string }{
+		{"zero", "0s"},
+		{"negative", "-1h"},
+		{"trailing space", "1h "},
+		{"garbage", "abc"},
+		{"over max", "999999d"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox(t)
+			repo := nativeRepo(t)
+			_, errOut, rc := runWTM(t, repo, nil, "add", tc.name, "--ttl", tc.ttl, "--no-index")
+			if rc == 0 {
+				t.Fatalf("add --ttl %q rc = 0, want non-zero (stderr %s)", tc.ttl, errOut)
+			}
+		})
+	}
+}
+
+// TestNativeAddTTLImpliesTemp pins that --ttl alone creates a tmp/ branch.
+func TestNativeAddTTLImpliesTemp(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	out, errOut, rc := runWTM(t, repo, nil, "add", "implied", "--ttl", "1h", "--no-index", "--json")
+	if rc != 0 {
+		t.Fatalf("add --ttl 1h rc = %d, stderr = %s", rc, errOut)
+	}
+	assertNativeTempDeadline(t, decodeAddResult(t, out), "tmp/implied", time.Hour)
+}
+
+func decodeAddResult(t *testing.T, out string) addResult {
+	t.Helper()
+	var res addResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("add JSON invalid: %v\n%s", err, out)
+	}
+	return res
+}
+
+// assertNativeTempDeadline pins the user-facing temp contract: a tmp/ branch,
+// the temp flag, a parseable TTL, and an expiresAt derived from the record.
+func assertNativeTempDeadline(t *testing.T, res addResult, wantBranch string, delta time.Duration) {
+	t.Helper()
+	if !res.Temp || res.Branch != wantBranch {
+		t.Fatalf("add result = %+v, want temp %s", res, wantBranch)
+	}
+	if got, err := time.ParseDuration(res.TTL); err != nil || got != delta {
+		t.Fatalf("ttl = %q, want %s (err %v)", res.TTL, delta, err)
+	}
+	rec, ok := mustReadTempStore(t)[canonical(res.Path)]
+	if !ok {
+		t.Fatalf("no temp record for %s", res.Path)
+	}
+	wantExpiry := rec.CreatedAt.Add(delta).UTC().Format(time.RFC3339Nano)
+	if res.ExpiresAt == nil || *res.ExpiresAt != wantExpiry {
+		t.Fatalf("expiresAt = %v, want %s", res.ExpiresAt, wantExpiry)
+	}
+}
+
+// TestNativeAddTempJSON pins the binary-level temp add: the tmp/ branch, the
+// temp/expiresAt JSON fields, and the persisted record.
+func TestNativeAddTempJSON(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	target := canonical(filepath.Join(filepath.Dir(repo), "repo-tmp-native"))
+	out, errOut, rc := runWTM(t, repo, nil, "add", "native", "--temp", "--no-index", "--json")
+	if rc != 0 {
+		t.Fatalf("add --temp rc = %d, stderr = %s", rc, errOut)
+	}
+	res := decodeAddResult(t, out)
+	if !res.Temp || res.Branch != "tmp/native" || res.Path != target {
+		t.Fatalf("add result = %+v, want tmp/native at %s", res, target)
+	}
+	if res.ExpiresAt == nil || *res.ExpiresAt == "" {
+		t.Fatalf("temp add must report expiresAt: %+v", res)
+	}
+	rec, ok := mustReadTempStore(t)[target]
+	if !ok || rec.Branch != "tmp/native" {
+		t.Fatalf("temp record = %+v, want a record for %s", rec, target)
+	}
+}
+
+// Promotion must switch an expired temporary checkout to the longer permanent
+// idle window, not merely preserve a checkout that was already fresh.
+func TestNativePromoteTempThenGCIdle(t *testing.T) {
+	sandbox(t)
+	setTTL(t, "7d")
+	repo := nativeRepo(t)
+	linked := addNativeExpiredTemp(t, repo)
+	assertNativeTempPromotion(t, repo, linked)
+	out, errOut, rc := runWTM(t, repo, nil, "gc", "--all", "--yes")
+	if rc != 0 || !strings.Contains(out, "nothing to do") {
+		t.Fatalf("gc after promote = (%q, rc %d, stderr %s), want nothing to do", out, rc, errOut)
+	}
+	if _, err := os.Stat(linked); err != nil {
+		t.Fatalf("promoted checkout was collected: %v", err)
+	}
+	if !refExists(repo, "refs/heads/tmp/promo") {
+		t.Fatal("promotion or GC removed the retained branch")
+	}
+}
+
+func addNativeExpiredTemp(t *testing.T, repo string) string {
+	t.Helper()
+	if _, errOut, rc := runWTM(t, repo, nil, "add", "promo", "--ttl", "1h", "--no-index"); rc != 0 {
+		t.Fatalf("add --temp rc = %d, stderr = %s", rc, errOut)
+	}
+	linked := canonical(filepath.Join(filepath.Dir(repo), "repo-tmp-promo"))
+	lastUsed := time.Now().Add(-2 * time.Hour)
+	seedTempRecord(t, linked, "tmp/promo", "1h", lastUsed.Add(-time.Hour))
+	backdateGitActivity(t, linked, lastUsed)
+	mkSession(t, linked, "promotion", lastUsed)
+	w := discovered(t, repo, linked)
+	if !w.Temp || !w.unused(time.Now(), 7*24*time.Hour) {
+		t.Fatalf("promotion fixture is not expired under temp TTL: %+v", w)
+	}
+	w.Temp = false
+	if w.unused(time.Now(), 7*24*time.Hour) {
+		t.Fatalf("promotion fixture is expired under permanent TTL: %+v", w)
+	}
+	return linked
+}
+
+func assertNativeTempPromotion(t *testing.T, repo, linked string) {
+	t.Helper()
+	out, errOut, rc := runWTM(t, repo, nil, "promote", "tmp/promo")
+	if rc != 0 {
+		t.Fatalf("promote rc = %d, stderr = %s", rc, errOut)
+	}
+	if !strings.Contains(out, "promoted") {
+		t.Fatalf("promote output = %q, want promoted", out)
+	}
+	if _, ok := mustReadTempStore(t)[linked]; ok {
+		t.Fatalf("promote left temp record for %s", linked)
+	}
+}
+
+// TestNativePromotePermanentIsIdempotent pins the already-permanent contract:
+// the desired end state, so it succeeds with a message and exit 0.
+func TestNativePromotePermanentIsIdempotent(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	if _, errOut, rc := runWTM(t, repo, nil, "add", "perm", "--no-index"); rc != 0 {
+		t.Fatalf("add rc = %d, stderr = %s", rc, errOut)
+	}
+	out, errOut, rc := runWTM(t, repo, nil, "promote", "perm")
+	if rc != 0 {
+		t.Fatalf("promote(permanent) rc = %d, stderr = %s", rc, errOut)
+	}
+	if !strings.Contains(out, "already permanent") {
+		t.Fatalf("promote(permanent) output = %q, want already permanent", out)
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,13 +20,33 @@ type worktree struct {
 	Main     bool
 	Dirty    bool // uncommitted changes; surfaced for gc (picker label, forced-removal warning), never a filter
 	LastUsed time.Time
-	// Caps maps each capability id to its state; the capability registry is the
-	// SSOT for ids, so the row no longer grows a field per integration.
+
+	// Temp metadata is applied only after registry identity and branch checks.
+	Temp         bool
+	TempTTL      time.Duration
+	TempCreated  time.Time
+	TempIdentity string
+	// Caps uses the capability registry's ids and states.
 	Caps map[string]capState
 }
 
+// unused reports whether gc may reclaim a worktree: a temp one past its own
+// idle window, a permanent one past the global unusedTTL. It is the single
+// candidate predicate for status and gc.
 func (w worktree) unused(now time.Time, ttl time.Duration) bool {
+	if w.Temp {
+		return tempExpired(w.TempCreated, w.LastUsed, w.TempTTL, now)
+	}
 	return w.LastUsed.IsZero() || now.Sub(w.LastUsed) > ttl
+}
+
+// tempExpiresAt is the deadline a temp worktree is measured against.
+// tempDeadline owns the formula. Zero for a permanent worktree.
+func (w worktree) tempExpiresAt() time.Time {
+	if !w.Temp {
+		return time.Time{}
+	}
+	return tempDeadline(w.TempCreated, w.LastUsed, w.TempTTL)
 }
 
 func (w worktree) status(now time.Time, ttl time.Duration) string {
@@ -71,9 +92,24 @@ type workspace struct {
 
 // loadWorkspace resolves the repo, TTL and inventory. discovery — the slow
 // path — uses the renderer when showProgress or --progress always requests it.
-// failClosed is the session-index policy: reclamation must never act on an
-// index that skipped an unreadable transcript, so it passes true.
+// Discovery reads but never reconciles the temp registry. Explicit removal
+// passes failClosed to reject unreadable sessions before any destructive action.
 func loadWorkspace(g *globals, showProgress, failClosed bool) (workspace, error) {
+	return loadWorkspaceWithSessions(g, showProgress, discoverySessions(failClosed))
+}
+
+// Idle GC collects file evidence for fresh candidate checks; explicit --path
+// removal bypasses idleness, not strict session-read safety.
+func loadGCWorkspace(g *globals, paths []string) (workspace, error) {
+	if len(paths) > 0 {
+		return loadWorkspace(g, true, true)
+	}
+	return loadWorkspaceWithSessions(g, true, indexSessionsStrict)
+}
+
+type sessionDiscovery func(*progress) (sessionIndex, []unverifiedSession, error)
+
+func loadWorkspaceWithSessions(g *globals, showProgress bool, sessions sessionDiscovery) (workspace, error) {
 	var ws workspace
 	root, err := resolveRoot(g)
 	if err != nil {
@@ -85,38 +121,63 @@ func loadWorkspace(g *globals, showProgress, failClosed bool) (workspace, error)
 	}
 	err = withProgress(g, showProgress, func(p *progress) error {
 		var derr error
-		ws.wts, ws.idx, derr = discover(root, p, failClosed)
+		ws.wts, ws.idx, derr = discoverWithSessions(root, p, sessions)
 		return derr
 	})
 	ws.root, ws.ttl = root, ttl
 	return ws, err
 }
 
-func buildWorktree(g gworktree, idx sessionIndex, ups map[string]upstream, p *progress) worktree {
+func buildWorktree(g gworktree, idx sessionIndex, ups map[string]upstream, temps tempStore, p *progress) worktree {
+	w := worktreeInventory(g, idx, ups, p)
+	applyTempRecord(&w, temps, p)
+	return w
+}
+
+func worktreeInventory(g gworktree, idx sessionIndex, ups map[string]upstream, p *progress) worktree {
 	pth := canonical(g.Path)
 	configs := mcpConfigs(pth, p)
 	return worktree{
-		Path:   pth,
-		Branch: g.Branch,
-		// Detached branches have no name, so ups[""] is the zero value.
-		Upstream: ups[g.Branch],
-		Main:     g.Main,
-		// Dirty is no longer pre-computed: status never shows it and the gc
-		// picker is the only consumer (set lazily in gcSelection's candidate loop).
+		Path: pth, Branch: g.Branch, Upstream: ups[g.Branch], Main: g.Main,
+		// Dirty is set lazily by the gc picker; status does not use it.
 		LastUsed: worktreeLastUsed(pth, idx),
 		Caps:     capabilityStates(capInput{root: pth, mcp: configs}),
 	}
 }
 
+// applyTempRecord marks w temporary when its record verifies. Every failure
+// falls toward permanent, never toward reclaimable: a zero TTL would reclaim
+// instantly, so an unparsable window is refused rather than defaulted.
+func applyTempRecord(w *worktree, temps tempStore, p *progress) {
+	rec, ok := temps[w.Path]
+	if !ok {
+		return
+	}
+	if err := verifyTempIdentity(w.Path, rec); err != nil {
+		warnProgress(p, "temp record for %s: %s; treating as permanent", displayPath(w.Path), err)
+		return
+	}
+	ttl, err := parseTTL(rec.TTL)
+	if err != nil {
+		warnProgress(p, "temp record for %s: %s; treating as permanent", displayPath(w.Path), err)
+		return
+	}
+	w.Temp, w.TempTTL, w.TempCreated, w.TempIdentity = true, ttl, rec.CreatedAt, rec.Identity
+}
+
 // discover inventories every worktree of the repo rooted at root, reporting
-// each slow step to p (a nil no-op when progress is off). It also returns the
-// session index it built, so callers never rebuild it.
+// each slow step to p. The returned session index is reused by reclamation.
 func discover(root string, p *progress, failClosed bool) ([]worktree, sessionIndex, error) {
-	raw, idx, ups, err := discoverInputs(root, p, failClosed)
+	return discoverWithSessions(root, p, discoverySessions(failClosed))
+}
+
+func discoverWithSessions(root string, p *progress, sessions sessionDiscovery) ([]worktree, sessionIndex, error) {
+	raw, idx, unknown, ups, temps, err := discoverInputs(root, p, sessions)
 	if err != nil {
 		return nil, nil, err
 	}
-	wts := scanWorktrees(raw, idx, ups, p)
+	wts := scanWorktrees(raw, idx, ups, temps, p)
+	guardPermanentActivity(wts, unknown, time.Now(), p)
 	sortWorktrees(wts)
 	return wts, idx, nil
 }
@@ -131,71 +192,239 @@ func discoverUpstreams(root string, p *progress) map[string]upstream {
 	return ups
 }
 
-// discoverInputs walks the three O(repo) sources discovery needs: the worktree
-// list, one session index for the whole inventory, and one upstream map for
-// every branch. failClosed is that index's unreadable-session policy (see
-// sessionErrPolicy): reclamation passes true, display passes false.
-func discoverInputs(root string, p *progress, failClosed bool) ([]gworktree, sessionIndex, map[string]upstream, error) {
+// discoverInputs reads each shared source once: worktrees, sessions, upstreams
+// and temp records. Reclamation retains unknown files for candidate-level checks.
+func discoverInputs(root string, p *progress, sessions sessionDiscovery) ([]gworktree, sessionIndex, []unverifiedSession, map[string]upstream, tempStore, error) {
 	p.phase("reading worktrees", 0)
 	raw, err := worktrees(root)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	p.phase("indexing sessions", 0)
-	idx, err := indexSessions(agents(), sessionErrPolicy{failClosed: failClosed, p: p})
+	idx, unknown, err := sessions(p)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
-	return raw, idx, discoverUpstreams(root, p), nil
+	return raw, idx, unknown, discoverUpstreams(root, p), readTempStoreLenient(p), nil
+}
+
+func discoverySessions(failClosed bool) sessionDiscovery {
+	return func(p *progress) (sessionIndex, []unverifiedSession, error) {
+		idx, err := indexSessions(agents(), sessionErrPolicy{failClosed: failClosed, p: p})
+		return idx, nil, err
+	}
+}
+
+// Permanent cleanup has no fresh idle probe. Missing ownership therefore keeps
+// every permanent candidate active; temp candidates use the locked fresh probe.
+// When all unverified sessions have known ages, protection scopes to permanent
+// worktrees older than the newest unverified session. A single unknown-age session
+// preserves the original fail-closed contract.
+func guardPermanentActivity(wts []worktree, unknown []unverifiedSession, now time.Time, p *progress) {
+	if len(unknown) == 0 {
+		return
+	}
+	for _, u := range unknown {
+		warnProgress(p, "unverified session ownership: %s", u.Path)
+	}
+	if hasUnknownAgeSession(unknown) {
+		for i := range wts {
+			if !wts[i].Temp {
+				wts[i].LastUsed = now
+				warnProgress(p, "%s: keeping permanent worktree ACTIVE because session ownership is unverified", displayPath(wts[i].Path))
+			}
+		}
+		return
+	}
+	newest := newestKnownSession(unknown)
+	// Same age-gating rule as unverifiedSession.blocksRemoval (agents.go):
+	// only a session newer than known activity can hide recent use. The
+	// equality edge differs by intent: this guard protects on == (fail closed
+	// for permanents), the temp path removes on strict >.
+	for i := range wts {
+		if !wts[i].Temp && !wts[i].LastUsed.After(newest) {
+			wts[i].LastUsed = now
+			warnProgress(p, "%s: keeping permanent worktree ACTIVE because session ownership is unverified", displayPath(wts[i].Path))
+		}
+	}
+}
+
+func hasUnknownAgeSession(unknown []unverifiedSession) bool {
+	for _, u := range unknown {
+		if u.ModTime.IsZero() {
+			return true
+		}
+	}
+	return false
+}
+
+func newestKnownSession(unknown []unverifiedSession) time.Time {
+	var newest time.Time
+	for _, u := range unknown {
+		if u.ModTime.After(newest) {
+			newest = u.ModTime
+		}
+	}
+	return newest
+}
+
+// readTempStoreLenient reads the temp store for read-only commands. A corrupt
+// store only loses temp metadata (the checkouts stay durable), so it must never
+// break status: warn and proceed with no temp records.
+func readTempStoreLenient(p *progress) tempStore {
+	temps, err := readTempStore()
+	if err != nil {
+		warnProgress(p, "temp store: %s; no temp worktrees tracked", err)
+		return tempStore{}
+	}
+	return temps
 }
 
 // scanWorktrees builds the inventory and reports per-worktree progress; the
 // loop is split out so discover stays a readable sequence of phases.
-func scanWorktrees(raw []gworktree, idx sessionIndex, ups map[string]upstream, p *progress) []worktree {
+func scanWorktrees(raw []gworktree, idx sessionIndex, ups map[string]upstream, temps tempStore, p *progress) []worktree {
 	p.phase("scanning worktrees", len(raw))
 	wts := make([]worktree, 0, len(raw))
 	for _, g := range raw {
-		wts = append(wts, buildWorktree(g, idx, ups, p))
+		wts = append(wts, buildWorktree(g, idx, ups, temps, p))
 		p.advance(1)
 		p.detail(displayPath(g.Path))
 	}
 	return wts
 }
 
-func updateNewest(target *time.Time, path string) {
-	if info, err := os.Stat(path); err == nil && info.ModTime().After(*target) {
+func updateNewest(target *time.Time, path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("activity stat %s: %w", path, err)
+	}
+	if info.ModTime().After(*target) {
 		*target = info.ModTime()
 	}
+	return nil
 }
 
-func scanGitModTimes(path string, newest *time.Time) {
-	if out, err := git(path, "log", "-1", "--format=%ct"); err == nil {
-		if s, err := strconv.ParseInt(out, 10, 64); err == nil {
-			if commit := time.Unix(s, 0); commit.After(*newest) {
-				*newest = commit
+func scanGitModTimes(path string, newest *time.Time, strict bool) error {
+	if err := scanIndexTime(path, newest); err != nil && strict {
+		return err
+	}
+	if err := scanCommitTime(path, newest); err != nil && strict {
+		return err
+	}
+	return scanChangedFileTimes(path, newest, strict)
+}
+
+func scanCommitTime(path string, newest *time.Time) error {
+	out, err := git(path, "log", "-1", "--format=%ct")
+	if err != nil {
+		return err
+	}
+	s, err := strconv.ParseInt(out, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parse git commit time: %w", err)
+	}
+	if commit := time.Unix(s, 0); commit.After(*newest) {
+		*newest = commit
+	}
+	return nil
+}
+
+// changedActivityFiles includes staged files but not staged deletions: their
+// activity survives in the private index, while missing unstaged files fail closed.
+func changedActivityFiles(path string) (string, error) {
+	out, err := git(path, "--no-optional-locks", "ls-files", "-m", "-o", "--exclude-standard", "-z")
+	if err != nil {
+		return "", err
+	}
+	staged, err := git(path, "--no-optional-locks", "diff", "--cached", "--name-only", "--diff-filter=d", "-z")
+	return out + "\x00" + staged, err
+}
+
+func scanChangedFileTimes(path string, newest *time.Time, strict bool) error {
+	out, err := changedActivityFiles(path)
+	if err != nil {
+		return err
+	}
+	for _, rel := range strings.Split(out, "\x00") {
+		if rel != "" && !strings.HasPrefix(rel, ".chunkhound") {
+			if err := updateNewest(newest, filepath.Join(path, rel)); err != nil && strict {
+				// A vanished changed file cannot be checked for activity: fail
+				// closed and say how the user resolves the resulting deadlock.
+				// errors.Is, not os.IsNotExist: updateNewest wraps with %w.
+				if errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("%w; commit or restore the deleted file, or remove the checkout explicitly", err)
+				}
+				return err
 			}
 		}
 	}
-	if out, err := git(path, "ls-files", "-m", "-o", "--exclude-standard", "-z"); err == nil {
-		for _, rel := range strings.Split(out, "\x00") {
-			if rel != "" && !strings.HasPrefix(rel, ".chunkhound") {
-				updateNewest(newest, filepath.Join(path, rel))
-			}
-		}
+	return nil
+}
+
+// freshWorktreeActivity refreshes both sources under a fresh session index
+// at now; discovery's cached index cannot authorize removal. Errors are fatal:
+// removal must fail closed when activity is unreadable. Unverified sessions
+// ride along so the caller can scope them per candidate instead of failing
+// globally.
+func freshWorktreeActivity(path string, now time.Time) (time.Time, []unverifiedSession, error) {
+	idx, unverified, err := indexSessionsStrict(nil)
+	if err != nil {
+		return time.Time{}, nil, fmt.Errorf("refresh agent sessions: %w", err)
 	}
+	last, err := readWorktreeActivityStrict(path, idx, now)
+	if err != nil {
+		return time.Time{}, nil, err
+	}
+	return last, unverified, nil
 }
 
 // worktreeLastUsed includes creation and Git changes so a new or actively
 // edited worktree cannot be classified as abandoned before its first agent session.
 func worktreeLastUsed(path string, idx sessionIndex) time.Time {
-	now := time.Now()
-	newest := lastUsed(path, idx)
-	updateNewest(&newest, filepath.Join(path, ".git"))
-	scanGitModTimes(path, &newest)
-	if newest.After(now) {
-		return now
-	}
+	newest, _ := readWorktreeActivityLenient(path, idx, time.Now())
 	return newest
+}
+
+// readWorktreeActivityLenient collects activity timestamps relative to now,
+// ignoring errors. Used for display where failure must not block output.
+func readWorktreeActivityLenient(path string, idx sessionIndex, now time.Time) (time.Time, error) {
+	return collectActivity(path, idx, now, false)
+}
+
+// readWorktreeActivityStrict collects activity timestamps relative to now,
+// failing on any error. Used immediately before idle-based removal where
+// unreadable activity must prevent reclamation.
+func readWorktreeActivityStrict(path string, idx sessionIndex, now time.Time) (time.Time, error) {
+	return collectActivity(path, idx, now, true)
+}
+
+// collectActivity merges agent sessions, the checkout backlink and Git
+// modification times, clamping any future timestamp to now.
+func collectActivity(path string, idx sessionIndex, now time.Time, strict bool) (time.Time, error) {
+	newest, err := sessionLastUsed(path, idx, strict)
+	if err != nil {
+		return newest, err
+	}
+	if err := updateNewest(&newest, filepath.Join(path, ".git")); err != nil && strict {
+		return newest, err
+	}
+	if err := scanGitModTimes(path, &newest, strict); err != nil && strict {
+		return newest, err
+	}
+	if newest.After(now) {
+		return now, nil
+	}
+	return newest, nil
+}
+
+// The private index records staging, including deletion with no remaining
+// file. Read-only Git queries must not refresh it and restart the idle window.
+func scanIndexTime(path string, newest *time.Time) error {
+	dir, err := gitPrivateDir(path)
+	if err != nil {
+		return err
+	}
+	return updateNewest(newest, filepath.Join(dir, "index"))
 }
 
 // sortWorktrees orders main first, then most recently used, then path — a
@@ -312,6 +541,14 @@ func cellUpstream(w worktree, _ columnContext) string { return upstreamCell(w) }
 func cellLastUsed(w worktree, _ columnContext) string { return lastUsedCell(w) }
 func cellStatus(w worktree, c columnContext) string   { return w.status(c.now, c.ttl) }
 
+// cellTemp shows the remaining idle window, or a dash for permanent checkouts.
+func cellTemp(w worktree, c columnContext) string {
+	if !w.Temp {
+		return "-"
+	}
+	return remainingWindowLabel(w.tempExpiresAt(), c.now)
+}
+
 // cellIntegrations lists the integrations the worktree actually has: the token
 // per present capability, token~ per partial. Absent capabilities are omitted,
 // so the cell claims only what is there; "-" when there is nothing to claim.
@@ -338,6 +575,7 @@ var (
 	colUpstream     = worktreeColumn{header: "UPSTREAM", cell: cellUpstream, shrinkRank: 3, floor: 8}
 	colLastUsed     = worktreeColumn{header: "LAST USED", cell: cellLastUsed, rightAlign: true, shrinkRank: 5, floor: 10}
 	colStatus       = worktreeColumn{header: "STATUS", cell: cellStatus}
+	colTemp         = worktreeColumn{header: "TEMP", cell: cellTemp}
 	colIntegrations = worktreeColumn{header: "INTEGRATIONS", cell: cellIntegrations, shrinkRank: 6, floor: 6}
 	colUncommitted  = worktreeColumn{header: "UNCOMMITTED", cell: cellUncommitted}
 )
@@ -345,7 +583,7 @@ var (
 // coreColumns is the shared prefix of every status schema: identity, tracking
 // and activity. statusColumns appends the grouped INTEGRATIONS cell; --wide
 // replaces it with one column per capability, so a new core column reaches both.
-var coreColumns = []worktreeColumn{colPath, colBranch, colUpstream, colLastUsed, colStatus}
+var coreColumns = []worktreeColumn{colPath, colBranch, colUpstream, colLastUsed, colStatus, colTemp}
 
 // statusColumns is the default status schema; tests and the right-align choice
 // derive from it so the header contract has one source.
@@ -458,6 +696,8 @@ type jsonWorktree struct {
 	LastUsed     *string           `json:"lastUsed"`
 	Status       string            `json:"status"`
 	Integrations map[string]string `json:"integrations"`
+	Temp         bool              `json:"temp"`
+	ExpiresAt    *string           `json:"expiresAt"`
 }
 
 func printStatusJSON(wts []worktree, now time.Time, ttl time.Duration) error {
@@ -467,11 +707,15 @@ func printStatusJSON(wts []worktree, now time.Time, ttl time.Duration) error {
 		j := jsonWorktree{
 			// WHY: branchName() is the SSOT for detached display so JSON matches the table's "(detached)".
 			Path: w.Path, Branch: w.branchName(), Upstream: w.Upstream.Short, Main: w.Main, Status: w.status(now, ttl),
-			Integrations: integrationStates(w, active),
+			Temp: w.Temp, Integrations: integrationStates(w, active),
 		}
 		if !w.LastUsed.IsZero() {
 			s := w.LastUsed.UTC().Format(time.RFC3339)
 			j.LastUsed = &s
+		}
+		if w.Temp {
+			s := formatTempDeadline(w.tempExpiresAt())
+			j.ExpiresAt = &s
 		}
 		out = append(out, j)
 	}

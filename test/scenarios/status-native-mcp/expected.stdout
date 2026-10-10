@@ -1,5 +1,5 @@
-PATH       BRANCH  UPSTREAM   LAST USED  STATUS  INTEGRATIONS
-/SBX/repo  main    -         2020-01-01  ACTIVE  chunk~ mcp pi
+PATH       BRANCH  UPSTREAM   LAST USED  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  ACTIVE  -     chunk~ mcp pi
 [
   {
     "path": "/SBX/repo",
@@ -13,6 +13,8 @@ PATH       BRANCH  UPSTREAM   LAST USED  STATUS  INTEGRATIONS
       "claude": "n/a",
       "mcp": "yes",
       "pi": "yes"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   }
 ]

@@ -33,10 +33,49 @@ while (($# > 0)); do
   shift
 done
 
+# Scenarios write their setup logs here; --no-build skips the BUILD block that
+# would otherwise create the gitignored dir.
+mkdir -p "$TEST_DIR/tmp/out"
+
+# local_sha256 hashes a file with whichever tool the host provides.
+local_sha256() {
+  if command -v sha256sum >/dev/null; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+if ((!BUILD)); then
+  # A stale binary or image makes goldens lie: refuse --no-build when either
+  # is missing or older than any Go source, so the failure says "rebuild".
+  bin="$TEST_DIR/bin/wtm"
+  if [[ ! -x $bin ]]; then
+    echo "run.sh: $bin missing; drop --no-build to build it" >&2
+    exit 1
+  fi
+  if [[ -n $(find "$ROOT_DIR" \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) -newer "$bin" -print -quit) ]]; then
+    echo "run.sh: $bin is older than a Go source; drop --no-build to rebuild" >&2
+    exit 1
+  fi
+  # Scenarios run the binary baked into the image, not test/bin/wtm, so the
+  # image must also be current: compare hashes, not mtimes.
+  command -v docker >/dev/null || { echo "run.sh: docker not found" >&2; exit 1; }
+  img_bin=$(docker run --rm --platform "$PLATFORM" --network none \
+    --entrypoint sha256sum "$IMAGE" /usr/local/bin/wtm | cut -d' ' -f1) || {
+    echo "run.sh: cannot read $IMAGE; drop --no-build to build it" >&2
+    exit 1
+  }
+  if [[ $img_bin != $(local_sha256 "$bin") ]]; then
+    echo "run.sh: $IMAGE holds an outdated wtm binary; drop --no-build to rebuild it" >&2
+    exit 1
+  fi
+fi
+
 if ((BUILD)); then
   command -v docker >/dev/null || { echo "run.sh: docker not found" >&2; exit 1; }
   arch=${PLATFORM##*/}
-  mkdir -p "$TEST_DIR/bin" "$TEST_DIR/tmp/out"
+  mkdir -p "$TEST_DIR/bin"
   (cd "$ROOT_DIR" && GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build -o "$TEST_DIR/bin/wtm" .)
   # buildx+gha layer cache is CI-only (needs the docker-container driver from
   # setup-buildx-action); local runs keep plain `docker build`. --load keeps the
@@ -55,6 +94,9 @@ if ((${#SCENARIOS[@]} == 0)); then
     SCENARIOS+=("$(basename "$d")")
   done
 fi
+
+docker run --rm --platform "$PLATFORM" --network none \
+  -v "$TEST_DIR:/harness" "$IMAGE" bash /harness/manifest_test.sh
 
 declare -a PASSED=() FAILED=()
 for name in "${SCENARIOS[@]}"; do

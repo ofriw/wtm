@@ -63,6 +63,8 @@ func statusCellStyle(header, value string) lipgloss.Style {
 			return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Green)
 		}
 		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+	case "TEMP":
+		return tempCellStyle(value)
 	case "UPSTREAM":
 		return booleanStyle(value != "-")
 	case "BRANCH", "LAST USED":
@@ -84,6 +86,16 @@ func statusCellStyle(header, value string) lipgloss.Style {
 		}
 	}
 	return lipgloss.NewStyle()
+}
+
+func tempCellStyle(value string) lipgloss.Style {
+	if value == "-" {
+		return lipgloss.NewStyle().Faint(true)
+	}
+	if value == "expired" {
+		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Cyan)
 }
 
 // capStateStyle is the one semantic color scheme: present green, partial yellow,

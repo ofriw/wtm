@@ -240,8 +240,8 @@ func TestGroupedCellColors(t *testing.T) {
 func TestStyledCellsStripToPlain(t *testing.T) {
 	headers := statusHeaders()
 	rows := [][]string{
-		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "ch mc"},
-		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "-"},
+		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "-", "ch mc"},
+		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "expired", "-"},
 	}
 	_, styled := renderCells(headers, rows, statusCell)
 	for r := range rows {
@@ -256,8 +256,8 @@ func TestStyledCellsStripToPlain(t *testing.T) {
 			t.Errorf("STATUS %q cell carries no ANSI: %q", want, styled[r][4])
 		}
 	}
-	if !strings.Contains(styled[0][5], "\x1b[") {
-		t.Errorf("INTEGRATIONS cell carries no ANSI: %q", styled[0][5])
+	if !strings.Contains(styled[0][6], "\x1b[") {
+		t.Errorf("INTEGRATIONS cell carries no ANSI: %q", styled[0][6])
 	}
 }
 
@@ -266,8 +266,8 @@ func TestStyledCellsStripToPlain(t *testing.T) {
 func TestStyledTableStripsToPlain(t *testing.T) {
 	headers := statusHeaders()
 	rows := [][]string{
-		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "ch mc"},
-		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "-"},
+		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "-", "ch mc"},
+		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "expired", "-"},
 	}
 	widths := naturalWidths(headers, rows)
 	aligns := columnAligns(headers, columnRightAligns(statusColumns))

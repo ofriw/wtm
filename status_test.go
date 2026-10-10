@@ -171,6 +171,7 @@ func TestWorktreeLastUsed(t *testing.T) {
 			repo := initRepo(t, "main")
 			gitTestCommit(t, repo)
 			want := tc.setup(t, repo, now)
+			backdateActivityIndex(t, repo, now.Add(-6*time.Hour))
 			idx := mustIndexSessions(t)
 			if got := worktreeLastUsed(repo, idx); !got.Equal(want) {
 				t.Fatalf("worktreeLastUsed = %v, want %v", got, want)
@@ -212,7 +213,7 @@ func TestDiscover(t *testing.T) {
 
 	// Pin non-session activity old so the sessions above decide ordering.
 	for _, p := range []string{repo, linkedA, linkedB} {
-		setMtime(t, filepath.Join(p, ".git"), now.Add(-10*time.Hour))
+		backdateGitActivity(t, p, now.Add(-10*time.Hour))
 	}
 	setMtime(t, filepath.Join(repo, chunkhoundConfigFile), now.Add(-10*time.Hour))
 	setMtime(t, chunkhoundDBPath(repo), now.Add(-10*time.Hour))
@@ -289,7 +290,7 @@ func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 // mcpConfigFiles as the SSOT. Pinning the exact light-up pairs catches a swap
 // that an "either capability" check would miss.
 func TestBuildWorktreeMCPFiles(t *testing.T) {
-	empty := buildWorktree(gworktree{Path: t.TempDir(), Main: true}, sessionIndex{}, nil, nil)
+	empty := buildWorktree(gworktree{Path: t.TempDir(), Main: true}, sessionIndex{}, nil, nil, nil)
 	for _, c := range capabilities() {
 		if empty.Caps[c.id] != capAbsent {
 			t.Fatalf("empty root: %s = %v, want absent", c.id, empty.Caps[c.id])
@@ -305,7 +306,7 @@ func TestBuildWorktreeMCPFiles(t *testing.T) {
 			}
 			root := t.TempDir()
 			writeFile(t, filepath.Join(root, rel), "{}", 0o644)
-			w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil)
+			w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil, nil)
 			for _, c := range []string{"mcp", "pi"} {
 				wantState := capAbsent
 				if slices.Contains(want, c) {
@@ -352,7 +353,7 @@ func TestPrintTable(t *testing.T) {
 // policy is derived from the same registry: a rename or a new rank cannot pass
 // without updating this contract.
 func TestStatusHeadersSSOT(t *testing.T) {
-	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "STATUS", "INTEGRATIONS"}
+	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "STATUS", "TEMP", "INTEGRATIONS"}
 	if !slices.Equal(columnHeaders(statusColumns), want) {
 		t.Fatalf("status headers = %v, want %v", columnHeaders(statusColumns), want)
 	}
@@ -469,7 +470,7 @@ func TestPrintStatusJSON(t *testing.T) {
 	last := time.Date(2021, 2, 3, 4, 5, 6, 0, time.UTC)
 	wts := []worktree{
 		{Path: "/detached", LastUsed: last, Caps: map[string]capState{"chunkhound": capPartial, "mcp": capPresent, "pi": capPresent, "claude": capPresent}},
-		{Path: "/main", Branch: "main", Main: true, Caps: map[string]capState{"chunkhound": capPartial}, Upstream: upstream{Short: "origin/main", Remote: "origin", Ref: "refs/heads/main"}},
+		{Path: "/main", Branch: "main", Main: true, Temp: true, TempCreated: now, TempTTL: ttl, Caps: map[string]capState{"chunkhound": capPartial}, Upstream: upstream{Short: "origin/main", Remote: "origin", Ref: "refs/heads/main"}},
 	}
 	out := captureStdout(t, func() {
 		if err := printStatusJSON(wts, now, ttl); err != nil {
@@ -500,6 +501,9 @@ func TestPrintStatusJSON(t *testing.T) {
 	}
 	if !got[1].Main {
 		t.Fatalf("Main lost in JSON: %+v", got)
+	}
+	if got[0].Temp || got[0].ExpiresAt != nil || !got[1].Temp || got[1].ExpiresAt == nil || *got[1].ExpiresAt != formatTempDeadline(wts[1].tempExpiresAt()) {
+		t.Fatalf("temp metadata lost in JSON: %+v", got)
 	}
 	if got[1].Upstream != "origin/main" || got[0].Upstream != "" {
 		t.Fatalf("upstream lost in JSON: %+v", got)
@@ -537,7 +541,7 @@ func TestPrintStatusJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		t.Fatalf("re-decode JSON: %v", err)
 	}
-	wantKeys := []string{"branch", "integrations", "lastUsed", "main", "path", "status", "upstream"}
+	wantKeys := []string{"branch", "expiresAt", "integrations", "lastUsed", "main", "path", "status", "temp", "upstream"}
 	for i, m := range raw {
 		keys := make([]string, 0, len(m))
 		for k := range m {
@@ -573,6 +577,58 @@ func TestParseSubRejectsInvalidGlobalsAfterSubcommand(t *testing.T) {
 		if err := cmdStatus(&globals{root: t.TempDir()}, args); !isUsage(err) {
 			t.Errorf("cmdStatus(%v) = %v, want usageError", args, err)
 		}
+	}
+}
+
+// TestCellTemp pins the shared TEMP cell: a dash for permanent worktrees, the
+// compact remaining window while active, "expired" once the window has passed.
+func TestCellTemp(t *testing.T) {
+	now := tempTestTime
+	cases := []struct {
+		name string
+		w    worktree
+		want string
+	}{
+		{"permanent is dash", worktree{Branch: "main"}, "-"},
+		{"active temp shows remaining window", worktree{Temp: true, TempCreated: now.Add(-2 * time.Hour), TempTTL: 3 * time.Hour}, "1h"},
+		{"lapsed temp reads expired", worktree{Temp: true, TempCreated: now.Add(-3 * time.Hour), TempTTL: time.Hour}, "expired"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cellTemp(tc.w, columnContext{now: now}); got != tc.want {
+				t.Fatalf("cellTemp = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTempDeadlineStatusAndSelectionAgree(t *testing.T) {
+	w := worktree{Temp: true, TempCreated: tempTestTime, LastUsed: tempTestTime.Add(time.Second), TempTTL: 1500 * time.Millisecond}
+	deadline := tempTestTime.Add(2500 * time.Millisecond)
+	if got := w.tempExpiresAt(); !got.Equal(deadline) {
+		t.Fatalf("deadline = %s, want %s", got, deadline)
+	}
+	if w.unused(deadline, time.Hour) || !w.unused(deadline.Add(time.Nanosecond), time.Hour) {
+		t.Fatal("status and selection disagree at the fractional deadline")
+	}
+}
+
+// TestBuildWorktreeInvalidTempTTL pins the defensive skip: a record with an
+// unparsable TTL must not mark the worktree temp, even if the store bypassed
+// decode validation.
+func TestBuildWorktreeInvalidTempTTL(t *testing.T) {
+	_, path, w := identityCheckout(t)
+	temps := mustReadTempStore(t)
+	rec := temps[w.Path]
+	rec.TTL = "bogus"
+	temps[w.Path] = rec
+	w = worktree{Path: canonical(path), Branch: w.Branch}
+	warnings := captureStderr(t, func() { applyTempRecord(&w, temps, nil) })
+	if !strings.Contains(warnings, "treating as permanent") {
+		t.Fatalf("invalid TTL must warn: %s", warnings)
+	}
+	if w.Temp {
+		t.Fatalf("invalid TTL record marked temp: %+v", w)
 	}
 }
 

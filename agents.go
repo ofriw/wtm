@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -322,8 +323,11 @@ type sessionIndex map[string][]sessionRef
 
 // sessionRef carries an owned file and the boundary for empty-dir cleanup.
 type sessionRef struct {
-	path  string
-	group string
+	path       string
+	group      string
+	root       string
+	rootTarget string
+	owner      func(*bufio.Reader) (string, error)
 }
 
 // sessionErrPolicy decides what an unreadable session does. Reclamation fails
@@ -344,95 +348,146 @@ func (pol sessionErrPolicy) sessionErr(err error) error {
 	return nil
 }
 
-// walkErr classifies a walk failure. A root listing failure is always fatal:
-// it hides every worktree's activity. A child directory failure carries no
-// attributable evidence (another user's project on a shared host) and is
-// skipped; a file failure goes through sessionErr.
-// LIMIT: a blocked subdir of your own root is skipped too. The wrongful-GC
-// defense rests on the fatal root and fatal file rules, not on this skip.
-func (pol sessionErrPolicy) walkErr(p string, d fs.DirEntry, err error) error {
-	// The walk root is already handled by the caller; a non-root Lstat failure
-	// still produces a non-nil d for the parent dir, so keep the dir semantics.
-	if d != nil && d.IsDir() {
-		return nil
-	}
-	return pol.sessionErr(fmt.Errorf("walk sessions: %s: %w", p, err))
+// unverifiedSession is unattributable activity. A zero age can hide any use;
+// directory symlinks have zero age because appends do not change directory mtimes.
+type unverifiedSession struct {
+	Path    string
+	ModTime time.Time
 }
 
-// indexSessions walks every given harness's session root once, grouping live
-// session files by their harness record cwd. Unknown owners are skipped. What an
-// unreadable session does is the caller's call, via failClosed: reclamation must
-// not act on an incomplete index, discovery may. Per-key order follows the walk
-// (sorted), so callers observe a stable sequence within a key.
+func (u unverifiedSession) blocksRemoval(knownNewest time.Time) bool {
+	return u.ModTime.IsZero() || u.ModTime.After(knownNewest)
+}
+
+// sessionScan shares ownership and traversal rules for all harnesses. Fresh idle
+// checks collect evidence for per-candidate decisions; ordinary discovery warns.
+type sessionScan struct {
+	idx        sessionIndex
+	unverified []unverifiedSession
+	pol        sessionErrPolicy
+	collect    bool
+}
+
 func indexSessions(ags []agent, pol sessionErrPolicy) (sessionIndex, error) {
-	idx := sessionIndex{}
+	s := sessionScan{idx: sessionIndex{}, pol: pol}
+	if err := s.scan(ags); err != nil {
+		return nil, err
+	}
+	return s.idx, nil
+}
+
+// indexSessionsStrict refreshes both harnesses. Structural failures abort;
+// unknown owners remain evidence rather than being silently treated as absent.
+func indexSessionsStrict(p *progress) (sessionIndex, []unverifiedSession, error) {
+	s := sessionScan{idx: sessionIndex{}, pol: sessionErrPolicy{failClosed: true, p: p}, collect: true}
+	err := s.scan(agents())
+	return s.idx, s.unverified, err
+}
+
+func (s *sessionScan) scan(ags []agent) error {
 	for _, a := range ags {
-		if err := a.indexSessions(idx, pol); err != nil {
-			return nil, err
+		if err := s.walk(a); err != nil {
+			return err
 		}
 	}
-	return idx, nil
+	return nil
 }
 
-// indexSessions adds one harness's sessions to idx, skipping a missing root.
-func (a agent) indexSessions(idx sessionIndex, pol sessionErrPolicy) error {
+func (s *sessionScan) walk(a agent) error {
 	if a.configDir() == "" {
 		return nil
 	}
 	base, err := sessionRoot(filepath.Join(a.configDir(), a.sessionSubdir))
-	if os.IsNotExist(err) {
+	if err != nil {
+		return s.pol.sessionErr(fmt.Errorf("session root: %w", err))
+	}
+	if base == "" {
 		return nil
 	}
+	return s.walkRoot(a, base)
+}
+
+func (s *sessionScan) walkRoot(a agent, base string) error {
+	target, err := filepath.EvalSymlinks(base)
 	if err != nil {
-		return err
+		return s.pol.sessionErr(fmt.Errorf("resolve sessions %s: %w", base, err))
 	}
 	return filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			// A directory listing failure on the walk root means this harness
-			// is unreadable (shared host, odd permissions). An empty index here
-			// misclassifies every worktree as UNUSED and risks a wrongful GC, so
-			// the error is fatal in every policy, not just reclamation.
-			if p == base && d != nil && d.IsDir() {
-				return fmt.Errorf("read sessions %s: %w", p, err)
-			}
-			return pol.walkErr(p, d, err)
+			return s.pol.sessionErr(fmt.Errorf("walk sessions %s: %w", p, err))
 		}
-		return a.addSessionRef(idx, base, p, d, pol)
+		return s.add(a, base, target, p, d)
 	})
 }
 
-// Resolve only a symlinked root: dotfile setups use these, while resolving
-// ancestors would rewrite paths on systems such as macOS (/var -> /private/var).
+// Resolve only the root symlink; resolving ancestors rewrites macOS /var paths.
+// A missing root is empty, but a dangling root symlink is a structural failure.
 func sessionRoot(base string) (string, error) {
 	info, err := os.Lstat(base)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return filepath.EvalSymlinks(base)
+		base, err = filepath.EvalSymlinks(base)
+		if err != nil {
+			return "", err
+		}
+	}
+	return sessionDirectory(base)
+}
+
+func sessionDirectory(base string) (string, error) {
+	info, err := os.Stat(base)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("sessions path is not a directory: %s", base)
 	}
 	return base, nil
 }
 
-func (a agent) addSessionRef(idx sessionIndex, base, p string, d fs.DirEntry, pol sessionErrPolicy) error {
+func (s *sessionScan) add(a agent, base, target, p string, d fs.DirEntry) error {
+	if d.Type()&os.ModeSymlink != 0 {
+		return s.unknown(p, nil)
+	}
 	if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
 		return nil
 	}
+	if !d.Type().IsRegular() {
+		return s.unknown(p, nil)
+	}
 	cwd, err := a.readSessionOwner(p)
-	if err != nil {
-		// A dangling symlink or a file removed mid-walk holds no sessions.
-		if os.IsNotExist(err) {
-			return nil
-		}
-		// WHY: an unreadable *.jsonl is provably a session wtm cannot
-		// attribute, so it must never silently hide activity from GC.
-		return pol.sessionErr(fmt.Errorf("read session %s: %w", p, err))
+	if err != nil || !filepath.IsAbs(cwd) {
+		return s.unknown(p, err)
 	}
-	if cwd != "" {
-		key := canonical(cwd)
-		idx[key] = append(idx[key], sessionRef{path: p, group: sessionGroup(base, p)})
-	}
+	key := canonical(cwd)
+	s.idx[key] = append(s.idx[key], sessionRef{
+		path: p, group: sessionGroup(base, p), root: base, rootTarget: target, owner: a.sessionOwner,
+	})
 	return nil
+}
+
+func (s *sessionScan) unknown(p string, err error) error {
+	if s.collect {
+		s.unverified = append(s.unverified, unverifiedSession{Path: p, ModTime: statFollowMtime(p)})
+		return nil
+	}
+	if err != nil {
+		return s.pol.sessionErr(fmt.Errorf("read session %s: %w", p, err))
+	}
+	warnProgress(s.pol.p, "unverified session ownership: %s", p)
+	return nil
+}
+
+func statFollowMtime(p string) time.Time {
+	if info, err := os.Stat(p); err == nil && info.Mode().IsRegular() {
+		return info.ModTime()
+	}
+	return time.Time{}
 }
 
 // sessionGroup bounds empty-dir cleanup without decoding harness path names.
@@ -448,13 +503,38 @@ func sessionGroup(base, p string) string {
 // lastUsed is the newest mtime among the worktree's session files (looked up
 // in idx); zero when the worktree has never hosted a session.
 func lastUsed(wtPath string, idx sessionIndex) time.Time {
+	newest, _ := sessionLastUsed(wtPath, idx, false)
+	return newest
+}
+
+// sessionLastUsed fails closed for fresh removal checks. Display can retain
+// known activity, but must disclose every file it could not inspect.
+func sessionLastUsed(wtPath string, idx sessionIndex, strict bool) (time.Time, error) {
 	var newest time.Time
 	for _, r := range idx[canonical(wtPath)] {
-		if info, err := os.Stat(r.path); err == nil && info.ModTime().After(newest) {
-			newest = info.ModTime()
+		mtime, err := sessionMtime(r.path)
+		if err != nil {
+			if strict {
+				return newest, err
+			}
+			warnProgress(nil, "%v", err)
+		} else if mtime.After(newest) {
+			newest = mtime
 		}
 	}
-	return newest
+	return newest, nil
+}
+
+// An indexed transcript replaced with a link or directory is no longer verified.
+func sessionMtime(p string) (time.Time, error) {
+	info, err := os.Lstat(p)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("stat session %s: %w", p, err)
+	}
+	if !info.Mode().IsRegular() {
+		return time.Time{}, fmt.Errorf("session is not a regular file: %s", p)
+	}
+	return info.ModTime(), nil
 }
 
 // purgeSessions deletes only confirmed owned files. Unknown and unrelated
@@ -463,6 +543,9 @@ func lastUsed(wtPath string, idx sessionIndex) time.Time {
 func purgeSessions(wtPath string, idx sessionIndex) (int, error) {
 	n := 0
 	for _, r := range idx[canonical(wtPath)] {
+		if err := verifyPurgeSession(wtPath, r); err != nil {
+			return n, err
+		}
 		if err := os.Remove(r.path); err != nil {
 			return n, err
 		}
@@ -474,6 +557,59 @@ func purgeSessions(wtPath string, idx sessionIndex) (int, error) {
 	return n, nil
 }
 
+// Cached consent is not proof: use the original harness parser on current data.
+func verifyPurgeSession(wtPath string, r sessionRef) error {
+	if err := verifySessionBoundary(r, r.path); err != nil {
+		return err
+	}
+	if _, err := sessionMtime(r.path); err != nil {
+		return err
+	}
+	if r.owner == nil {
+		return fmt.Errorf("unknown session parser: %s", r.path)
+	}
+	cwd, err := (agent{sessionOwner: r.owner}).readSessionOwner(r.path)
+	if err != nil {
+		return fmt.Errorf("read session %s: %w", r.path, err)
+	}
+	if !filepath.IsAbs(cwd) || canonical(cwd) != canonical(wtPath) {
+		return fmt.Errorf("session ownership changed or unknown: %s", r.path)
+	}
+	return nil
+}
+
+// Pin the resolved root, then reject every descendant link before deletion.
+func verifySessionBoundary(r sessionRef, p string) error {
+	if r.root == "" || r.rootTarget == "" {
+		return fmt.Errorf("unknown session boundary: %s", p)
+	}
+	target, err := filepath.EvalSymlinks(r.root)
+	if err != nil {
+		return fmt.Errorf("resolve session root %s: %w", r.root, err)
+	}
+	if target != r.rootTarget {
+		return fmt.Errorf("session root changed: %s", r.root)
+	}
+	rel, err := filepath.Rel(r.root, p)
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("session outside indexed root: %s", p)
+	}
+	return verifySessionAncestors(r.root, p)
+}
+
+func verifySessionAncestors(root, p string) error {
+	for current := p; current != root; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect session path %s: %w", current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("session path replaced by symlink: %s", current)
+		}
+	}
+	return nil
+}
+
 func removeEmptySessionDirs(r sessionRef) error {
 	// An empty group would make filepath.Dir("") resolve to "." and walk the
 	// cleanup above the session root.
@@ -481,6 +617,12 @@ func removeEmptySessionDirs(r sessionRef) error {
 		return nil
 	}
 	for dir := filepath.Dir(r.path); dir != filepath.Dir(r.group); dir = filepath.Dir(dir) {
+		if err := verifySessionBoundary(r, dir); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			// WHY: a concurrent purge already removed the dir — cleanup is

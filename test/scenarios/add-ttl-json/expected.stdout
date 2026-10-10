@@ -1,0 +1,10 @@
+{
+  "path": "/SBX/repo-tmp-ttl-json",
+  "branch": "tmp/ttl-json",
+  "base": "refs/heads/main",
+  "source": "/SBX/repo",
+  "indexed": false,
+  "temp": true,
+  "ttl": "100ms",
+  "expiresAt": "<expiresAt>"
+}

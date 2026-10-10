@@ -1,9 +1,9 @@
-PATH       BRANCH  UPSTREAM   LAST USED  STATUS  INTEGRATIONS
-/SBX/repo  main    -         2020-01-01  ACTIVE  -
-/SBX/wt1   wt1     -         2020-01-01  ACTIVE  claude
-PATH       BRANCH  UPSTREAM   LAST USED  STATUS  CHUNKHOUND  MCP  PI   CLAUDE
-/SBX/repo  main    -         2020-01-01  ACTIVE  n/a         n/a  n/a  -
-/SBX/wt1   wt1     -         2020-01-01  ACTIVE  n/a         n/a  n/a  yes
+PATH       BRANCH  UPSTREAM   LAST USED  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  ACTIVE  -     -
+/SBX/wt1   wt1     -         2020-01-01  ACTIVE  -     claude
+PATH       BRANCH  UPSTREAM   LAST USED  STATUS  TEMP  CHUNKHOUND  MCP  PI   CLAUDE
+/SBX/repo  main    -         2020-01-01  ACTIVE  -     n/a         n/a  n/a  -
+/SBX/wt1   wt1     -         2020-01-01  ACTIVE  -     n/a         n/a  n/a  yes
 [
   {
     "path": "/SBX/repo",
@@ -17,7 +17,9 @@ PATH       BRANCH  UPSTREAM   LAST USED  STATUS  CHUNKHOUND  MCP  PI   CLAUDE
       "claude": "-",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   },
   {
     "path": "/SBX/wt1",
@@ -31,7 +33,9 @@ PATH       BRANCH  UPSTREAM   LAST USED  STATUS  CHUNKHOUND  MCP  PI   CLAUDE
       "claude": "yes",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   }
 ]
 nothing to do

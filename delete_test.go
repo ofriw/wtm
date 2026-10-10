@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // delete_test.go — Tier-1 contracts for delete.go: branch-addressed reclamation
@@ -36,7 +35,7 @@ func TestDeleteActiveWorktree(t *testing.T) {
 	gitTestCommit(t, repo)
 	linked := canonical(filepath.Join(filepath.Dir(repo), "linked"))
 	gitWorktreeAdd(t, repo, linked, "feature/x", "refs/heads/main")
-	session := mkSession(t, linked, "linked-s", time.Now()) // fresh → ACTIVE
+	session := mkSession(t, linked, "linked-s", tempNow) // fresh → ACTIVE
 
 	res := deleteResultOf(t, &globals{root: repo, yes: true}, "feature/x")
 	if res.DeletedBranch != "feature/x" {
@@ -62,7 +61,7 @@ func TestDeleteKeepsSessions(t *testing.T) {
 	gitTestCommit(t, repo)
 	linked := canonical(filepath.Join(filepath.Dir(repo), "linked"))
 	gitWorktreeAdd(t, repo, linked, "feat", "refs/heads/main")
-	session := mkSession(t, linked, "linked-s", time.Now())
+	session := mkSession(t, linked, "linked-s", tempNow)
 
 	res := deleteResultOf(t, &globals{root: repo, yes: true}, "feat", "--keep-sessions")
 	if !res.KeptSessions {
@@ -192,6 +191,21 @@ func TestDeleteNormalizesInput(t *testing.T) {
 	}
 	if exists(linked) {
 		t.Fatal("worktree must be deleted")
+	}
+}
+
+func TestDeleteMatchesTempPrefix(t *testing.T) {
+	sandbox(t)
+	repo := initRepo(t, "main")
+	gitTestCommit(t, repo)
+	linked := canonical(filepath.Join(filepath.Dir(repo), "linked"))
+	gitWorktreeAdd(t, repo, linked, "tmp/review", "refs/heads/main")
+	res := deleteResultOf(t, &globals{root: repo, yes: true}, "review")
+	if res.DeletedBranch != "tmp/review" {
+		t.Fatalf("DeletedBranch = %q, want tmp/review", res.DeletedBranch)
+	}
+	if exists(linked) || refExists(repo, "refs/heads/tmp/review") {
+		t.Fatal("temp checkout or branch survived delete")
 	}
 }
 
