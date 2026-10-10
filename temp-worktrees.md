@@ -52,6 +52,14 @@ directory timestamp. File symlinks use the target file's timestamp.
 A missing changed file blocks idle GC because its activity cannot be checked.
 Explicit removal remains available after you inspect the checkout.
 
+Permanent worktrees have no fresh idle probe at removal time, so unverified
+sessions are their only guard. When every unverified session has a known age,
+a session protects a permanent only if the session is not older than the
+permanent's known activity — a session older than that activity cannot hide
+newer use. A single session with unknown age protects every permanent, failing
+closed. This guard runs at discovery only; the protection it grants lasts one
+GC run.
+
 `gc --path <path>` and `delete <branch>` are explicit removal requests. They
 ignore the idle deadline, but still enforce identity checks and removal consent.
 

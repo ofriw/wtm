@@ -217,6 +217,9 @@ func discoverySessions(failClosed bool) sessionDiscovery {
 
 // Permanent cleanup has no fresh idle probe. Missing ownership therefore keeps
 // every permanent candidate active; temp candidates use the locked fresh probe.
+// When all unverified sessions have known ages, protection scopes to permanent
+// worktrees older than the newest unverified session. A single unknown-age session
+// preserves the original fail-closed contract.
 func guardPermanentActivity(wts []worktree, unknown []unverifiedSession, now time.Time, p *progress) {
 	if len(unknown) == 0 {
 		return
@@ -224,12 +227,45 @@ func guardPermanentActivity(wts []worktree, unknown []unverifiedSession, now tim
 	for _, u := range unknown {
 		warnProgress(p, "unverified session ownership: %s", u.Path)
 	}
+	if hasUnknownAgeSession(unknown) {
+		for i := range wts {
+			if !wts[i].Temp {
+				wts[i].LastUsed = now
+				warnProgress(p, "%s: keeping permanent worktree ACTIVE because session ownership is unverified", displayPath(wts[i].Path))
+			}
+		}
+		return
+	}
+	newest := newestKnownSession(unknown)
+	// Same age-gating rule as unverifiedSession.blocksRemoval (agents.go):
+	// only a session newer than known activity can hide recent use. The
+	// equality edge differs by intent: this guard protects on == (fail closed
+	// for permanents), the temp path removes on strict >.
 	for i := range wts {
-		if !wts[i].Temp {
+		if !wts[i].Temp && !wts[i].LastUsed.After(newest) {
 			wts[i].LastUsed = now
 			warnProgress(p, "%s: keeping permanent worktree ACTIVE because session ownership is unverified", displayPath(wts[i].Path))
 		}
 	}
+}
+
+func hasUnknownAgeSession(unknown []unverifiedSession) bool {
+	for _, u := range unknown {
+		if u.ModTime.IsZero() {
+			return true
+		}
+	}
+	return false
+}
+
+func newestKnownSession(unknown []unverifiedSession) time.Time {
+	var newest time.Time
+	for _, u := range unknown {
+		if u.ModTime.After(newest) {
+			newest = u.ModTime
+		}
+	}
+	return newest
 }
 
 // readTempStoreLenient reads the temp store for read-only commands. A corrupt
