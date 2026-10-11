@@ -24,16 +24,25 @@ func discoveryEvidenceFixture(t *testing.T) (string, worktree, string) {
 
 func discoveryUnknownSession(t *testing.T, a agent, kind string, age time.Time) string {
 	t.Helper()
+	if kind == "unknown-age" {
+		return unknownAgeSession(t, a, kind, age)
+	}
 	p := safetySession(t, a, kind, "{broken}\n", age)
 	if kind == "unreadable" {
 		makeUnreadable(t, p)
 	}
-	if kind == "unknown-age" {
-		if err := os.Remove(p); err != nil {
-			t.Fatal(err)
-		}
-		mustSymlink(t, filepath.Join(t.TempDir(), "missing"), p)
+	return p
+}
+
+// unknownAgeSession replaces an existing session file with a dangling symlink,
+// so the file has no readable age.
+func unknownAgeSession(t *testing.T, a agent, name string, age time.Time) string {
+	t.Helper()
+	p := safetySession(t, a, name, "{broken}\n", age)
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
 	}
+	mustSymlink(t, filepath.Join(t.TempDir(), "missing"), p)
 	return p
 }
 
@@ -228,7 +237,7 @@ func TestIdleGCDiscoveryScopedPermanentProtection(t *testing.T) {
 	fresh := canonical(filepath.Join(filepath.Dir(repo), "fresh"))
 	gitWorktreeAdd(t, repo, fresh, "fresh", "HEAD")
 	backdateGitActivity(t, fresh, tempNow.Add(-time.Minute))
-	p := discoveryUnknownSession(t, claudeAgent, "unknown", tempTestTime.Add(30*time.Minute))
+	discoveryUnknownSession(t, claudeAgent, "unknown", tempTestTime.Add(30*time.Minute))
 	ws, _ := idleGCEvidenceWorkspace(t, repo)
 	var stale, active worktree
 	for _, w := range ws.wts {
@@ -258,8 +267,7 @@ func TestIdleGCDiscoveryScopedPermanentProtection(t *testing.T) {
 	}
 	// An unknown-age session preserves the original fail-closed behavior:
 	// all permanent worktrees stay active.
-	os.Remove(p)
-	mustSymlink(t, filepath.Join(t.TempDir(), "missing"), p)
+	unknownAgeSession(t, claudeAgent, "unknown", tempTestTime.Add(30*time.Minute))
 	ws, _ = idleGCEvidenceWorkspace(t, repo)
 	for _, w := range ws.wts {
 		if !w.Temp && !w.LastUsed.After(now.Add(-time.Minute)) {
