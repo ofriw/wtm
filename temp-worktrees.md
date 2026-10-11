@@ -11,10 +11,12 @@ wtm add <branch> --temp [--ttl <duration>]
 
 `--temp` creates a `tmp/<name>` branch. `--ttl` sets the idle window and implies
 `--temp`. The default is **1h**. Harness seeding and indexing do not change.
-Human add output shows a compact countdown; the JSON `ttl` field carries the
-exact duration. Status shows a compact countdown. Positive fractional durations
-such as `1.5s` are supported. JSON `expiresAt` uses RFC3339 with fractional
-seconds when needed, without rounding the deadline.
+The checkout directory is named from the prefixed branch, so `add foo --temp`
+lands in `tmp/foo` inside `<repo>-tmp-foo`, and the `tmp/` prefix counts toward
+the 80-character branch limit. Human add output shows a compact countdown; the
+JSON `ttl` field carries the exact duration. Status shows a compact countdown.
+Positive fractional durations such as `1.5s` are supported. JSON `expiresAt`
+uses RFC3339 with fractional seconds when needed, without rounding the deadline.
 
 ## Collection
 
@@ -41,13 +43,19 @@ initial selection therefore protects the checkout.
 
 Session files that cannot be read or attributed to a worktree (unreadable,
 corrupt, symlinked, header without cwd) are unverifiable, not fatal by
-themselves. Only an unverifiable session NEWER than the checkout's known
-activity blocks removal — only such a file could be that checkout's hidden
-recent activity. An older unverifiable file cannot change the verdict, so GC
-warns and proceeds. A sessions directory that is itself unreadable stays
-fatal for every candidate. A symlink to a session directory has unknown activity
-age and blocks idle removal: appending an existing session does not change the
-directory timestamp. File symlinks use the target file's timestamp.
+themselves. Two rules decide what an unverifiable file does:
+
+- **Unknown age** (zero mtime: a dangling symlink, a symlinked session
+  directory, or any non-regular `*.jsonl`) blocks idle removal of every
+  candidate. Its age cannot be bounded above, so it could be hidden recent use.
+  A symlinked session directory never ages: appending an existing session does
+  not change the directory timestamp.
+- **Known age** blocks removal only when it is NEWER than the checkout's known
+  activity — only such a file could hide recent use. An older unverifiable file
+  cannot change the verdict, so GC warns and proceeds. File symlinks use the
+  target file's timestamp.
+
+A sessions directory that is itself unreadable stays fatal for every candidate.
 
 A missing changed file blocks idle GC because its activity cannot be checked.
 Explicit removal remains available after you inspect the checkout.
@@ -101,7 +109,9 @@ Unix readers do not take this lock: file replacement preserves their open
 handles. Every `wtm gc` takes this lock and reconciles all records before
 selecting candidates, so a gc run creates the lock file even when no worktree
 is temporary. No other command reconciles: `status` and `promote` read the
-registry and never create `~/.wtm`. On Windows, `wtm status` and `wtm gc` wait for the registry
+registry. `promote` creates it, because the promotion decision runs under the
+mutation lock even for an already-permanent target. `status` does not create
+`~/.wtm`. On Windows, `wtm status` and `wtm gc` wait for the registry
 lock — but only once a registry exists: reading with no registry file takes no
 lock and creates nothing.
 A hung `wtm` process holding the lock blocks all other `wtm` commands until it
@@ -125,6 +135,11 @@ wtm promote <branch>
 Promotion removes the registry record and identity metadata. It leaves checkout
 files and the branch unchanged. The checkout then uses ordinary `unusedTTL`
 rules. Output identifies a retained `tmp/` branch.
+
+`promote` and `delete` resolve their branch argument the same way: the exact
+name first, then the normalized name, then the bare name of a `tmp/<name>`
+branch. So `wtm promote foo` addresses `tmp/foo` when no `foo` exists. The main
+worktree and the default branch are refused by both commands.
 
 Promotion reads and removes the record under one lock. Success is reported only
 after permanent state is saved. An already-permanent checkout succeeds with

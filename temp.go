@@ -112,8 +112,6 @@ func remainingWindowLabel(expiresAt, now time.Time) string {
 }
 
 // compactWindow renders d at the coarsest whole unit that fits: 3d, 2h, 1h30m, 45m.
-// Negative durations clamp to "0s"; callers should prevent this, but the guard
-// keeps display correct if a future caller passes negative input.
 func compactWindow(d time.Duration) string {
 	switch {
 	// Negative durations should not reach here (remainingWindowLabel guards
