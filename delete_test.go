@@ -107,8 +107,41 @@ func TestDeleteRefusesMain(t *testing.T) {
 	repo := initRepo(t, "main")
 	gitTestCommit(t, repo)
 	err := cmdDelete(&globals{root: repo, yes: true}, []string{"main"})
-	if err == nil || !strings.Contains(err.Error(), "refusing to delete the main worktree") {
+	if err == nil || !strings.Contains(err.Error(), "refusing to remove the main worktree") {
 		t.Fatalf("delete main = %v, want refusal", err)
+	}
+}
+
+// TestPromoteRefusesMainAndDefaultBranch pins that the shared target resolver
+// stays verb-neutral: promote is non-destructive, so its refusal must not claim
+// a delete. delete_test pins the same strings for the delete command.
+func TestPromoteRefusesMainAndDefaultBranch(t *testing.T) {
+	sandbox(t)
+	repo := initRepo(t, "main")
+	gitTestCommit(t, repo)
+	for _, tc := range []struct {
+		name, branch, want string
+	}{{
+		"main worktree", "main", "refusing to remove the main worktree",
+	}, {
+		"default branch", "main", "refusing to remove default branch",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			if tc.name == "default branch" {
+				// A linked worktree on the default branch; only the main worktree
+				// can satisfy that, so call the resolver directly.
+				_, err = checkedDeleteTarget(&worktree{Path: "/linked", Branch: "main"}, "main", "main")
+			} else {
+				err = cmdPromote(&globals{root: repo}, []string{tc.branch})
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("%s refusal = %v, want %q", tc.name, err, tc.want)
+			}
+			if strings.Contains(err.Error(), "delete") {
+				t.Fatalf("promote refusal must not mention deleting: %v", err)
+			}
+		})
 	}
 }
 
@@ -146,7 +179,7 @@ func TestDeleteRefusesDefaultBranchLinkedWorktree(t *testing.T) {
 	linked := canonical(filepath.Join(filepath.Dir(repo), "linked-main"))
 	mustGit(t, repo, "worktree", "add", linked, "main")
 	err := cmdDelete(&globals{root: repo, yes: true}, []string{"main"})
-	if err == nil || !strings.Contains(err.Error(), "refusing to delete default branch") {
+	if err == nil || !strings.Contains(err.Error(), "refusing to remove default branch") {
 		t.Fatalf("delete linked default branch = %v, want refusal", err)
 	}
 	if !exists(linked) {

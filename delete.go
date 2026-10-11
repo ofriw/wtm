@@ -127,10 +127,10 @@ func checkedDeleteTarget(w *worktree, branch, defBranch string) (*worktree, erro
 		return nil, fmt.Errorf("%w %q", errNoWorktreeForBranch, branch)
 	}
 	if w.Main {
-		return nil, fmt.Errorf("refusing to delete the main worktree %s", w.Path)
+		return nil, fmt.Errorf("refusing to remove the main worktree %s", w.Path)
 	}
 	if w.Branch == defBranch {
-		return nil, fmt.Errorf("refusing to delete default branch %q", w.Branch)
+		return nil, fmt.Errorf("refusing to remove default branch %q", w.Branch)
 	}
 	return w, nil
 }
@@ -224,7 +224,7 @@ func deleteOrphanFallback(g *globals, o deleteOptions, cause error) error {
 		return cause
 	}
 	if def, _ := defaultBranch(ws.root); branch == def {
-		return fmt.Errorf("refusing to delete default branch %q", branch)
+		return fmt.Errorf("refusing to remove default branch %q", branch)
 	}
 	return runBranchOnlyDelete(g, o, ws.root, ws.wts, branch)
 }
