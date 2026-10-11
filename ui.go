@@ -74,18 +74,23 @@ func statusCellStyle(header, value string) lipgloss.Style {
 	}
 	// Capability columns only appear in the opt-in --wide view.
 	if isCapabilityHeader(header) {
-		// WHY: the state word is the state, so it maps straight to the one
-		// semantic color scheme instead of through a value-string wrapper.
-		switch value {
-		case "yes":
-			return capStateStyle(capPresent)
-		case "partial":
-			return capStateStyle(capPartial)
-		default: // "-" and "n/a"
-			return capStateStyle(capAbsent)
-		}
+		return capabilityCellStyle(value)
 	}
 	return lipgloss.NewStyle()
+}
+
+// capabilityCellStyle maps a --wide capability cell. The state word is the
+// state, so it maps straight to the one semantic color scheme instead of
+// through a value-string wrapper.
+func capabilityCellStyle(value string) lipgloss.Style {
+	switch value {
+	case "yes":
+		return capStateStyle(capPresent)
+	case "partial":
+		return capStateStyle(capPartial)
+	default: // "-" and "n/a"
+		return capStateStyle(capAbsent)
+	}
 }
 
 func tempCellStyle(value string) lipgloss.Style {

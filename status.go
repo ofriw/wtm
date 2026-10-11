@@ -228,19 +228,29 @@ func guardPermanentActivity(wts []worktree, unknown []unverifiedSession, now tim
 		warnProgress(p, "unverified session ownership: %s", u.Path)
 	}
 	if hasUnknownAgeSession(unknown) {
-		for i := range wts {
-			if !wts[i].Temp {
-				wts[i].LastUsed = now
-				warnProgress(p, "%s: keeping permanent worktree ACTIVE because session ownership is unverified", displayPath(wts[i].Path))
-			}
-		}
+		keepPermanentsActive(wts, now, p)
 		return
 	}
-	newest := newestKnownSession(unknown)
-	// Same age-gating rule as unverifiedSession.blocksRemoval (agents.go):
-	// only a session newer than known activity can hide recent use. The
-	// equality edge differs by intent: this guard protects on == (fail closed
-	// for permanents), the temp path removes on strict >.
+	keepPermanentsOlderThan(wts, newestKnownSession(unknown), now, p)
+}
+
+// keepPermanentsActive is the blanket fail-closed guard: one unknown-age
+// session grants every permanent worktree fresh activity, so gc cannot prove
+// any of them abandoned.
+func keepPermanentsActive(wts []worktree, now time.Time, p *progress) {
+	for i := range wts {
+		if !wts[i].Temp {
+			wts[i].LastUsed = now
+			warnProgress(p, "%s: keeping permanent worktree ACTIVE because session ownership is unverified", displayPath(wts[i].Path))
+		}
+	}
+}
+
+// keepPermanentsOlderThan applies the same age gate as
+// unverifiedSession.blocksRemoval: only a session newer than known activity can
+// hide recent use. The equality edge differs by intent — this guard protects on
+// == (fail closed for permanents), the temp path removes on strict >.
+func keepPermanentsOlderThan(wts []worktree, newest, now time.Time, p *progress) {
 	for i := range wts {
 		if !wts[i].Temp && !wts[i].LastUsed.After(newest) {
 			wts[i].LastUsed = now

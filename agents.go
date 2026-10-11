@@ -617,27 +617,37 @@ func removeEmptySessionDirs(r sessionRef) error {
 		return nil
 	}
 	for dir := filepath.Dir(r.path); dir != filepath.Dir(r.group); dir = filepath.Dir(dir) {
-		if err := verifySessionBoundary(r, dir); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			// WHY: a concurrent purge already removed the dir — cleanup is
-			// done, not failed.
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		if len(entries) != 0 {
-			return nil
-		}
-		if err := os.Remove(dir); err != nil {
+		done, err := removeSessionDirIfEmpty(r, dir)
+		if err != nil || done {
 			return err
 		}
 	}
 	return nil
+}
+
+// removeSessionDirIfEmpty deletes dir when it holds nothing, reporting done so
+// the caller stops climbing. A vanished or repopulated dir ends the climb.
+func removeSessionDirIfEmpty(r sessionRef, dir string) (bool, error) {
+	if err := verifySessionBoundary(r, dir); err != nil {
+		return true, boundaryCleanupErr(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// WHY: a concurrent purge already removed the dir — cleanup is done,
+		// not failed.
+		return true, boundaryCleanupErr(err)
+	}
+	if len(entries) != 0 {
+		return true, nil
+	}
+	return false, os.Remove(dir)
+}
+
+// boundaryCleanupErr maps boundary/IO errors onto the climb: a path that no
+// longer exists ends cleanup, everything else is a real failure.
+func boundaryCleanupErr(err error) error {
+	if errors.Is(err, fs.ErrNotExist) || os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
