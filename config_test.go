@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -203,6 +205,36 @@ func TestCmdConfigSetPreservesUnknownKey(t *testing.T) {
 	var ttl string
 	if err := json.Unmarshal(m["unusedTTL"], &ttl); err != nil || ttl != "7d" {
 		t.Fatalf("unusedTTL = %q, want 7d", ttl)
+	}
+}
+
+// TestCmdConfigSetConcurrentWriters pins that the settings write path survives
+// concurrent mutations: every writer succeeds and the file ends as one valid
+// document. The never-truncated property itself belongs to writeFileAtomic,
+// which settings now shares with the temp registry (see fs_test.go); this test
+// only guards the wiring, so a settings write that regressed to a direct
+// os.WriteFile cannot pass silently.
+func TestCmdConfigSetConcurrentWriters(t *testing.T) {
+	sandbox(t)
+	writeFile(t, settingsFile(t), "{\"unusedTTL\":\"30d\"}\n", 0o600)
+	windows := []string{"1d", "2d", "3d", "5d", "7d", "11d", "13d", "17d"}
+	var wg sync.WaitGroup
+	for _, window := range windows {
+		wg.Add(1)
+		go func(window string) {
+			defer wg.Done()
+			if err := cmdConfig(&globals{}, []string{"set", "unusedTTL", window}); err != nil {
+				t.Errorf("config set %s: %v", window, err)
+			}
+		}(window)
+	}
+	wg.Wait()
+	s, _, err := loadSettings()
+	if err != nil {
+		t.Fatalf("settings after concurrent writes: %v", err)
+	}
+	if !slices.Contains(windows, s.UnusedTTL) {
+		t.Fatalf("settings lost a write: got %q, want one of %v", s.UnusedTTL, windows)
 	}
 }
 

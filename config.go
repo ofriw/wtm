@@ -124,10 +124,9 @@ func writeSettings(p, val string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(p, append(data, '\n'), 0o600)
+	// writeFileAtomic creates the directory itself, so no MkdirAll here: a
+	// truncated settings file would break every command that reads it.
+	return writeFileAtomic(p, append(data, '\n'), 0o600)
 }
 
 func readSettingsMap(p string) (map[string]json.RawMessage, error) {
