@@ -24,7 +24,7 @@ func backdateGitActivity(t *testing.T, path string, when time.Time) {
 	setMtime(t, filepath.Join(path, ".git"), when)
 }
 
-func stageTempActivity(t *testing.T, w worktree, kind string) string {
+func stageWorktreeActivity(t *testing.T, w worktree, kind string) string {
 	t.Helper()
 	path := filepath.Join(w.Path, "tracked.txt")
 	if kind == "new" {
@@ -41,7 +41,7 @@ func stageTempActivity(t *testing.T, w worktree, kind string) string {
 
 func pinStagedActivity(t *testing.T, w worktree, kind, source string) {
 	t.Helper()
-	path := stageTempActivity(t, w, kind)
+	path := stageWorktreeActivity(t, w, kind)
 	recent := tempNow.Add(-30 * time.Minute)
 	fileTime, indexTime := recent, tempTestTime
 	if source == "index" {
@@ -94,7 +94,7 @@ func inspectIdleRepeatedly(t *testing.T, repo string, w worktree) {
 
 func TestActivityInspectionDoesNotRefreshIndex(t *testing.T) {
 	repo, w, _ := idleTempCheckout(t)
-	path := stageTempActivity(t, w, "modify")
+	path := stageWorktreeActivity(t, w, "modify")
 	setMtime(t, path, tempTestTime)
 	index := backdateActivityIndex(t, w.Path, tempTestTime)
 	inspectIdleRepeatedly(t, repo, w)

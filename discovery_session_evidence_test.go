@@ -83,20 +83,30 @@ func runDiscoveryEvidenceGC(t *testing.T, repo string, temp worktree, permanent,
 	}
 }
 
+func stageFreshPermanentActivity(t *testing.T, path string) time.Time {
+	t.Helper()
+	backdateGitActivity(t, path, tempTestTime.Add(-2*time.Hour))
+	file := stageWorktreeActivity(t, worktree{Path: path}, "new")
+	setMtime(t, file, tempTestTime)
+	// A real staged change makes the index relevant; a pinned mtime avoids
+	// depending on whether a no-change Git command rewrites that file.
+	recent := time.Now().Add(-time.Minute).Truncate(time.Second)
+	backdateActivityIndex(t, path, recent)
+	return recent
+}
+
 func TestIdleGCDiscoveryOlderFileEvidenceReachesFreshTempCheck(t *testing.T) {
 	for _, a := range agents() {
 		for _, kind := range []string{"unknown", "unreadable"} {
 			t.Run(a.name+"/"+kind, func(t *testing.T) {
 				repo, temp, permanent := discoveryEvidenceFixture(t)
-				// WHY: the amend is real recent git activity — it refreshes the
-				// private index mtime to wall-clock now, so the permanent is fresh:
-				// the older unverified session neither protects it (scoped guard)
-				// nor blocks the temp's fresh idle check. Dates are not scanned here;
-				// the index mtime decides.
-				backdateGitActivity(t, permanent, tempTestTime.Add(-2*time.Hour))
-				mustGit(t, permanent, "commit", "--amend", "--no-edit")
+				recent := stageFreshPermanentActivity(t, permanent)
 				p := discoveryUnknownSession(t, a, kind, tempTestTime.Add(-time.Hour))
 				ws, warning := idleGCEvidenceWorkspace(t, repo)
+				w := mustFindWorktree(t, ws, permanent)
+				if !w.LastUsed.Equal(recent) || w.unused(time.Now(), ws.ttl) {
+					t.Fatalf("staged permanent must be fresh via its index: %+v, want %s", w, recent)
+				}
 				requireEvidenceCandidates(t, ws, temp, permanent, p, warning)
 				// WHY: the older session must not trigger the blanket permanent
 				// bump — a regression to unknown-age behavior belongs to the fresh
