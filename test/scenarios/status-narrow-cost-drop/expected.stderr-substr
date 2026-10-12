@@ -1,0 +1,2 @@
+terminal too narrow; hid PATH, BRANCH, UPSTREAM, LAST USED, AGE, ACTIVE, COST; widen the terminal or use --json
+terminal too narrow; hid HARNESS, MODEL; widen the terminal or use --json

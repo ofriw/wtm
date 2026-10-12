@@ -12,7 +12,9 @@ worktree_add "$SBX/repo" "$SBX/wt-edge" edge
 worktree_add "$SBX/repo" "$SBX/wt-old" old
 worktree_add "$SBX/repo" "$SBX/wt-fresh" fresh
 
-touch -d '9 days ago' "$SBX/wt-edge/.git"
-touch -d '11 days ago' "$SBX/wt-old/.git"
+# WTM_NOW pins the clock at 2026-01-01; the mtimes are absolute so the
+# boundary is deterministic instead of drifting with the wall clock.
+touch -d '2025-12-23T00:00:00Z' "$SBX/wt-edge/.git"
+touch -d '2025-12-21T00:00:00Z' "$SBX/wt-old/.git"
 
 wtm config set unusedTTL 10d

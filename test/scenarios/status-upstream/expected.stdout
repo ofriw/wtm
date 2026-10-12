@@ -1,14 +1,17 @@
-PATH       BRANCH  UPSTREAM     LAST USED  STATUS  INTEGRATIONS
-/SBX/repo  main    -           2020-01-01  UNUSED  -
-/SBX/wt1   wt1     origin/wt1  2020-01-01  UNUSED  -
+PATH       BRANCH  UPSTREAM     LAST USED  AGE  ACTIVE  COST  STATUS  INTEGRATIONS
+/SBX/repo  main    -           2020-01-01   6y       -     -  UNUSED  -
+/SBX/wt1   wt1     origin/wt1  2020-01-01   6y       -     -  UNUSED  -
 [
   {
     "path": "/SBX/repo",
     "branch": "main",
     "upstream": "",
     "main": true,
+    "current": true,
     "lastUsed": "2020-01-01T00:00:00Z",
     "status": "UNUSED",
+    "ageSeconds": 189388800,
+    "cost": null,
     "integrations": {
       "chunkhound": "n/a",
       "claude": "n/a",
@@ -21,8 +24,11 @@ PATH       BRANCH  UPSTREAM     LAST USED  STATUS  INTEGRATIONS
     "branch": "wt1",
     "upstream": "origin/wt1",
     "main": false,
+    "current": false,
     "lastUsed": "2020-01-01T00:00:00Z",
     "status": "UNUSED",
+    "ageSeconds": 189388800,
+    "cost": null,
     "integrations": {
       "chunkhound": "n/a",
       "claude": "n/a",

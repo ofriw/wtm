@@ -1,0 +1,71 @@
+PATH       BRANCH  UPSTREAM   LAST USED  AGE  ACTIVE   COST  STATUS  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01   6y       -      -  ACTIVE  -
+/SBX/wt    wt      -         2020-01-01   6y  1h 00m  $3.48  ACTIVE  -
+
+current worktree  /SBX/wt
+age               6y
+active time       1h 00m
+cost              $3.48
+
+HARNESS  MODEL                TIME   COST
+pi       deepseek-flash     1h 00m  $3.00
+claude   claude-sonnet-4-6  1h 00m  $0.48
+[
+  {
+    "path": "/SBX/repo",
+    "branch": "main",
+    "upstream": "",
+    "main": true,
+    "current": false,
+    "lastUsed": "2020-01-01T00:00:00Z",
+    "status": "ACTIVE",
+    "ageSeconds": 189388800,
+    "cost": null,
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    }
+  },
+  {
+    "path": "/SBX/wt",
+    "branch": "wt",
+    "upstream": "",
+    "main": false,
+    "current": true,
+    "lastUsed": "2020-01-01T00:00:00Z",
+    "status": "ACTIVE",
+    "ageSeconds": 189388800,
+    "cost": 3.48,
+    "activeSeconds": 3600,
+    "usage": {
+      "claude": {
+        "cost": 0.48,
+        "activeSeconds": 3600,
+        "models": {
+          "claude-sonnet-4-6": {
+            "cost": 0.48,
+            "activeSeconds": 3600
+          }
+        }
+      },
+      "pi": {
+        "cost": 3,
+        "activeSeconds": 3600,
+        "models": {
+          "deepseek-flash": {
+            "cost": 3,
+            "activeSeconds": 3600
+          }
+        }
+      }
+    },
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    }
+  }
+]

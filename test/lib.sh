@@ -53,6 +53,36 @@ mk_claude_session() { # mk_claude_session <worktree> <session-id> <touch-stamp>
   touch -t "$stamp" "$project/$id.jsonl"
 }
 
+mk_usage_session() { # mk_usage_session <config-subdir> <worktree> <session-dir> <stamp> <line>...
+  # Seed a cost-bearing transcript: a queue/user preamble, then caller JSONL.
+  local sub=$1 wt=$2 dir=$3 stamp=$4; shift 4
+  local base d
+  case "$sub" in
+    sessions) base=$PI_CODING_AGENT_DIR/$sub ;;
+    projects)
+      base=$CLAUDE_CONFIG_DIR/$sub/$(printf '%s' "$wt" | sed 's/[^[:alnum:]]/-/g')
+      ;;
+  esac
+  d="$base/$dir"
+  mkdir -p "$d"
+  {
+    printf '{"id":"%s","cwd":"%s"}\n' "$dir" "$wt"
+    if [[ $sub == projects ]]; then
+      printf '{"type":"user","cwd":"%s","message":{"role":"user","content":"seed"}}\n' "$wt"
+    fi
+    printf '%s\n' "$@"
+  } >"$d/$dir.jsonl"
+  touch -t "$stamp" "$d/$dir.jsonl"
+}
+
+mk_pi_usage_session() { # mk_pi_usage_session <worktree> <session-dir> <stamp> <line>...
+  mk_usage_session sessions "$@"
+}
+
+mk_claude_usage_session() { # mk_claude_usage_session <worktree> <session-dir> <stamp> <line>...
+  mk_usage_session projects "$@"
+}
+
 backdate() { # backdate <path>... — pin mtimes to SEED epoch so activity reads old
   touch -t "$OLD_STAMP" "$@"
 }
