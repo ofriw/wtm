@@ -33,6 +33,12 @@ type agent struct {
 	configDirRel  []string // under home
 	sessionSubdir string
 	sessionOwner  func(*bufio.Reader) (string, error)
+	// parseUsage reads one session file into cost/time events. catalogRated
+	// marks a harness whose records carry tokens but no cost, so the public
+	// catalog must price them (Claude Code); a self-pricing harness (Pi) adds
+	// cost to each event.
+	parseUsage   func(*bufio.Reader) ([]usageEvent, error)
+	catalogRated bool
 }
 
 // agents is the SSOT for known harnesses: seeding, indexing and MCP status
@@ -320,10 +326,12 @@ func sessionRecord(r *bufio.Reader) ([]byte, error) {
 // instead of one per worktree.
 type sessionIndex map[string][]sessionRef
 
-// sessionRef carries an owned file and the boundary for empty-dir cleanup.
+// sessionRef carries an owned file, the boundary for empty-dir cleanup, and
+// the harness that owns it, so usage loads without re-resolving the harness.
 type sessionRef struct {
-	path  string
-	group string
+	path    string
+	group   string
+	harness string
 }
 
 // sessionErrPolicy decides what an unreadable session does. Reclamation fails
@@ -430,7 +438,7 @@ func (a agent) addSessionRef(idx sessionIndex, base, p string, d fs.DirEntry, po
 	}
 	if cwd != "" {
 		key := canonical(cwd)
-		idx[key] = append(idx[key], sessionRef{path: p, group: sessionGroup(base, p)})
+		idx[key] = append(idx[key], sessionRef{path: p, group: sessionGroup(base, p), harness: a.name})
 	}
 	return nil
 }
@@ -455,6 +463,119 @@ func lastUsed(wtPath string, idx sessionIndex) time.Time {
 		}
 	}
 	return newest
+}
+
+// parsedSession pairs one readable session's events with its fold inputs, so
+// buildUsage can parse every session before it folds any.
+type parsedSession struct {
+	harness string
+	events  []usageEvent
+	price   func(usageEvent) money
+}
+
+// buildUsage parses a worktree's owned sessions once and aggregates cost/time.
+// cat is nil when no catalog is available: a catalog-rated harness then reports
+// unknown cost instead of a wrong number.
+func buildUsage(wtPath string, idx sessionIndex, cat catalog) (worktreeUsage, error) {
+	var u worktreeUsage
+	unreadable := map[string]bool{}
+	var firstErr error
+	var sessions []parsedSession
+	for _, ref := range idx[canonical(wtPath)] {
+		a, ok := agentByName(ref.harness)
+		if !ok || a.parseUsage == nil {
+			continue
+		}
+		events, err := readUsage(a, ref.path)
+		if err != nil {
+			// A bad file sorts anywhere, so record the loss now and taint the
+			// total after folding, when even a good session listed later in the
+			// walk has folded.
+			unreadable[ref.harness] = true
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		sessions = append(sessions, parsedSession{harness: ref.harness, events: events, price: usagePricer(a, cat)})
+	}
+	lists := make([][]usageEvent, len(sessions))
+	for i, s := range sessions {
+		lists[i] = s.events
+	}
+	dedupeKeyedEvents(lists)
+	for i, s := range sessions {
+		u.addSession(s.harness, lists[i], s.price)
+	}
+	markPartial(&u, unreadable)
+	return u, firstErr
+}
+
+// markPartial taints the total and each harness that kept some spans but also
+// lost a session, so a partial sum never looks exact. A harness with no
+// readable spans keeps no entry: a zero-span unknown would read as 0s active
+// instead of none, so the worktree-level flag carries that loss instead.
+func markPartial(u *worktreeUsage, unreadable map[string]bool) {
+	if len(unreadable) == 0 {
+		return
+	}
+	u.partial = true
+	for name := range unreadable {
+		if h, ok := u.harnesses[name]; ok {
+			h.cost.addUnknown()
+		}
+	}
+}
+
+func readUsage(a agent, path string) ([]usageEvent, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return a.parseUsage(bufio.NewReader(f))
+}
+
+// usagePricer resolves one event to money: a harness-supplied cost wins, a
+// catalog-rated token record is priced from the catalog, and everything else
+// (including a catalog-rated record with no catalog) is unknown.
+func usagePricer(a agent, cat catalog) func(usageEvent) money {
+	return func(e usageEvent) money {
+		var m money
+		switch {
+		case e.cost != nil:
+			m.addKnown(*e.cost)
+		case a.catalogRated && cat != nil:
+			m = cat.price(e)
+		default:
+			m.addUnknown()
+		}
+		return m
+	}
+}
+
+// agentByName resolves a session owner to its descriptor.
+func agentByName(name string) (agent, bool) {
+	for _, a := range agents() {
+		if a.name == name {
+			return a, true
+		}
+	}
+	return agent{}, false
+}
+
+// hasHarness reports whether any of the given worktrees owns a session from
+// the named harness. Status uses it to load the catalog only when it can be
+// needed, so a Pi-only repo never touches the network.
+func (idx sessionIndex) hasHarness(wts []worktree, name string) bool {
+	for _, w := range wts {
+		for _, r := range idx[canonical(w.Path)] {
+			if r.harness == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // purgeSessions deletes only confirmed owned files. Unknown and unrelated

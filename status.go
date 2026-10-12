@@ -22,6 +22,12 @@ type worktree struct {
 	// Caps maps each capability id to its state; the capability registry is the
 	// SSOT for ids, so the row no longer grows a field per integration.
 	Caps map[string]capState
+	// Created is the worktree creation mark: the .git entry mtime. Zero when the
+	// mark is absent, which renders as an unknown age.
+	Created time.Time
+	// Usage is the cost/active-time summary; nil when the worktree has no agent
+	// events. Only status fills it; gc and add leave it nil.
+	Usage *worktreeUsage
 }
 
 func (w worktree) unused(now time.Time, ttl time.Duration) bool {
@@ -105,7 +111,20 @@ func buildWorktree(g gworktree, idx sessionIndex, ups map[string]upstream, p *pr
 		// picker is the only consumer (set lazily in gcSelection's candidate loop).
 		LastUsed: worktreeLastUsed(pth, idx),
 		Caps:     capabilityStates(capInput{root: pth, mcp: configs}),
+		Created:  worktreeCreated(pth),
 	}
+}
+
+// worktreeCreated reads the .git entry mtime as the creation mark. A linked
+// worktree's .git is a file, so its mtime is a stable creation proxy. The main
+// worktree's .git is a directory, so its AGE resets on index and ref writes;
+// the design accepts this because birth time is unavailable on every filesystem.
+func worktreeCreated(path string) time.Time {
+	info, err := os.Stat(filepath.Join(path, ".git"))
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
 }
 
 // discover inventories every worktree of the repo rooted at root, reporting
@@ -187,8 +206,11 @@ func scanGitModTimes(path string, newest *time.Time) {
 
 // worktreeLastUsed includes creation and Git changes so a new or actively
 // edited worktree cannot be classified as abandoned before its first agent session.
+// nowFunc() is the WTM_NOW test seam: in the container harness it is pinned to a
+// fixed time so goldens stay byte-stable. Future mtimes are clamped to that same
+// now so a session newer than the test clock cannot break determinism.
 func worktreeLastUsed(path string, idx sessionIndex) time.Time {
-	now := time.Now()
+	now := nowFunc()
 	newest := lastUsed(path, idx)
 	updateNewest(&newest, filepath.Join(path, ".git"))
 	scanGitModTimes(path, &newest)
@@ -214,30 +236,110 @@ func sortWorktrees(wts []worktree) {
 }
 
 func cmdStatus(g *globals, args []string) error {
-	fs := subFlags("status", g)
-	wide := fs.Bool("wide", false, "show one column per integration")
-	pos, err := parseSub(fs, g, args)
+	wide, err := parseStatusFlags(g, args)
 	if err != nil {
 		return err
-	}
-	if len(pos) > 0 {
-		return usagef("status: unexpected argument %q", pos[0])
-	}
-	// --wide shapes only the table; the JSON contract always reports every
-	// integration, so the combination is a usage error, not a silent no-op.
-	if *wide && g.json {
-		return usagef("status: --wide has no effect with --json (JSON already reports all integrations)")
 	}
 	ws, err := loadWorkspace(g, false, false)
 	if err != nil {
 		return err
 	}
-	now := time.Now()
+	ws.loadUsage()
+	now := nowFunc()
+	current := currentWorktreePath(ws)
 	if g.json {
-		return printStatusJSON(ws.wts, now, ws.ttl)
+		return printStatusJSON(ws.wts, now, ws.ttl, current)
 	}
-	printStatusTable(statusColumnsFor(*wide), ws.wts, now, ws.ttl, g.color)
+	printStatusTable(statusColumnsFor(wide), ws.wts, now, ws.ttl, g.color)
+	printStatusDetail(ws.wts, current, now, g.color)
 	return nil
+}
+
+// parseStatusFlags parses and validates the status flags. --wide shapes only
+// the table; the JSON contract always reports every integration, so the
+// combination is a usage error, not a silent no-op.
+func parseStatusFlags(g *globals, args []string) (bool, error) {
+	fs := subFlags("status", g)
+	wide := fs.Bool("wide", false, "show one column per integration")
+	pos, err := parseSub(fs, g, args)
+	if err != nil {
+		return false, err
+	}
+	if len(pos) > 0 {
+		return false, usagef("status: unexpected argument %q", pos[0])
+	}
+	if *wide && g.json {
+		return false, usagef("status: --wide has no effect with --json (JSON already reports all integrations)")
+	}
+	return *wide, nil
+}
+
+// nowFunc is the clock seam. Production reads the wall clock; the container
+// harness pins WTM_NOW so every clock read is deterministic in goldens: status
+// ages, worktreeLastUsed and the gc TTL decision all draw from this one seam.
+// A malformed value is a test-setup error, so disclose it instead of hiding it.
+func nowFunc() time.Time {
+	s := os.Getenv("WTM_NOW")
+	if s == "" {
+		return time.Now()
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		warnf("WTM_NOW %q is not RFC3339: using the wall clock", s)
+		return time.Now()
+	}
+	return t
+}
+
+// loadUsage attaches every worktree's cost/active-time summary. The catalog is
+// loaded only when the repo owns a Claude session, so a Pi-only repo never
+// reaches the network. An unreadable session degrades to a warning: status is
+// read-only and must still report what it knows.
+func (ws *workspace) loadUsage() {
+	var cat catalog
+	if ws.idx.hasHarness(ws.wts, claudeAgent.name) {
+		c, err := loadCatalog()
+		if err != nil {
+			warnf("claude cost unavailable: %s", err)
+			// cat stays nil: every harness will report unknown, which is the honest
+			// answer when no catalog is available at all.
+		} else {
+			cat = c
+		}
+	}
+	for i := range ws.wts {
+		u, err := buildUsage(ws.wts[i].Path, ws.idx, cat)
+		if err != nil {
+			warnf("usage for %s: %s", displayPath(ws.wts[i].Path), err)
+		}
+		if u.hasEvents() || u.partial {
+			// A worktree whose every session was unreadable keeps its usage so
+			// the loss reads as unknown, never as no usage.
+			ws.wts[i].Usage = &u
+		}
+	}
+}
+
+// currentWorktreePath resolves the worktree that contains the current
+// directory; it falls back to the main worktree when the directory is outside
+// the repo (for example with an explicit --root).
+func currentWorktreePath(ws workspace) string {
+	if cwd, err := os.Getwd(); err == nil {
+		if top, err := gitTopLevel(cwd); err == nil {
+			c := canonical(top)
+			for _, w := range ws.wts {
+				if w.Path == c {
+					return c
+				}
+			}
+		}
+	}
+	for _, w := range ws.wts {
+		if w.Main {
+			return w.Path
+		}
+	}
+	return ws.root
 }
 
 func lastUsedCell(w worktree) string {
@@ -303,6 +405,10 @@ type worktreeColumn struct {
 	rightAlign bool
 	shrinkRank int
 	floor      int
+	// unelidable columns must not be middle-elided: a cut currency hides its
+	// magnitude, which reads as a wrong number. Such a column keeps its natural
+	// width and is dropped whole (with the stderr disclosure) when it cannot fit.
+	unelidable bool
 }
 
 // cell funcs wrap the display formatters so the registry stays declarative.
@@ -311,6 +417,34 @@ func cellBranch(w worktree, _ columnContext) string   { return w.branchName() }
 func cellUpstream(w worktree, _ columnContext) string { return upstreamCell(w) }
 func cellLastUsed(w worktree, _ columnContext) string { return lastUsedCell(w) }
 func cellStatus(w worktree, c columnContext) string   { return w.status(c.now, c.ttl) }
+
+// cellAge is the wall-clock life of the worktree; "-" when the creation mark
+// is absent, so an unknown age never reads as a real zero.
+func cellAge(w worktree, c columnContext) string {
+	if w.Created.IsZero() {
+		return "-"
+	}
+	return humanAge(c.now.Sub(w.Created))
+}
+
+// cellActive is the union of the worktree's session spans; "-" only when the
+// worktree has no events. A worktree with point events has a zero span, which
+// reads as "0s": measured-but-empty usage must not hide behind "-".
+func cellActive(w worktree, _ columnContext) string {
+	if w.Usage == nil {
+		return "-"
+	}
+	return humanActive(w.Usage.active())
+}
+
+// cellCost is the sum of every harness cost; "-" when there are no events and
+// "unknown" when any contributor is unpriced.
+func cellCost(w worktree, _ columnContext) string {
+	if w.Usage == nil {
+		return "-"
+	}
+	return w.Usage.cost().cell()
+}
 
 // cellIntegrations lists the integrations the worktree actually has: the token
 // per present capability, token~ per partial. Absent capabilities are omitted,
@@ -331,30 +465,48 @@ func cellIntegrations(w worktree, c columnContext) string {
 func cellUncommitted(w worktree, _ columnContext) string { return dirtyCell(w) }
 
 var (
-	// Core shrink ranks start at 2: rank 1 belongs to the --wide capability
-	// columns, which elide before any core column gives up width.
+	// Core shrink ranks start at 2: rank 1 belongs to the capability columns.
+	// The identity columns give up width first, in PATH/UPSTREAM/BRANCH/LAST USED
+	// order, so the cost/time data outlives the columns that name a worktree.
+	// AGE, ACTIVE and COST elide next; their floor is their header width, so
+	// those three are never rendered narrower than their headers. INTEGRATIONS
+	// gives up width last.
 	colPath         = worktreeColumn{header: "PATH", cell: cellPath, shrinkRank: 2, floor: 12}
 	colBranch       = worktreeColumn{header: "BRANCH", cell: cellBranch, shrinkRank: 4, floor: 8}
 	colUpstream     = worktreeColumn{header: "UPSTREAM", cell: cellUpstream, shrinkRank: 3, floor: 8}
 	colLastUsed     = worktreeColumn{header: "LAST USED", cell: cellLastUsed, rightAlign: true, shrinkRank: 5, floor: 10}
+	colAge          = worktreeColumn{header: "AGE", cell: cellAge, rightAlign: true, shrinkRank: 6, floor: 3}
+	colActive       = worktreeColumn{header: "ACTIVE", cell: cellActive, rightAlign: true, shrinkRank: 7, floor: 6}
+	colCost         = worktreeColumn{header: "COST", cell: cellCost, rightAlign: true, shrinkRank: 8, floor: 4, unelidable: true}
 	colStatus       = worktreeColumn{header: "STATUS", cell: cellStatus}
-	colIntegrations = worktreeColumn{header: "INTEGRATIONS", cell: cellIntegrations, shrinkRank: 6, floor: 6}
+	colIntegrations = worktreeColumn{header: "INTEGRATIONS", cell: cellIntegrations, shrinkRank: 9, floor: 6}
 	colUncommitted  = worktreeColumn{header: "UNCOMMITTED", cell: cellUncommitted}
+
+	// Detail-block headers carry no cell: the block renders pre-formatted
+	// (harness, model) rows, and these entries exist only so the detail grid
+	// obeys the same shrink policy as the status table. MODEL and HARNESS are
+	// identity (give up width first), TIME follows, and COST reuses colCost.
+	colModel   = worktreeColumn{header: "MODEL", shrinkRank: 2}
+	colHarness = worktreeColumn{header: "HARNESS", shrinkRank: 3}
+	colTime    = worktreeColumn{header: "TIME", rightAlign: true, shrinkRank: 7, floor: 6}
 )
 
-// coreColumns is the shared prefix of every status schema: identity, tracking
-// and activity. statusColumns appends the grouped INTEGRATIONS cell; --wide
-// replaces it with one column per capability, so a new core column reaches both.
-var coreColumns = []worktreeColumn{colPath, colBranch, colUpstream, colLastUsed, colStatus}
+// coreColumns is the shared prefix of every status schema: identity, tracking,
+// activity and cost. statusColumns appends the grouped INTEGRATIONS cell;
+// --wide replaces it with one column per capability, so a new core column
+// reaches both.
+var coreColumns = []worktreeColumn{colPath, colBranch, colUpstream, colLastUsed, colAge, colActive, colCost, colStatus}
 
 // statusColumns is the default status schema; tests and the right-align choice
 // derive from it so the header contract has one source.
 var statusColumns = append(slices.Clone(coreColumns), colIntegrations)
 
-// allColumns is every status column plus the gc picker's UNCOMMITTED. The fit
-// policy is derived from columnRegistry(), which adds the capability columns.
+// allColumns is every column a grid can render: the status columns, the gc
+// picker's UNCOMMITTED, and the detail block's columns. The fit policy is
+// derived from columnRegistry(), which adds the capability columns.
 func allColumns() []worktreeColumn {
-	return append(slices.Clone(statusColumns), colUncommitted)
+	cols := append(slices.Clone(statusColumns), colUncommitted)
+	return append(cols, detailColumns...)
 }
 
 // columnRegistry maps header names to their column definition. It includes
@@ -451,31 +603,188 @@ func printStatusTable(cols []worktreeColumn, wts []worktree, now time.Time, ttl 
 }
 
 type jsonWorktree struct {
-	Path         string            `json:"path"`
-	Branch       string            `json:"branch"`
-	Upstream     string            `json:"upstream"`
-	Main         bool              `json:"main"`
-	LastUsed     *string           `json:"lastUsed"`
-	Status       string            `json:"status"`
+	Path          string                      `json:"path"`
+	Branch        string                      `json:"branch"`
+	Upstream      string                      `json:"upstream"`
+	Main          bool                        `json:"main"`
+	Current       bool                        `json:"current"`
+	LastUsed      *string                     `json:"lastUsed"`
+	Status        string                      `json:"status"`
+	AgeSeconds    *int64                      `json:"ageSeconds"`
+	Cost          *float64                    `json:"cost"`
+	ActiveSeconds *int64                      `json:"activeSeconds,omitempty"`
+	Usage         map[string]jsonHarnessUsage `json:"usage,omitempty"`
+	// Partial reports a total that lost an unreadable session, so a partial
+	// sum never reads as complete. Omitted when the total is whole.
+	Partial      bool              `json:"partial,omitempty"`
 	Integrations map[string]string `json:"integrations"`
 }
 
-func printStatusJSON(wts []worktree, now time.Time, ttl time.Duration) error {
+// jsonHarnessUsage is one harness's machine contract. cost is always present
+// (null when unpriced); activeSeconds and models follow the harness's events.
+type jsonHarnessUsage struct {
+	Cost          *float64                  `json:"cost"`
+	ActiveSeconds int64                     `json:"activeSeconds"`
+	Models        map[string]jsonModelUsage `json:"models"`
+}
+
+type jsonModelUsage struct {
+	Cost          *float64 `json:"cost"`
+	ActiveSeconds int64    `json:"activeSeconds"`
+}
+
+func printStatusJSON(wts []worktree, now time.Time, ttl time.Duration, current string) error {
 	active := activeCapabilities(wts)
 	out := make([]jsonWorktree, 0, len(wts))
 	for _, w := range wts {
-		j := jsonWorktree{
-			// WHY: branchName() is the SSOT for detached display so JSON matches the table's "(detached)".
-			Path: w.Path, Branch: w.branchName(), Upstream: w.Upstream.Short, Main: w.Main, Status: w.status(now, ttl),
-			Integrations: integrationStates(w, active),
-		}
-		if !w.LastUsed.IsZero() {
-			s := w.LastUsed.UTC().Format(time.RFC3339)
-			j.LastUsed = &s
-		}
-		out = append(out, j)
+		out = append(out, jsonWorktreeFrom(w, now, ttl, active, current))
 	}
 	return printJSON(out)
+}
+
+// jsonWorktreeFrom projects one worktree into the machine contract.
+func jsonWorktreeFrom(w worktree, now time.Time, ttl time.Duration, active []capability, current string) jsonWorktree {
+	j := jsonWorktree{
+		// WHY: branchName() is the SSOT for detached display so JSON matches the table's "(detached)".
+		Path: w.Path, Branch: w.branchName(), Upstream: w.Upstream.Short, Main: w.Main,
+		Current: w.Path == current, Status: w.status(now, ttl),
+		Integrations: integrationStates(w, active),
+		Cost:         w.costMoney().jsonValue(),
+	}
+	j.LastUsed = rfc3339Ptr(w.LastUsed)
+	j.AgeSeconds = ageSeconds(w, now)
+	applyUsageJSON(&j, w.Usage)
+	return j
+}
+
+func rfc3339Ptr(t time.Time) *string {
+	if t.IsZero() {
+		return nil
+	}
+	s := t.UTC().Format(time.RFC3339)
+	return &s
+}
+
+func ageSeconds(w worktree, now time.Time) *int64 {
+	if w.Created.IsZero() {
+		return nil
+	}
+	s := seconds(now.Sub(w.Created))
+	return &s
+}
+
+// applyUsageJSON adds the event-derived fields; an eventless worktree omits them.
+func applyUsageJSON(j *jsonWorktree, u *worktreeUsage) {
+	if u == nil {
+		return
+	}
+	a := seconds(u.active())
+	j.ActiveSeconds = &a
+	j.Usage = usageJSON(u)
+	j.Partial = u.partial
+}
+
+// costMoney is the worktree's known/unknown total; empty when no events.
+func (w worktree) costMoney() money {
+	if w.Usage == nil {
+		return money{}
+	}
+	return w.Usage.cost()
+}
+
+func usageJSON(u *worktreeUsage) map[string]jsonHarnessUsage {
+	out := make(map[string]jsonHarnessUsage, len(u.harnesses))
+	for name, h := range u.harnesses {
+		models := make(map[string]jsonModelUsage, len(h.models))
+		for model, m := range h.models {
+			models[model] = jsonModelUsage{Cost: m.cost.jsonValue(), ActiveSeconds: seconds(m.active())}
+		}
+		out[name] = jsonHarnessUsage{Cost: h.cost.jsonValue(), ActiveSeconds: seconds(h.active()), Models: models}
+	}
+	return out
+}
+
+// detailColumns is the detail block's table schema. It shares the status column
+// registry (see allColumns) so the block obeys the same width policy as the
+// table above: MODEL and HARNESS give up width first, TIME next, and COST is
+// unelidable, so the cost column outlives the columns that name the rows.
+var detailColumns = []worktreeColumn{colHarness, colModel, colTime, colCost}
+
+// printStatusDetail renders the current worktree's usage under the table. The
+// block is omitted when no harness in the repo has events; when the current
+// worktree alone is empty, the block says so instead of showing empty rows.
+func printStatusDetail(wts []worktree, current string, now time.Time, colorMode string) {
+	if !repoHasUsage(wts) {
+		return
+	}
+	cur := findWorktree(wts, current)
+	if cur == nil {
+		return
+	}
+	fmt.Println()
+	printKeyValues(detailSummaryRows(*cur, now), detailTitleRows, colorMode)
+	if cur.Usage == nil {
+		fmt.Println("no agent usage recorded")
+		return
+	}
+	fmt.Println()
+	// The breakdown reuses the table's cell grammar, so an unpriced cost
+	// recedes here exactly as it does in the status table above.
+	printTable(columnHeaders(detailColumns), detailRows(cur.Usage), colorMode, statusCell, columnRightAligns(detailColumns))
+}
+
+// detailTitleRows is how many leading detail-block rows are section titles;
+// printKeyValues bolds their labels.
+const detailTitleRows = 1
+
+// detailSummaryRows is the block's identity row plus its age/active/cost
+// measures. The identity value keeps the full path: identifying the current
+// worktree is the block's purpose, and the table above carries the elided form.
+func detailSummaryRows(cur worktree, now time.Time) [][]string {
+	return [][]string{
+		{"current worktree", displayPath(cur.Path)},
+		{"age", detailAge(cur, now)},
+		{"active time", detailActive(cur)},
+		{"cost", detailCost(cur)},
+	}
+}
+
+func repoHasUsage(wts []worktree) bool {
+	for _, w := range wts {
+		if w.Usage != nil && w.Usage.hasEvents() {
+			return true
+		}
+	}
+	return false
+}
+
+func findWorktree(wts []worktree, path string) *worktree {
+	for i := range wts {
+		if wts[i].Path == path {
+			return &wts[i]
+		}
+	}
+	return nil
+}
+
+func detailAge(w worktree, now time.Time) string { return cellAge(w, columnContext{now: now}) }
+
+func detailActive(w worktree) string { return cellActive(w, columnContext{}) }
+
+func detailCost(w worktree) string { return cellCost(w, columnContext{}) }
+
+// detailRows flattens the current worktree into (harness, model) rows, ordered
+// by harness registry order then by model cost.
+func detailRows(u *worktreeUsage) [][]string {
+	var rows [][]string
+	for _, name := range u.harnessNames() {
+		h := u.harnesses[name]
+		for _, model := range h.modelNames() {
+			m := h.models[model]
+			rows = append(rows, []string{name, model, humanClock(m.active()), m.cost.cell()})
+		}
+	}
+	return rows
 }
 
 // integrationStates is the stable JSON contract: every capability id is always

@@ -220,7 +220,7 @@ func chooseCandidates(candidates []worktree, o gcOptions, ttl time.Duration) ([]
 	if o.all || len(o.paths) > 0 {
 		return candidates, nil
 	}
-	return promptCandidateSelection(candidates, time.Now(), ttl, o.keepRemote)
+	return promptCandidateSelection(candidates, nowFunc(), ttl, o.keepRemote)
 }
 
 func handleGCAbort(g *globals, o gcOptions, err error) error {
@@ -342,7 +342,7 @@ func gcPickerPolicy(keepRemote bool) string {
 // takes every scanned candidate. The interactive choice is deferred to
 // chooseCandidates so it runs outside any progress renderer.
 func gcSelection(wts []worktree, o gcOptions, ttl time.Duration, p *progress) ([]worktree, error) {
-	now := time.Now()
+	now := nowFunc()
 	if len(o.paths) > 0 {
 		return gcByPath(wts, o.paths, ttl, now)
 	}

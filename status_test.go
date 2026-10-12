@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -183,13 +184,55 @@ func TestWorktreeLastUsed(t *testing.T) {
 		mkSession(t, repo, "future", now.Add(48*time.Hour))
 		idx := mustIndexSessions(t)
 		got := worktreeLastUsed(repo, idx)
-		if got.After(time.Now()) {
+		if got.After(now.Add(time.Minute)) {
 			t.Fatalf("future timestamp not clamped: %v", got)
 		}
 		if got.Before(now.Add(-time.Minute)) {
 			t.Fatalf("clamp lost recency: %v", got)
 		}
 	})
+}
+
+// TestNowFunc pins the clock seam: absent env reads the wall clock, a valid
+// RFC3339 value is honored, and a malformed value discloses itself and falls
+// back to the wall clock.
+func TestNowFunc(t *testing.T) {
+	t.Setenv("WTM_NOW", "")
+	if got := nowFunc(); got.Before(time.Now().Add(-time.Minute)) {
+		t.Errorf("absent env = %v, want the wall clock", got)
+	}
+	t.Setenv("WTM_NOW", "2026-01-01T00:00:00Z")
+	if got := nowFunc(); !got.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("valid env = %v, want 2026-01-01T00:00:00Z", got)
+	}
+	t.Setenv("WTM_NOW", "nope")
+	var got time.Time
+	var warned string
+	warned = captureStderr(t, func() { got = nowFunc() })
+	if got.Before(time.Now().Add(-time.Minute)) {
+		t.Errorf("malformed env = %v, want the wall clock", got)
+	}
+	if !strings.Contains(warned, `WTM_NOW "nope"`) {
+		t.Errorf("malformed env not disclosed: %q", warned)
+	}
+}
+
+// TestWorktreeCreated pins the creation mark: the .git entry mtime, and an
+// unknown mark (no .git entry) that must never read as a real zero age.
+func TestWorktreeCreated(t *testing.T) {
+	dir := t.TempDir()
+	if !worktreeCreated(dir).IsZero() {
+		t.Error("a worktree without a .git entry must have no creation mark")
+	}
+	mark := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	gitEntry := filepath.Join(dir, ".git")
+	writeFile(t, gitEntry, "gitdir: /elsewhere\n", 0o644)
+	if err := os.Chtimes(gitEntry, mark, mark); err != nil {
+		t.Fatal(err)
+	}
+	if got := worktreeCreated(dir); !got.Equal(mark) {
+		t.Errorf("worktreeCreated = %v, want the .git entry mtime %v", got, mark)
+	}
 }
 
 func TestDiscover(t *testing.T) {
@@ -352,15 +395,17 @@ func TestPrintTable(t *testing.T) {
 // policy is derived from the same registry: a rename or a new rank cannot pass
 // without updating this contract.
 func TestStatusHeadersSSOT(t *testing.T) {
-	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "STATUS", "INTEGRATIONS"}
+	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "AGE", "ACTIVE", "COST", "STATUS", "INTEGRATIONS"}
 	if !slices.Equal(columnHeaders(statusColumns), want) {
 		t.Fatalf("status headers = %v, want %v", columnHeaders(statusColumns), want)
 	}
 	// The elision order production derives for this table is a contract, not an
-	// implementation detail.
+	// implementation detail. The identity columns give up width first; AGE,
+	// ACTIVE and COST survive longer, and the integration state gives up width
+	// last.
 	registry := columnRegistry()
 	priority := dynamicShrinkPriority(want, registry)
-	wantShrink := []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED", "INTEGRATIONS"}
+	wantShrink := []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED", "AGE", "ACTIVE", "COST", "INTEGRATIONS"}
 	if !slices.Equal(priority, wantShrink) {
 		t.Errorf("shrink priority = %v, want %v", priority, wantShrink)
 	}
@@ -370,7 +415,7 @@ func TestStatusHeadersSSOT(t *testing.T) {
 	for _, c := range allColumns() {
 		registered[c.header] = true
 	}
-	for _, cols := range [][]worktreeColumn{statusColumns, gcPickerColumns} {
+	for _, cols := range [][]worktreeColumn{statusColumns, gcPickerColumns, detailColumns} {
 		for _, c := range cols {
 			if !registered[c.header] {
 				t.Errorf("column %q is used by a grid but missing from allColumns", c.header)
@@ -446,7 +491,7 @@ func TestPrintStatusTableFits(t *testing.T) {
 		Upstream: upstream{Short: "origin/feature/a-rather-long-branch-name", Remote: "origin", Ref: "refs/heads/x"},
 		Caps:     map[string]capState{"chunkhound": capPresent, "mcp": capPresent},
 	}}
-	out := captureStdout(t, func() { printStatusTable(statusColumns, wts, time.Now(), 10*time.Hour, colorNever) })
+	out := captureStdout(t, func() { printStatusTable(statusColumns, wts, at(0), 10*time.Hour, colorNever) })
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		if w := dispWidth(line); w > 80 {
 			t.Errorf("line exceeds 80 cells: %d\n%q", w, line)
@@ -463,8 +508,91 @@ func TestPrintStatusTableFits(t *testing.T) {
 	}
 }
 
+// narrowCostWorktree is one priced worktree with long identity cells, so every
+// narrow budget must squeeze the table.
+func narrowCostWorktree(home string, now time.Time) []worktree {
+	return []worktree{{
+		Path:     filepath.Join(home, "Documents", "GitHub", "project"),
+		Branch:   "feat/cost-tracking",
+		LastUsed: now,
+		Created:  now.Add(-72 * time.Hour),
+		Usage:    fixtureUsage(),
+	}}
+}
+
+// TestStatusNarrowKeepsCostColumns pins the elision-order fix at every narrow
+// budget: identity columns give up width first, the AGE, ACTIVE and COST
+// headers survive whole while the budget allows, no line exceeds the budget,
+// no slivers render, and a dropped cost column is disclosed on stderr.
+func TestStatusNarrowKeepsCostColumns(t *testing.T) {
+	home := t.TempDir()
+	setHomeEnv(t, home)
+	now := at(0)
+	wts := narrowCostWorktree(home, now)
+	for _, width := range []int{80, 60, 40} {
+		t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
+			t.Setenv("COLUMNS", fmt.Sprintf("%d", width))
+			var errOut string
+			out := captureStdout(t, func() {
+				errOut = captureStderr(t, func() {
+					printStatusTable(statusColumns, wts, now, 10*time.Hour, colorNever)
+				})
+			})
+			headerLine, _, _ := strings.Cut(out, "\n")
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := dispWidth(line); w > width {
+					t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
+				}
+			}
+			headers := columnHeaders(statusColumns)
+			rows := gridRows(statusColumns, wts, columnContext{now: now, ttl: 10 * time.Hour})
+			widths := columnWidths(headers, rows, width)
+			idx := headerIndex(headers)
+			assertWithin(t, widths, width)
+			assertNoSlivers(t, headers, widths)
+			for _, h := range []string{"AGE", "ACTIVE", "COST"} {
+				if widths[idx[h]] == 0 {
+					if !strings.Contains(errOut, h) {
+						t.Errorf("dropped %s is not disclosed on stderr: %q", h, errOut)
+					}
+					continue
+				}
+				if !strings.Contains(headerLine, h) {
+					t.Errorf("header %q missing at %d cols:\n%s", h, width, out)
+				}
+			}
+		})
+	}
+}
+
+// TestStatusDetailFitsNarrowBudget pins the detail block's shared width policy:
+// the summary and the breakdown both fit the budget, and the breakdown keeps
+// COST while the identity columns give up width first.
+func TestStatusDetailFitsNarrowBudget(t *testing.T) {
+	cur := worktree{
+		Path:  "/SBX/home/a/very/long/checkout/path/that/keeps/going/on",
+		Usage: fixtureUsage(),
+	}
+	for _, width := range []int{80, 60, 40} {
+		t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
+			t.Setenv("COLUMNS", fmt.Sprintf("%d", width))
+			out := captureStdout(t, func() {
+				printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever)
+			})
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := dispWidth(line); w > width {
+					t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
+				}
+			}
+			if !strings.Contains(out, "COST") || !strings.Contains(out, "$4.00") {
+				t.Errorf("cost column lost at %d cols:\n%s", width, out)
+			}
+		})
+	}
+}
+
 func TestPrintStatusJSON(t *testing.T) {
-	now := time.Now()
+	now := at(0)
 	ttl := 10 * time.Hour
 	last := time.Date(2021, 2, 3, 4, 5, 6, 0, time.UTC)
 	wts := []worktree{
@@ -472,7 +600,7 @@ func TestPrintStatusJSON(t *testing.T) {
 		{Path: "/main", Branch: "main", Main: true, Caps: map[string]capState{"chunkhound": capPartial}, Upstream: upstream{Short: "origin/main", Remote: "origin", Ref: "refs/heads/main"}},
 	}
 	out := captureStdout(t, func() {
-		if err := printStatusJSON(wts, now, ttl); err != nil {
+		if err := printStatusJSON(wts, now, ttl, ""); err != nil {
 			t.Errorf("printStatusJSON: %v", err)
 		}
 	})
@@ -537,7 +665,7 @@ func TestPrintStatusJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		t.Fatalf("re-decode JSON: %v", err)
 	}
-	wantKeys := []string{"branch", "integrations", "lastUsed", "main", "path", "status", "upstream"}
+	wantKeys := []string{"ageSeconds", "branch", "cost", "current", "integrations", "lastUsed", "main", "path", "status", "upstream"}
 	for i, m := range raw {
 		keys := make([]string, 0, len(m))
 		for k := range m {
