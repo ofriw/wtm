@@ -52,6 +52,19 @@ func booleanStyle(active bool) lipgloss.Style {
 	return lipgloss.NewStyle().Faint(true)
 }
 
+// titleStyle is the one title treatment: every table header and the block
+// title share it, so "title" reads the same everywhere and outranks both the
+// plain data and the faint secondary labels. Basic ANSI cyan is deliberate:
+// the terminal theme owns the exact hue.
+func titleStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Cyan)
+}
+
+// secondaryValue reports a rendered non-value: absent ("-") or unpriced
+// ("unknown"). One rule serves both the table cells and the summary block, so
+// a non-value recedes with faint everywhere.
+func secondaryValue(v string) bool { return v == "-" || v == "unknown" }
+
 // statusCellStyle maps a status-table cell to its style. Basic ANSI colors are
 // deliberate: the terminal theme owns the palette, and every profile (16/256/
 // truecolor/NO_COLOR) degrades cleanly. UNUSED is Yellow, not Red: it is the
@@ -65,6 +78,11 @@ func statusCellStyle(header, value string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
 	case "UPSTREAM":
 		return booleanStyle(value != "-")
+	case "COST":
+		// A number is the signal; "unknown" and "-" are non-values and recede.
+		if secondaryValue(value) {
+			return lipgloss.NewStyle().Faint(true)
+		}
 	case "BRANCH", "LAST USED":
 		if value == "(detached)" || value == "never" {
 			return lipgloss.NewStyle().Faint(true)
@@ -141,11 +159,70 @@ func groupedCellStyle(value string) string {
 func printTable(headers []string, rows [][]string, colorMode string, render cellRenderer, rightAlign []string) {
 	headers, rows, widths, aligns := sizedGrid(headers, rows, widthBudget(), rightAlign)
 	profile := resolveColorProfile(colorMode)
+	// A nil renderer renders plain text: the guard keeps that a no-op instead of
+	// relying on the profile to skip the call.
 	if profile > colorprofile.NoTTY && render != nil {
 		headers, rows = renderCells(headers, rows, render)
 	}
 	header, body := renderGrid(headers, rows, widths, aligns)
 	writeTable(gridString(header, body), profile)
+}
+
+// printKeyValues renders a headerless two-column block: label, then value. It
+// shares renderTable's sizing, two-cell gutter, trimming and width budget with
+// printTable, so a key/value block lines up with the tables around it instead
+// of introducing a third layout. The first titleRows labels carry the title
+// style; the rest are faint; values stay plain except a non-value ("-"/
+// "unknown"), which recedes with faint. Styles apply after sizing and elision,
+// and NoTTY output is ASCII-only, so goldens stay byte-stable.
+func printKeyValues(rows [][]string, titleRows int, colorMode string) {
+	labels := make([]string, len(rows[0])) // width pass only; no header row renders
+	widths := fitKeyValues(naturalWidths(labels, rows), widthBudget())
+	aligns := columnAligns(labels, nil)        // key/value blocks are left-aligned
+	_, rows = elideCells(labels, rows, widths) // elide plain text before styling
+	profile := resolveColorProfile(colorMode)
+	if profile > colorprofile.NoTTY {
+		rows = styleKeyValues(rows, titleRows)
+	}
+	writeTable(renderTable(nil, rows, widths, aligns), profile)
+}
+
+// keyValueValueFloor is the narrowest value cell a summary block keeps. Below it
+// a rendered value is a bare ellipsis, which reads as missing, not elided.
+const keyValueValueFloor = 6
+
+// fitKeyValues fits a two-column summary block to the budget: the value column
+// gives up width first, then the label, so a long path cannot wrap the block
+// while the table above elides. Values never fall below keyValueValueFloor.
+func fitKeyValues(widths []int, budget int) []int {
+	if budget <= 0 || lineWidth(widths) <= budget {
+		return widths
+	}
+	widths[1] = max(keyValueValueFloor, widths[1]-(lineWidth(widths)-budget))
+	if over := lineWidth(widths) - budget; over > 0 {
+		widths[0] = max(1, widths[0]-over)
+	}
+	return widths
+}
+
+// styleKeyValues title-styles the first titleRows labels and faints the
+// remaining ones. Labels identify data; values are data, so a value stays
+// plain. A non-value ("-"/"unknown") recedes with faint, matching the table
+// cells (see statusCellStyle's COST case).
+func styleKeyValues(rows [][]string, titleRows int) [][]string {
+	out := make([][]string, len(rows))
+	for i, r := range rows {
+		label := lipgloss.NewStyle().Faint(true)
+		if i < titleRows {
+			label = titleStyle()
+		}
+		value := lipgloss.NewStyle()
+		if secondaryValue(r[1]) {
+			value = value.Faint(true)
+		}
+		out[i] = []string{label.Render(r[0]), value.Render(r[1])}
+	}
+	return out
 }
 
 // sizedGrid resolves a grid against a width budget: columns are sized, then
@@ -248,12 +325,12 @@ func truthy(v string) bool {
 	return err == nil && b
 }
 
-// renderCells bolds the header row and renders each body cell through render.
-// It runs after elision so widths are measured on plain text.
+// renderCells title-styles the header row and renders each body cell through
+// render. It runs after elision so widths are measured on plain text.
 func renderCells(headers []string, rows [][]string, render cellRenderer) ([]string, [][]string) {
 	styled := make([]string, len(headers))
 	for i, h := range headers {
-		styled[i] = lipgloss.NewStyle().Bold(true).Render(h)
+		styled[i] = titleStyle().Render(h)
 	}
 	out := make([][]string, len(rows))
 	for r, row := range rows {
@@ -328,11 +405,12 @@ func middleElide(s string, w int) string {
 }
 
 // columnWidths sizes each column to natural width when the budget allows, else
-// shrinks the shrinkable columns in rank order down to their floor and, only
-// if that is still not enough, down to a single cell. Pinned columns never
-// change. A floor-0 column is all-or-nothing: it renders at natural width or
-// is dropped whole, never elided to a useless sliver. Shrink priority is
-// derived from the actual headers via columnRegistry(), so --wide capability
+// shrinks the shrinkable columns in rank order down to their floor and further
+// toward their header width. Pinned columns never change. A column that cannot
+// fit is dropped whole, so the table never shows a bare ellipsis; a long header
+// may still middle-elide to its column width. Only AGE, ACTIVE and COST declare
+// a floor at their header width, and only COST is unelidable. Shrink priority
+// is derived from the actual headers via columnRegistry(), so --wide capability
 // columns participate alongside the core columns.
 func columnWidths(headers []string, rows [][]string, budget int) []int {
 	widths := naturalWidths(headers, rows)
@@ -342,13 +420,58 @@ func columnWidths(headers []string, rows [][]string, budget int) []int {
 	registry := columnRegistry()
 	priority := dynamicShrinkPriority(headers, registry)
 	floors := dynamicShrinkFloor(headers, registry)
-	over := shrinkToFloors(headers, widths, priority, floors, budget)
-	if over > 0 {
-		for _, name := range priority {
-			over = shrinkColumn(widths, slices.Index(headers, name), over, 1)
+	// An unelidable column must not be cut, so it is excluded from both shrink
+	// passes; when the budget still overflows, dropOverflowColumns drops it
+	// whole instead of rendering a truncated value.
+	unelidable := map[string]bool{}
+	for i, h := range headers {
+		if c, ok := registry[h]; ok && c.unelidable {
+			unelidable[h] = true
+			floors[h] = max(floors[h], widths[i])
 		}
 	}
+	over := shrinkToFloors(headers, widths, priority, floors, budget)
+	over = shrinkToHeaders(headers, widths, priority, unelidable, over)
+	dropOverflowColumns(headers, widths, priority, budget, over)
 	return widths
+}
+
+// shrinkToHeaders is the fallback after the declared floors: a column may give
+// up more than its floor, down to its header width. Unelidable columns are
+// skipped: they are dropped whole later instead of being cut. AGE, ACTIVE and
+// COST set their floor at the header width, so their labels survive; a column
+// whose declared floor is lower (INTEGRATIONS) may end below its header.
+func shrinkToHeaders(headers []string, widths []int, priority []string, unelidable map[string]bool, over int) int {
+	for _, name := range priority {
+		if over <= 0 {
+			break
+		}
+		if unelidable[name] {
+			continue
+		}
+		i := slices.Index(headers, name)
+		if i >= 0 {
+			over = shrinkColumn(widths, i, over, dispWidth(headers[i]))
+		}
+	}
+	return over
+}
+
+// dropOverflowColumns is the last resort when even header widths do not fit:
+// drop whole columns (reclaiming their gutter) in the same priority order,
+// instead of rendering an unlabelled sliver.
+func dropOverflowColumns(headers []string, widths []int, priority []string, budget, over int) {
+	for _, name := range priority {
+		if over <= 0 {
+			break
+		}
+		i := slices.Index(headers, name)
+		if i < 0 || widths[i] == 0 {
+			continue
+		}
+		widths[i] = 0
+		over = lineWidth(widths) - budget
+	}
 }
 
 func shrinkToFloors(headers []string, widths []int, priority []string, floors map[string]int, budget int) int {
@@ -371,22 +494,16 @@ func shrinkToFloors(headers []string, widths []int, priority []string, floors ma
 
 // dropZeroColumns removes columns sized to zero, so a dropped column leaves no
 // gutter or empty cell behind. Cells, widths and headers stay index-aligned.
-// Capability columns dropped from a narrow --wide view are disclosed on stderr
-// (stdout stays machine-clean for pipes and goldens), so a missing column reads
-// as hidden, not absent.
+// Dropped columns are disclosed on stderr (stdout stays machine-clean for pipes
+// and goldens), so a missing column reads as hidden, not absent.
 func dropZeroColumns(headers []string, rows [][]string, widths []int) ([]string, [][]string, []int) {
 	keep := positiveWidthColumns(widths)
 	if len(keep) == len(widths) {
 		return headers, rows, widths
 	}
-	var hidden []string
-	for i, h := range headers {
-		if widths[i] == 0 && isCapabilityHeader(h) {
-			hidden = append(hidden, h)
-		}
-	}
+	hidden := hiddenHeaders(headers, widths)
 	if len(hidden) > 0 {
-		warnf("terminal too narrow; hid %s; widen the terminal or drop --wide", strings.Join(hidden, ", "))
+		warnf("terminal too narrow; hid %s; widen the terminal or use --json", strings.Join(hidden, ", "))
 	}
 	out := make([][]string, len(rows))
 	for r, row := range rows {
@@ -403,6 +520,18 @@ func positiveWidthColumns(widths []int) []int {
 		}
 	}
 	return keep
+}
+
+// hiddenHeaders names the columns dropped from a grid, so a missing column
+// reads as hidden, not absent.
+func hiddenHeaders(headers []string, widths []int) []string {
+	var hidden []string
+	for i, h := range headers {
+		if widths[i] == 0 {
+			hidden = append(hidden, h)
+		}
+	}
+	return hidden
 }
 
 // selectStrings keeps the columns at keep indices. Concrete (not generic): only
