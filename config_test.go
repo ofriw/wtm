@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -235,6 +236,122 @@ func TestCmdConfigSetConcurrentWriters(t *testing.T) {
 	}
 	if !slices.Contains(windows, s.UnusedTTL) {
 		t.Fatalf("settings lost a write: got %q, want one of %v", s.UnusedTTL, windows)
+	}
+}
+
+// TestCmdConfigConcurrentReadWrite pins that reads and writes of settings
+// survive each other. On Windows a reader's open handle would block a writer's
+// os.Rename (ERROR_ACCESS_DENIED); the shared read handle (openShared) grants
+// FILE_SHARE_DELETE so it cannot. On POSIX the rename is already safe, so this
+// guards the read/write wiring everywhere.
+func TestCmdConfigConcurrentReadWrite(t *testing.T) {
+	sandbox(t)
+	setTTL(t, "30d")
+	windows := []string{"1d", "2d", "3d", "5d", "7d", "11d", "13d", "17d"}
+	stop := make(chan struct{})
+	readErr := make(chan error, 1)
+	var reads atomic.Int64
+	go func() {
+		// Ensure the reader is active and the shared-open path works before
+		// writers start; this also pins the read contract independently.
+		if _, _, err := loadSettings(); err != nil {
+			readErr <- err
+			return
+		}
+		reads.Add(1)
+		for {
+			select {
+			case <-stop:
+				readErr <- nil
+				return
+			default:
+				if _, _, err := loadSettings(); err != nil {
+					readErr <- err
+					return
+				}
+				reads.Add(1)
+			}
+		}
+	}()
+	var wg sync.WaitGroup
+	writeErr := make(chan error, len(windows))
+	for _, window := range windows {
+		wg.Add(1)
+		go func(window string) {
+			defer wg.Done()
+			writeErr <- cmdConfig(&globals{}, []string{"set", "unusedTTL", window})
+		}(window)
+	}
+	wg.Wait()
+	close(stop)
+	if err := <-readErr; err != nil {
+		t.Fatalf("concurrent read: %v", err)
+	}
+	for range windows {
+		if err := <-writeErr; err != nil {
+			t.Fatalf("concurrent write: %v", err)
+		}
+	}
+	if got := reads.Load(); got == 0 {
+		t.Fatal("concurrent read never overlapped writes")
+	}
+	got, _, err := loadSettings()
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+	if !slices.Contains(windows, got.UnusedTTL) {
+		t.Fatalf("final unusedTTL = %q, want one of %v", got.UnusedTTL, windows)
+	}
+}
+
+// TestSettingsKilledHolderReleasesLock pins crash safety: killing a holder of
+// settings.lock must not block the next writer, and the lock file stays on
+// the same inode (never removed or replaced).
+func TestSettingsKilledHolderReleasesLock(t *testing.T) {
+	sandboxTempProcesses(t)
+	if err := cmdConfig(&globals{}, []string{"set", "unusedTTL", "30d"}); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := settingsLockPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder := startTempProcess(t, "hold-settings-lock", "")
+	holder.expect(t, "locked")
+	killTempProcess(t, holder)
+	if err := cmdConfig(&globals{}, []string{"set", "unusedTTL", "7d"}); err != nil {
+		t.Fatalf("config set after kill: %v", err)
+	}
+	after, err := os.Stat(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("settings lock file was replaced")
+	}
+	s, _, err := loadSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.UnusedTTL != "7d" {
+		t.Fatalf("unusedTTL = %q, want %q", s.UnusedTTL, "7d")
+	}
+}
+
+// TestLoadSettingsIsSideEffectFreeOnFreshHome pins that reading settings on a
+// machine that never ran `config set` creates nothing: no ~/.wtm. Reads take no
+// lock, so this guards the side-effect-free contract on every platform.
+func TestLoadSettingsIsSideEffectFreeOnFreshHome(t *testing.T) {
+	env := sandbox(t)
+	if _, _, err := loadSettings(); err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(env.Home, ".wtm")); !os.IsNotExist(err) {
+		t.Fatalf("read created ~/.wtm: %v", err)
 	}
 }
 

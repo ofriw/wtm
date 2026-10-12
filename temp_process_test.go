@@ -232,6 +232,9 @@ func TestTempRegistryProcessHelper(t *testing.T) {
 }
 
 func runTempRegistryProcess(role, path string) error {
+	if role == "hold-settings-lock" {
+		return holdSettingsLockProcess()
+	}
 	if role == "hold-add" || role == "hold-lock" {
 		return holdTempTransaction(role, path)
 	}
@@ -275,7 +278,7 @@ func readTempProcessStore(role string) error {
 	if role == "read-many" {
 		return checkTempProcessSnapshots()
 	}
-	store, err := readTempStore()
+	store, err := readTempStoreUnlocked()
 	if err != nil {
 		return err
 	}
@@ -285,7 +288,7 @@ func readTempProcessStore(role string) error {
 // Every snapshot must contain whole fixture records, never mixed fields.
 func checkTempProcessSnapshots() error {
 	for range 100 {
-		store, err := readTempStore()
+		store, err := readTempStoreUnlocked()
 		if err != nil {
 			return err
 		}
@@ -336,6 +339,20 @@ func waitTempProcessRelease() error {
 		return fmt.Errorf("unexpected release command %q", command)
 	}
 	return nil
+}
+
+// holdSettingsLockProcess holds settings.lock until released or killed.
+// WHY: a killed holder must not leave a stale lock; the OS frees the lock
+// while the file stays, so the next writer proceeds on the same inode.
+func holdSettingsLockProcess() error {
+	lock, err := settingsLockPath()
+	if err != nil {
+		return err
+	}
+	return withFileLock(lock, func() error {
+		fmt.Println("locked")
+		return waitTempProcessRelease()
+	})
 }
 
 func holdTempTransaction(role, path string) error {

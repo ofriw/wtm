@@ -1,5 +1,6 @@
 # build output
 /wtm
+/wtm.exe
 /test/bin/
 
 # local harness state (also test artifacts)

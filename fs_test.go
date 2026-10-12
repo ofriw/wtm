@@ -87,6 +87,28 @@ func TestWriteFileAtomicOverwritesExisting(t *testing.T) {
 	fsAssertMode(t, path, 0o600)
 }
 
+// TestReadFileShared pins the primitive contract every store reader relies on:
+// it returns file contents and reports a missing file as os.ErrNotExist.
+func TestReadFileShared(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "store.json")
+	if err := os.WriteFile(path, []byte(`{"v":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := readFileShared(path)
+	if err != nil {
+		t.Fatalf("readFileShared: %v", err)
+	}
+	if string(got) != `{"v":1}` {
+		t.Fatalf("content = %q, want %q", got, `{"v":1}`)
+	}
+
+	if _, err := readFileShared(filepath.Join(dir, "missing.json")); !os.IsNotExist(err) {
+		t.Fatalf("missing file err = %v, want os.IsNotExist", err)
+	}
+}
+
 func TestWriteFileAtomicConcurrentWriters(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("os.Rename does not guarantee atomic replacement on Windows")

@@ -180,6 +180,19 @@ func readJSON(path string, v any) error {
 	return json.Unmarshal(b, v)
 }
 
+// readFileShared reads path while permitting a concurrent atomic replace
+// (os.Rename) or delete (os.Remove) of that path. On Windows the reader must
+// share delete, or its open handle makes the writer fail with
+// ERROR_ACCESS_DENIED (open_windows.go).
+func readFileShared(path string) ([]byte, error) {
+	f, err := openShared(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
+}
+
 // writeFileAtomic replaces path by writing a sibling temp file and renaming it
 // into place. A rename within one directory is atomic, so a concurrent reader
 // sees either the old file or the new one, never a half-written file.

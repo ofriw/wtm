@@ -61,7 +61,7 @@ func seedTempRecord(t *testing.T, path, branch, ttl string, createdAt time.Time)
 
 func mustReadTempStore(t *testing.T) tempStore {
 	t.Helper()
-	store, err := readTempStore()
+	store, err := readTempStoreUnlocked()
 	if err != nil {
 		t.Fatalf("readTempStore: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestPrintStatusJSONTempFields(t *testing.T) {
 // machine that never used --temp must not create ~/.wtm or its lock file.
 func TestReadTempStoreWithoutRegistryIsSideEffectFree(t *testing.T) {
 	env := sandbox(t)
-	store, err := readTempStore()
+	store, err := readTempStoreUnlocked()
 	if err != nil {
 		t.Fatalf("readTempStore: %v", err)
 	}

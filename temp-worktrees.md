@@ -103,19 +103,26 @@ removal, GC reports the removed checkout and the error, and keeps the recovery b
 
 Mutations hold an OS lock on `~/.wtm/temp.lock` and replace the registry atomically.
 The lock file is never removed or renamed. Readers see a complete registry.
-Windows readers use the same lock and wait for active mutations. This prevents
-an open registry reader from blocking file replacement.
-Unix readers do not take this lock: file replacement preserves their open
-handles. Every `wtm gc` takes this lock and reconciles all records before
-selecting candidates, so a gc run creates the lock file even when no worktree
-is temporary. No other command reconciles: `status` and `promote` read the
+Unix and Windows readers share the registry file with a handle that permits
+concurrent delete (openShared). This prevents a reader from blocking an atomic
+replace. No reader ever takes the registry lock.
+Every `wtm gc` takes this lock and reconciles all records before selecting
+candidates, so a gc run creates the lock file even when no worktree is
+temporary. No other command reconciles: `status` and `promote` read the
 registry. `promote` creates it, because the promotion decision runs under the
 mutation lock even for an already-permanent target. `status` does not create
-`~/.wtm`. On Windows, `wtm status` and `wtm gc` wait for the registry
-lock — but only once a registry exists: reading with no registry file takes no
-lock and creates nothing.
+`~/.wtm`. Reading with no registry file takes no lock and creates nothing.
 A hung `wtm` process holding the lock blocks all other `wtm` commands until it
 exits.
+`~/.wtm/settings.lock` follows the same discipline for the settings store:
+`wtm config set` holds it across the read-merge-write and replaces
+`~/.wtm/settings.json` atomically at 0600, so concurrent writers cannot lose an
+update. `wtm config` (read) takes no lock and shares the file handle, so a read
+never creates `~/.wtm` or the lock file. The lock file stays at 0 bytes
+forever: writes create it once and never remove it, so its presence alone
+carries no meaning. It is never removed because the next writer must reuse the
+same inode; deleting it would let a new lock file replace the old one and
+defeat crash safety.
 GC removes records only when checkout or identity metadata is proven missing, or
 identity or branch is mismatched. It does not change those checkouts. Filesystem
 and Git errors retain the records and produce warnings with the path and cause,

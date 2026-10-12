@@ -26,12 +26,23 @@ func wtmDir() (string, error) {
 	return filepath.Join(home, ".wtm"), nil
 }
 
-func settingsPath() (string, error) {
+// wtmFilePath resolves a file directly inside ~/.wtm — the SSOT for the store
+// layout shared by settings.json and temp.json and their lock files.
+func wtmFilePath(name string) (string, error) {
 	dir, err := wtmDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "settings.json"), nil
+	return filepath.Join(dir, name), nil
+}
+
+func settingsPath() (string, error) { return wtmFilePath("settings.json") }
+
+func settingsLockPath() (string, error) { return wtmFilePath("settings.lock") }
+
+// defaultSettings is the SSOT for settings when no file exists.
+func defaultSettings() settings {
+	return settings{UnusedTTL: fmt.Sprintf("%dd", defaultUnusedDays)}
 }
 
 func ttlDays(s string) (int, error) {
@@ -68,14 +79,17 @@ func decodeSettings(data []byte, p string) (settings, error) {
 	return s, nil
 }
 
+// loadSettings reads settings.json. The shared read handle lets a concurrent
+// `config set` atomically replace the file (open_windows.go); POSIX rename
+// already preserves open handles.
 func loadSettings() (settings, string, error) {
 	p, err := settingsPath()
 	if err != nil {
 		return settings{}, "", err
 	}
-	data, err := os.ReadFile(p)
+	data, err := readFileShared(p)
 	if os.IsNotExist(err) {
-		return settings{UnusedTTL: fmt.Sprintf("%dd", defaultUnusedDays)}, p, nil
+		return defaultSettings(), p, nil
 	}
 	if err != nil {
 		return settings{}, p, err
@@ -106,11 +120,26 @@ func cmdConfigSet(val string) error {
 	return writeSettings(p, val)
 }
 
-// writeSettings merges unusedTTL into the settings map, preserving unknown keys
-// so a round-trip cannot drop forward-compat fields (decodeSettings tolerates
-// them). A corrupt existing file is an explicit (exit 1) error, not a usage one.
+// writeSettings serializes the whole read-merge-write under the settings lock so
+// concurrent writers cannot lose an update (read-then-replace). Reader safety is
+// separate: reads share the handle for delete (openShared), so they never block
+// the rename.
 func writeSettings(p, val string) error {
-	m, err := readSettingsMap(p)
+	lock, err := settingsLockPath()
+	if err != nil {
+		return err
+	}
+	return withFileLock(lock, func() error {
+		return writeSettingsLocked(p, val)
+	})
+}
+
+// writeSettingsLocked merges unusedTTL into the settings map, preserving
+// unknown keys so a round-trip cannot drop forward-compat fields
+// (decodeSettings tolerates them). A corrupt existing file is an explicit
+// (exit 1) error, not a usage one. Callers must hold the settings lock.
+func writeSettingsLocked(p, val string) error {
+	m, err := readSettingsMapUnlocked(p)
 	if err != nil {
 		return err
 	}
@@ -129,9 +158,9 @@ func writeSettings(p, val string) error {
 	return writeFileAtomic(p, append(data, '\n'), 0o600)
 }
 
-func readSettingsMap(p string) (map[string]json.RawMessage, error) {
+func readSettingsMapUnlocked(p string) (map[string]json.RawMessage, error) {
 	m := map[string]json.RawMessage{}
-	if data, err := os.ReadFile(p); err == nil {
+	if data, err := readFileShared(p); err == nil {
 		if err := json.Unmarshal(data, &m); err != nil {
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}

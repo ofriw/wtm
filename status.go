@@ -282,7 +282,7 @@ func newestKnownSession(unknown []unverifiedSession) time.Time {
 // store only loses temp metadata (the checkouts stay durable), so it must never
 // break status: warn and proceed with no temp records.
 func readTempStoreLenient(p *progress) tempStore {
-	temps, err := readTempStore()
+	temps, err := readTempStoreUnlocked()
 	if err != nil {
 		warnProgress(p, "temp store: %s; no temp worktrees tracked", err)
 		return tempStore{}

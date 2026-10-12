@@ -35,21 +35,9 @@ type tempRecord struct {
 // tempStore maps a canonical checkout path to its record.
 type tempStore map[string]tempRecord
 
-func tempPath() (string, error) {
-	dir, err := wtmDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "temp.json"), nil
-}
+func tempPath() (string, error) { return wtmFilePath("temp.json") }
 
-func tempLockPath() (string, error) {
-	dir, err := wtmDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "temp.lock"), nil
-}
+func tempLockPath() (string, error) { return wtmFilePath("temp.lock") }
 
 // parseTTL parses a positive idle window: a Go duration (30m, 1h, 24h) or whole
 // days (7d), matching the settings file's day syntax.
@@ -132,15 +120,16 @@ func compactWindow(d time.Duration) string {
 	}
 }
 
-// readTempStoreUnlocked is used by mutations already holding the registry lock.
-// OS-specific readers decide whether replacement requires locking. Missing files
-// are empty stores; malformed files remain explicit errors.
+// readTempStoreUnlocked reads the registry via a shared handle that lets a
+// concurrent mutation atomically replace the file (open_windows.go). It is
+// called by both unlocked readers and mutations holding the registry lock.
+// Missing files are empty stores; malformed files remain explicit errors.
 func readTempStoreUnlocked() (tempStore, error) {
 	p, err := tempPath()
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(p)
+	data, err := readFileShared(p)
 	if os.IsNotExist(err) {
 		return tempStore{}, nil
 	}
@@ -252,7 +241,7 @@ func verifyTempIdentity(path string, rec tempRecord) error {
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(p)
+	data, err := readFileShared(p)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("%w: missing identity for %s", errTempMetadataChanged, path)
