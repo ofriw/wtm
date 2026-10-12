@@ -23,4 +23,7 @@ var claudeAgent = agent{
 	configDirRel:  []string{".claude"},
 	sessionSubdir: "projects",
 	sessionOwner:  claudeSessionOwner,
+	parseUsage:    claudeUsageEvents,
+	// Claude writes tokens, not prices: the catalog must price them.
+	catalogRated: true,
 }
