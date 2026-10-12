@@ -43,10 +43,10 @@ source:   /Users/you/dev/app
 indexed:  true
 
 $ wtm                      # bare `wtm` is `wtm status`
-PATH                            BRANCH                UPSTREAM               LAST USED   STATUS  INTEGRATIONS
-~/dev/app                       main                  origin/main            2026-09-30  ACTIVE  chunk mcp claude
-~/dev/app-feature-billing-fix   feature/billing-fix   origin/feature/...     2026-09-28  ACTIVE  chunk mcp claude
-~/dev/old-spike                 spike-search          -                      2026-03-02  UNUSED  chunk~ mcp
+PATH                            BRANCH                UPSTREAM               LAST USED   AGE   ACTIVE   COST      STATUS  INTEGRATIONS
+~/dev/app                       main                  origin/main            2026-09-30  12d   8h 20m   $41.20    ACTIVE  chunk mcp claude
+~/dev/app-feature-billing-fix   feature/billing-fix   origin/feature/...     2026-09-28  6h    2h 14m   $4.10     ACTIVE  chunk mcp claude
+~/dev/old-spike                 spike-search          -                      2026-03-02  8M    45m      $0.00     UNUSED  chunk~ mcp
 
 $ wtm gc --all --yes
 removed /Users/you/dev/old-spike
@@ -59,6 +59,16 @@ sessions purged: 1
 `add` · `delete` · `gc` · `status` · `config` — run **`wtm --help`** for usage, flags, and exit codes.
 
 `INTEGRATIONS` lists what each worktree carries (`~` marks a partial setup, e.g. a ChunkHound config without a database). `wtm status --wide` expands one column per integration; `--json` reports the same states in an `integrations` map (`yes` / `partial` / `-` / `n/a`).
+
+`AGE` is the wall-clock life of the worktree (the `.git` mtime is the creation mark); `ACTIVE` is the time agent sessions were in use (overlapping spans count once); `COST` is the total agent cost. A worktree with no recorded usage shows `-` for `ACTIVE` and `COST`; `AGE` shows `-` only when the worktree has no creation mark. `COST` reads `unknown` when a recorded event carries no price, so a partial sum never looks complete. For the main worktree `.git` is a directory, so any index or ref write re-stamps it and `AGE` reads young again; linked worktrees keep a stable mark.
+
+Pi prices its own sessions. Claude Code records tokens, not prices, so `wtm` derives its cost from the [LiteLLM public rate catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json): the catalog is cached at `~/.wtm/rates.json` (24h TTL) and `WTM_RATES` pins a local copy for offline use. The first run on a Claude-only repo may wait briefly on the network; with no catalog and no cache, the Claude cost reads `unknown`. Test goldens pin a minimal subset of that catalog in `test/fixtures/rates.json`, so scenario runs never touch the network.
+
+`WTM_NOW` (RFC3339) pins the clock; the container test suite sets it so worktree ages and the gc TTL boundary are byte-stable. It is a test seam, not a user setting.
+
+Running `wtm status` below the table prints the current worktree's age, active time, and cost, then one row per (harness, model) with events.
+
+The JSON output adds `current`, `ageSeconds` (null when unknown), `cost` (null when unknown or absent), and — for worktrees with recorded usage — `activeSeconds` and a `usage` map keyed by harness, each with `cost`, `activeSeconds`, and a per-`models` breakdown. Worktrees with no usage omit those two keys.
 
 **Breaking:** the `config`, `db`, `mcp`, and `mcpNative` boolean keys were removed. Update consumers to use the `integrations` string map instead (`wtm status --json | jq '.[].integrations'`). `mcp` keeps its old meaning — any recognized MCP config counts (`yes`); a harness's own config (`.pi/mcp.json`, `.claude/settings*.json`) also lights that harness's key. `chunk~` (and `partial` in `--wide`/JSON) is config-xor-database: exactly one side is present. `wtm` no longer reports which side — inspect the worktree to find out.
 
