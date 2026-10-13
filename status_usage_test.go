@@ -23,7 +23,7 @@ func fixtureUsage() *worktreeUsage {
 		{at: base, model: "deepseek-flash", cost: fptr(2.90)},
 		{at: base.Add(time.Hour), model: "deepseek-flash"},
 		{at: base.Add(2 * time.Hour), model: "grok-4.3", cost: fptr(1.10)},
-	}, func(e usageEvent) money {
+	}, pairPricer(func(e usageEvent) money {
 		var m money
 		if e.cost != nil {
 			m.addKnown(*e.cost)
@@ -31,7 +31,7 @@ func fixtureUsage() *worktreeUsage {
 			m.addKnown(0)
 		}
 		return m
-	})
+	}))
 	return &u
 }
 
@@ -126,13 +126,13 @@ func TestStatusDetailBlock(t *testing.T) {
 // a tainted total carries partial:true, while a whole total omits the key.
 func TestStatusPartialJSONFlag(t *testing.T) {
 	var u worktreeUsage
-	u.addSession("pi", []usageEvent{{at: at(0), model: "m", cost: fptr(1)}}, func(e usageEvent) money {
+	u.addSession("pi", []usageEvent{{at: at(0), model: "m", cost: fptr(1)}}, pairPricer(func(e usageEvent) money {
 		var m money
 		if e.cost != nil {
 			m.addKnown(*e.cost)
 		}
 		return m
-	})
+	}))
 	markPartial(&u, map[string]bool{"pi": true})
 	partial := worktree{Path: "/partial", Usage: &u}
 	whole := worktree{Path: "/whole", Usage: fixtureUsage()}
@@ -201,7 +201,7 @@ func TestBuildUsagePricesHarnesses(t *testing.T) {
 		{path: piFile, harness: "pi"},
 		{path: claudeFile, harness: "claude"},
 	}}
-	u, err := buildUsage(wt, idx, cat)
+	u, err := buildUsage(wt, idx, cat, subscriptions{})
 	if err != nil {
 		t.Fatalf("buildUsage: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestBuildUsageMissingCatalogIsUnknown(t *testing.T) {
 	writeFile(t, claudeFile, `{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","requestId":"r","message":{"id":"x","model":"m1","usage":{"input_tokens":100,"service_tier":"standard"}}}
 `, 0o644)
 	idx := sessionIndex{canonical(dir): {{path: claudeFile, harness: "claude"}}}
-	u, err := buildUsage(dir, idx, nil)
+	u, err := buildUsage(dir, idx, nil, subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,11 +232,11 @@ func TestBuildUsageMissingCatalogIsUnknown(t *testing.T) {
 }
 
 func TestWorktreeCostMoney(t *testing.T) {
-	if got := (worktree{}).costMoney().cell(); got != "-" {
+	if got := (worktree{}).cost().cell(); got != "-" {
 		t.Errorf("eventless cost = %q, want -", got)
 	}
 	w := worktree{Usage: fixtureUsage()}
-	if got := w.costMoney().cell(); got != "$4.00" {
+	if got := w.cost().cell(); got != "$4.00" {
 		t.Errorf("cost = %q, want $4.00", got)
 	}
 }
@@ -245,16 +245,16 @@ func TestWorktreeCostMoney(t *testing.T) {
 // $0.00, never unknown.
 func TestWorktreeZeroCostIsKnown(t *testing.T) {
 	var u worktreeUsage
-	u.addSession("pi", []usageEvent{{at: at(0), model: "m"}}, func(usageEvent) money {
+	u.addSession("pi", []usageEvent{{at: at(0), model: "m"}}, pairPricer(func(usageEvent) money {
 		var m money
 		m.addKnown(0)
 		return m
-	})
+	}))
 	w := worktree{Usage: &u}
-	if got := w.costMoney().cell(); got != "$0.00" {
+	if got := w.cost().cell(); got != "$0.00" {
 		t.Errorf("zero cost = %q, want $0.00", got)
 	}
-	if v := w.costMoney().jsonValue(); v == nil || *v != 0 {
+	if v := w.cost().billed.jsonValue(); v == nil || *v != 0 {
 		t.Errorf("zero cost json = %v, want 0", v)
 	}
 }
@@ -263,11 +263,11 @@ func TestWorktreeZeroCostIsKnown(t *testing.T) {
 // events but no price reads "unknown", not "-" and not a number.
 func TestDetailBlockUnknownCost(t *testing.T) {
 	var u worktreeUsage
-	u.addSession("claude", []usageEvent{{at: at(0), model: "claude-sonnet-4-6"}}, func(usageEvent) money {
+	u.addSession("claude", []usageEvent{{at: at(0), model: "claude-sonnet-4-6"}}, pairPricer(func(usageEvent) money {
 		var m money
 		m.addUnknown()
 		return m
-	})
+	}))
 	w := worktree{Path: "/w", Usage: &u}
 	out := captureStdout(t, func() { printStatusDetail([]worktree{w}, "/w", at(0), colorNever) })
 	if !strings.Contains(out, "unknown") {
@@ -283,11 +283,11 @@ func TestDetailBlockUnknownCost(t *testing.T) {
 // "0s", so real activity must not hide behind "-".
 func TestCellActiveZeroSpanIsZeroSeconds(t *testing.T) {
 	var u worktreeUsage
-	u.addSession("pi", []usageEvent{{at: at(0), model: "m"}}, func(usageEvent) money {
+	u.addSession("pi", []usageEvent{{at: at(0), model: "m"}}, pairPricer(func(usageEvent) money {
 		var m money
 		m.addKnown(0)
 		return m
-	})
+	}))
 	if got := cellActive(worktree{Path: "/w", Usage: &u}, columnContext{}); got != "0s" {
 		t.Errorf("zero-span active time = %q, want 0s", got)
 	}
@@ -321,7 +321,7 @@ func TestBuildUsageUnionsOverlappingSessions(t *testing.T) {
 {"type":"message","timestamp":"2026-01-01T00:00:20Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}
 `, 0o644)
 	idx := sessionIndex{canonical(dir): {{path: a, harness: "pi"}, {path: b, harness: "pi"}}}
-	u, err := buildUsage(dir, idx, nil)
+	u, err := buildUsage(dir, idx, nil, subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestBuildUsageUnreadableSessionIsUnknown(t *testing.T) {
 		{path: good, harness: "pi"},
 		{path: spanned, harness: "pi"},
 	}}
-	u, err := buildUsage(dir, idx, nil)
+	u, err := buildUsage(dir, idx, nil, subscriptions{})
 	if err == nil {
 		t.Fatal("buildUsage must report the unreadable session")
 	}
@@ -355,5 +355,17 @@ func TestBuildUsageUnreadableSessionIsUnknown(t *testing.T) {
 	}
 	if got := u.active(); got != 10*time.Second {
 		t.Errorf("active = %v, want 10s: a later session must survive the error", got)
+	}
+}
+
+// TestPartialProvenHarnessCell pins the unknown/unknown collapse: a proven
+// subscription harness marked partial renders as "unknown", not "unknown/unknown".
+func TestPartialProvenHarnessCell(t *testing.T) {
+	sandbox(t)
+	u := piUsageOne(t, piProviderLine("openai-codex", 10))
+	markPartial(&u, map[string]bool{"pi": true})
+	wt := worktree{Path: "/test", Usage: &u}
+	if got := cellCost(wt, columnContext{}); got != "unknown" {
+		t.Errorf("cost = %q, want unknown", got)
 	}
 }

@@ -1,0 +1,11 @@
+ACTIVE          COST  STATUS  IN…ONS
+     -             -  ACTIVE  -
+   45m  $0.00/$41.20  ACTIVE  -
+
+current worktree  /SBX/wt
+age               6y
+active time       45m
+cost              $0.00/$41.20
+
+HARNESS  MODEL    TIME          COST
+pi       gpt-5  0h 45m  $0.00/$41.20

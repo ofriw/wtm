@@ -176,8 +176,7 @@ func printTable(headers []string, rows [][]string, colorMode string, render cell
 // "unknown"), which recedes with faint. Styles apply after sizing and elision,
 // and NoTTY output is ASCII-only, so goldens stay byte-stable.
 func printKeyValues(rows [][]string, titleRows int, colorMode string) {
-	labels := make([]string, len(rows[0])) // width pass only; no header row renders
-	widths := fitKeyValues(naturalWidths(labels, rows), widthBudget())
+	labels, widths := sizedKeyValues(rows)
 	aligns := columnAligns(labels, nil)        // key/value blocks are left-aligned
 	_, rows = elideCells(labels, rows, widths) // elide plain text before styling
 	profile := resolveColorProfile(colorMode)
@@ -190,6 +189,14 @@ func printKeyValues(rows [][]string, titleRows int, colorMode string) {
 // keyValueValueFloor is the narrowest value cell a summary block keeps. Below it
 // a rendered value is a bare ellipsis, which reads as missing, not elided.
 const keyValueValueFloor = 6
+
+// sizedKeyValues sizes a two-column summary block to the terminal budget. The
+// block renders headerless, so an empty label slice stands in for the width
+// pass; callers with no rows must not call it.
+func sizedKeyValues(rows [][]string) ([]string, []int) {
+	labels := make([]string, len(rows[0])) // width pass only; no header row renders
+	return labels, fitKeyValues(naturalWidths(labels, rows), widthBudget())
+}
 
 // fitKeyValues fits a two-column summary block to the budget: the value column
 // gives up width first, then the label, so a long path cannot wrap the block

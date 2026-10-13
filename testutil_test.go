@@ -179,6 +179,14 @@ func sandbox(t *testing.T) sandboxEnv {
 	setHomeEnv(t, home)
 	t.Setenv("PI_CODING_AGENT_DIR", agent)
 	t.Setenv("CLAUDE_CONFIG_DIR", claude)
+	// A metered key in the caller's environment would turn every Claude proof
+	// unproven, so the sandbox clears the list the proof reads.
+	for _, k := range claudeMeteredKeys {
+		t.Setenv(k, "")
+	}
+	// Replace the managed-settings path list with none, so a host's real
+	// /etc or /Library file cannot change a covered-cost test.
+	t.Setenv("WTM_MANAGED_SETTINGS", "")
 	t.Setenv("TZ", "UTC")
 	t.Setenv("LC_ALL", "C")
 	return sandboxEnv{Home: home, AgentDir: agent, ClaudeDir: claude}

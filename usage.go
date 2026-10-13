@@ -14,17 +14,29 @@ import (
 // addSession (buildUsage) lives with the harness registry in agents.go.
 
 // money accumulates a cost while keeping "unknown" sticky: a total is unknown
-// when any contributor has no price. A real zero stays a known zero, because
-// the harness (or the catalog) priced it.
+// when any contributor has no price. estimated is also sticky: a total is
+// estimated when any contributor rests on an assumption, so the display can
+// mark it and the JSON can flag it. A real zero stays a known, exact zero.
 type money struct {
-	amount  float64
-	unknown bool
-	any     bool
+	amount    float64
+	unknown   bool
+	estimated bool
+	any       bool
 }
 
+// addKnown records an exact contribution: a price the harness reported or the
+// catalog listed.
 func (m *money) addKnown(v float64) {
 	m.any = true
 	m.amount += v
+}
+
+// addEstimated records a contribution derived from a documented assumption
+// rather than a reported price (see estimateCacheWriteLifetime).
+func (m *money) addEstimated(v float64) {
+	m.any = true
+	m.amount += v
+	m.estimated = true
 }
 
 func (m *money) addUnknown() {
@@ -38,6 +50,7 @@ func (m *money) add(o money) {
 		return
 	}
 	m.any = true
+	m.estimated = m.estimated || o.estimated
 	if o.unknown {
 		m.unknown = true
 		return
@@ -45,7 +58,8 @@ func (m *money) add(o money) {
 	m.amount += o.amount
 }
 
-// jsonValue is the machine contract: null when absent or unknown.
+// jsonValue is the machine contract: null when absent or unknown. An estimated
+// total is a number; costEstimated carries the caveat.
 func (m money) jsonValue() *float64 {
 	if !m.any || m.unknown {
 		return nil
@@ -54,16 +68,91 @@ func (m money) jsonValue() *float64 {
 	return &v
 }
 
-// cell is the table contract: "-" absent, "unknown" unpriced, else "$d.dd".
+// cell is the table contract: "-" absent, "unknown" unpriced, "~$d.dd" when an
+// assumption priced part of the total, else "$d.dd".
 func (m money) cell() string {
 	switch {
 	case !m.any:
 		return "-"
 	case m.unknown:
 		return "unknown"
+	case m.estimated:
+		return "~" + formatCost(m.amount)
 	default:
 		return formatCost(m.amount)
 	}
+}
+
+// isEstimated reports a numeric total that includes an assumed price, so the
+// JSON contract can flag it beside the amount it qualifies.
+func (m money) isEstimated() bool { return m.known() && m.estimated }
+
+// knownZero is a priced $0.00: the marginal cost of a proven subscription turn,
+// distinct from an absent or unknown total.
+func knownZero() money { return money{any: true} }
+
+// costPair is the two prices of one accumulator. list is the pay-as-you-go
+// value; billed is what the credentials actually charge. subscription marks a
+// total where at least one event was proven subscription-billed, so the display
+// can show both. An unproven row keeps billed == list and renders exactly as
+// before, so the fallback never changes output.
+// LIMIT: money's zero value is comparable (every field is a scalar, including
+// the estimated flag). showsList compares only priced-ness and amount, so a
+// future non-comparable field cannot break that test.
+type costPair struct {
+	list         money
+	billed       money
+	subscription bool
+}
+
+// add folds another pair in. subscription is sticky: one covered event marks
+// the total, so the list price stays visible beside the discounted billed value.
+func (p *costPair) add(o costPair) {
+	p.list.add(o.list)
+	p.billed.add(o.billed)
+	p.subscription = p.subscription || o.subscription
+}
+
+// addUnknown taints both sides, so a partial total never looks complete.
+func (p *costPair) addUnknown() {
+	p.list.addUnknown()
+	p.billed.addUnknown()
+}
+
+// known reports a priced billed total (a real zero included).
+func (p costPair) known() bool { return p.billed.known() }
+
+// showsList reports whether the pair carries a list price worth rendering: a
+// proven subscription made the billed amount differ. The table and the JSON
+// both consume this one rule, so they can never disagree on when to show it.
+// Only priced-ness and amount compare: the estimated flag never shows a list
+// by itself, so an estimated list beside an equal exact billed stays single.
+func (p costPair) showsList() bool {
+	return p.subscription && (p.billed.known() != p.list.known() || p.billed.amount != p.list.amount)
+}
+
+// isEstimated qualifies only prices the pair renders, not hidden contributors.
+func (p costPair) isEstimated() bool {
+	return p.billed.isEstimated() || (p.showsList() && p.list.isEstimated())
+}
+
+// bothUnpriced reports a pair whose two sides are both unpriced, so a partial
+// taint collapses to one "unknown" instead of "unknown/unknown". One rule
+// serves both the table cell and the JSON listCost decision.
+func (p costPair) bothUnpriced() bool { return !p.list.known() && !p.billed.known() }
+
+// cell is the table contract: the billed value, plus "/list" when a proven
+// subscription makes the two differ, so a reader sees the actual charge and the
+// price the same tokens would cost metered.
+func (p costPair) cell() string {
+	if p.showsList() {
+		// After markPartial taints both sides, collapse to single "unknown"
+		if p.bothUnpriced() {
+			return "unknown"
+		}
+		return p.billed.cell() + "/" + p.list.cell()
+	}
+	return p.billed.cell()
 }
 
 // roundCost kills float summation noise so JSON output is stable; 1e-6 is well
@@ -150,7 +239,7 @@ func unionDuration(spans []span) time.Duration {
 // modelUsage is one model's totals inside a harness; spans are per-session
 // model spans, merged for the active time.
 type modelUsage struct {
-	cost  money
+	cost  costPair
 	spans []span
 }
 
@@ -158,7 +247,7 @@ func (m *modelUsage) active() time.Duration { return unionDuration(m.spans) }
 
 // harnessUsage is one harness's totals for a worktree.
 type harnessUsage struct {
-	cost   money
+	cost   costPair
 	spans  []span // session spans (all events)
 	models map[string]*modelUsage
 }
@@ -175,17 +264,17 @@ type worktreeUsage struct {
 
 func (u *worktreeUsage) hasEvents() bool { return len(u.harnesses) > 0 }
 
-func (u *worktreeUsage) cost() money {
-	var m money
+func (u *worktreeUsage) cost() costPair {
+	var p costPair
 	for _, h := range u.harnesses {
-		m.add(h.cost)
+		p.add(h.cost)
 	}
 	// A harness whose every session was unreadable keeps no entry (see
 	// markPartial), so the worktree-level flag must taint the total itself.
 	if u.partial {
-		m.addUnknown()
+		p.addUnknown()
 	}
-	return m
+	return p
 }
 
 func (u *worktreeUsage) active() time.Duration {
@@ -211,7 +300,7 @@ func (u *worktreeUsage) harness(name string) *harnessUsage {
 
 // addSession folds one session's events into the worktree: the session span for
 // the harness, each model's span inside the session, and every cost.
-func (u *worktreeUsage) addSession(harness string, events []usageEvent, price func(usageEvent) money) {
+func (u *worktreeUsage) addSession(harness string, events []usageEvent, price func(usageEvent) costPair) {
 	if len(events) == 0 {
 		return
 	}
@@ -225,7 +314,7 @@ func (u *worktreeUsage) addSession(harness string, events []usageEvent, price fu
 
 // foldSession accumulates one session's harness cost and returns the session
 // span plus each model's per-session spans and cost.
-func foldSession(events []usageEvent, h *harnessUsage, price func(usageEvent) money) (span, map[string]*modelUsage) {
+func foldSession(events []usageEvent, h *harnessUsage, price func(usageEvent) costPair) (span, map[string]*modelUsage) {
 	session := span{start: events[0].at, end: events[0].at}
 	perModel := map[string]*modelUsage{}
 	prev := ""
@@ -241,7 +330,7 @@ func foldSession(events []usageEvent, h *harnessUsage, price func(usageEvent) mo
 // the previous event's model: consecutive same-model events chain into one run
 // (first→last event), a different model closes the run, so an interleaved
 // model never inherits another model's idle time. An isolated event is a point.
-func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, prev string, price func(usageEvent) money) string {
+func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, prev string, price func(usageEvent) costPair) string {
 	m := perModel[e.model]
 	if m == nil {
 		m = &modelUsage{}
@@ -357,12 +446,13 @@ func (h *harnessUsage) modelNames() []string {
 		names = append(names, name)
 	}
 	sort.Slice(names, func(i, j int) bool {
-		a, b := h.models[names[i]], h.models[names[j]]
-		if ak, bk := a.cost.known(), b.cost.known(); ak != bk {
+		// Billed is the reader-facing amount, so its order decides the rows.
+		a, b := h.models[names[i]].cost.billed, h.models[names[j]].cost.billed
+		if ak, bk := a.known(), b.known(); ak != bk {
 			return ak
 		}
-		if !a.cost.unknown && !b.cost.unknown && a.cost.amount != b.cost.amount {
-			return a.cost.amount > b.cost.amount
+		if !a.unknown && !b.unknown && a.amount != b.amount {
+			return a.amount > b.amount
 		}
 		return names[i] < names[j]
 	})

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"path/filepath"
 	"testing"
 )
@@ -29,7 +30,7 @@ func TestBuildUsageClaudeUnclassifiedCacheWriteIsUnknown(t *testing.T) {
 	dir := t.TempDir()
 	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name,
 		claudeUsageLine(`{"input_tokens":1000,"cache_creation_input_tokens":100}`))
-	u, err := buildUsage(dir, idx, testRates(t))
+	u, err := buildUsage(dir, idx, testRates(t), subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +38,7 @@ func TestBuildUsageClaudeUnclassifiedCacheWriteIsUnknown(t *testing.T) {
 	if got := cellCost(w, columnContext{}); got != "unknown" {
 		t.Errorf("cost = %q, want unknown", got)
 	}
-	if v := w.costMoney().jsonValue(); v != nil {
+	if v := w.cost().billed.jsonValue(); v != nil {
 		t.Errorf("json cost = %v, want null", v)
 	}
 }
@@ -56,7 +57,7 @@ func TestBuildUsageClaudePricingModifiers(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(tc.usage))
-			u, err := buildUsage(dir, idx, testRates(t))
+			u, err := buildUsage(dir, idx, testRates(t), subscriptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -64,8 +65,8 @@ func TestBuildUsageClaudePricingModifiers(t *testing.T) {
 			if !cost.known() {
 				t.Fatalf("cost unknown, want %v", tc.want)
 			}
-			if diff := cost.amount - tc.want; diff > 1e-9 || diff < -1e-9 {
-				t.Errorf("cost = %v, want %v", cost.amount, tc.want)
+			if diff := cost.billed.amount - tc.want; diff > 1e-9 || diff < -1e-9 {
+				t.Errorf("cost = %v, want %v", cost.billed.amount, tc.want)
 			}
 		})
 	}
@@ -83,7 +84,7 @@ func TestBuildUsageCrossHarnessPartialIsUnknown(t *testing.T) {
 		{path: filepath.Join(dir, "missing.jsonl"), harness: piAgent.name},
 		{path: readable, harness: claudeAgent.name},
 	}}
-	u, err := buildUsage(dir, idx, testRates(t))
+	u, err := buildUsage(dir, idx, testRates(t), subscriptions{})
 	if err == nil {
 		t.Fatal("buildUsage must report the unreadable session")
 	}
@@ -119,7 +120,7 @@ func TestBuildUsageDedupesPiForkAcrossSessionFiles(t *testing.T) {
 		{path: pathB, harness: piAgent.name},
 	}}
 	// Pi prices itself; no catalog is involved.
-	u, err := buildUsage(dir, idx, nil)
+	u, err := buildUsage(dir, idx, nil, subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +137,7 @@ func TestBuildUsageAllUnreadableIsUnknown(t *testing.T) {
 	idx := sessionIndex{canonical(dir): {
 		{path: filepath.Join(dir, "missing.jsonl"), harness: piAgent.name},
 	}}
-	u, err := buildUsage(dir, idx, nil)
+	u, err := buildUsage(dir, idx, nil, subscriptions{})
 	if err == nil {
 		t.Fatal("buildUsage must report the unreadable session")
 	}
@@ -163,7 +164,7 @@ func TestBuildUsageDedupesTurnAcrossSessionFiles(t *testing.T) {
 		{path: pathA, harness: claudeAgent.name},
 		{path: pathB, harness: claudeAgent.name},
 	}}
-	u, err := buildUsage(dir, idx, testRates(t))
+	u, err := buildUsage(dir, idx, testRates(t), subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,5 +174,35 @@ func TestBuildUsageDedupesTurnAcrossSessionFiles(t *testing.T) {
 	}
 	if got := cost.cell(); got != "$0.10" {
 		t.Errorf("total cost = %q, want $0.10: the repeated turn must price once", got)
+	}
+}
+
+// TestBuildUsageDedupesProviderVariantTurns pins the provider-independent
+// dedupe key: one turn repeated across two sessions with different provider
+// evidence bills once in either session order, so the order never changes the
+// total.
+func TestBuildUsageDedupesProviderVariantTurns(t *testing.T) {
+	for _, order := range []string{"ab", "ba"} {
+		t.Run(order, func(t *testing.T) {
+			dir := t.TempDir()
+			body := func(provider string) string {
+				return fmt.Sprintf(`{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"assistant","provider":%q,"model":"m","usage":{"cost":{"total":7}}}}`+"\n", provider)
+			}
+			a := filepath.Join(dir, "a.jsonl")
+			b := filepath.Join(dir, "b.jsonl")
+			writeFile(t, a, body("p-a"), 0o644)
+			writeFile(t, b, body("p-b"), 0o644)
+			refs := []sessionRef{{path: a, harness: piAgent.name}, {path: b, harness: piAgent.name}}
+			if order == "ba" {
+				refs[0], refs[1] = refs[1], refs[0]
+			}
+			u, err := buildUsage(dir, sessionIndex{canonical(dir): refs}, nil, subscriptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := u.cost().billed.amount; math.Abs(got-7) > 1e-9 {
+				t.Errorf("cost = %v, want 7: a provider-variant turn must bill once", got)
+			}
+		})
 	}
 }

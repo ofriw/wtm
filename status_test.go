@@ -565,6 +565,177 @@ func TestStatusNarrowKeepsCostColumns(t *testing.T) {
 	}
 }
 
+// narrowProvenPairWorktree is one priced worktree whose COST cell is the
+// proven-subscription pair, with long identity cells so every narrow budget
+// must squeeze the table. The caller needs no credential setup: the exact
+// pair goes through the real Pi parser and the real proof (openai-codex bills
+// OAuth-only), while the estimated variant widens the pair through the fold
+// contract directly. sandbox sets HOME, so the proof reads real files.
+func narrowProvenPairWorktree(t *testing.T, now time.Time, estimated bool) ([]worktree, string) {
+	t.Helper()
+	env := sandbox(t)
+	full := "$0.00/$41.20"
+	var u worktreeUsage
+	if estimated {
+		full = "$0.00/~$41.20"
+		u.addSession("pi", []usageEvent{{at: now, model: "m"}}, func(usageEvent) costPair {
+			var list, billed money
+			list.addEstimated(41.20)
+			billed.addKnown(0)
+			return costPair{list: list, billed: billed, subscription: true}
+		})
+	} else {
+		u = piUsageOne(t, piProviderLine("openai-codex", 41.20))
+	}
+	if got := u.cost().cell(); got != full {
+		t.Fatalf("proven pair = %q, want %q", got, full)
+	}
+	return []worktree{{
+		Path:     filepath.Join(env.Home, "Documents", "GitHub", "project"),
+		Branch:   "feat/cost-tracking",
+		LastUsed: now,
+		Created:  now.Add(-72 * time.Hour),
+		Usage:    &u,
+	}}, full
+}
+
+// TestStatusNarrowKeepsProvenPair pins the unelidable-cost policy for the wide
+// proven-subscription pair: at every narrow budget the table either keeps the
+// full $0.00/$41.20 (and the wider $0.00/~$41.20) or drops COST whole with
+// stderr disclosure. A middle-cut currency would read as a wrong number, and
+// a billed-only fallback would hide the list price the pair exists to show.
+func TestStatusNarrowKeepsProvenPair(t *testing.T) {
+	for _, estimated := range []bool{false, true} {
+		wts, full := narrowProvenPairWorktree(t, at(0), estimated)
+		t.Run(full, func(t *testing.T) {
+			now := at(0)
+			for _, width := range []int{80, 60, 40, 20} {
+				t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
+					t.Setenv("COLUMNS", fmt.Sprintf("%d", width))
+					var errOut string
+					out := captureStdout(t, func() {
+						errOut = captureStderr(t, func() {
+							printStatusTable(statusColumns, wts, now, 10*time.Hour, colorNever)
+						})
+					})
+					headerLine, _, _ := strings.Cut(out, "\n")
+					for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+						if w := dispWidth(line); w > width {
+							t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
+						}
+					}
+					headers := columnHeaders(statusColumns)
+					rows := gridRows(statusColumns, wts, columnContext{now: now, ttl: 10 * time.Hour})
+					widths := columnWidths(headers, rows, width)
+					idx := headerIndex(headers)
+					assertWithin(t, widths, width)
+					assertNoSlivers(t, headers, widths)
+					if w := widths[idx["COST"]]; w != 0 && w < dispWidth(full) {
+						t.Errorf("COST cut to %d cells, narrower than the %d-cell pair %q", w, dispWidth(full), full)
+					}
+					if widths[idx["COST"]] == 0 {
+						if !strings.Contains(errOut, "COST") {
+							t.Errorf("dropped COST is not disclosed on stderr: %q", errOut)
+						}
+						if strings.Contains(out, "$0.00") {
+							t.Errorf("dropped COST still renders a currency fragment:\n%s", out)
+						}
+						return
+					}
+					if !strings.Contains(headerLine, "COST") {
+						t.Errorf("kept COST header missing at %d cols:\n%s", width, out)
+					}
+					if !strings.Contains(out, full) {
+						t.Errorf("COST kept but pair %q not rendered whole (billed-only hides the list):\n%s", full, out)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestStatusDetailProvenPairNarrow pins the detail block's shared width policy
+// for the proven pair: the breakdown fits the budget and keeps the full
+// $0.00/$41.20 while the identity columns give up width first, dropping COST
+// whole with disclosure only when it cannot fit.
+func TestStatusDetailProvenPairNarrow(t *testing.T) {
+	env := sandbox(t)
+	u := piUsageOne(t, piProviderLine("openai-codex", 41.20))
+	const full = "$0.00/$41.20"
+	if got := u.cost().cell(); got != full {
+		t.Fatalf("proven pair = %q, want %q", got, full)
+	}
+	cur := worktree{
+		Path:  filepath.Join(env.Home, "a", "very", "long", "checkout", "path", "that", "keeps", "going", "on"),
+		Usage: &u,
+	}
+	for _, width := range []int{80, 60, 40, 20} {
+		t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
+			t.Setenv("COLUMNS", fmt.Sprintf("%d", width))
+			var errOut string
+			out := captureStdout(t, func() {
+				errOut = captureStderr(t, func() {
+					printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever)
+				})
+			})
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := dispWidth(line); w > width {
+					t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
+				}
+			}
+			headers := columnHeaders(detailColumns)
+			rows := detailRows(cur.Usage)
+			widths := columnWidths(headers, rows, width)
+			idx := headerIndex(headers)
+			assertWithin(t, widths, width)
+			assertNoSlivers(t, headers, widths)
+			if w := widths[idx["COST"]]; w != 0 && w < dispWidth(full) {
+				t.Errorf("detail COST cut to %d cells, narrower than the %d-cell pair %q", w, dispWidth(full), full)
+			}
+			if widths[idx["COST"]] == 0 {
+				if !strings.Contains(errOut, "COST") {
+					t.Errorf("dropped COST is not disclosed on stderr: %q", errOut)
+				}
+				return
+			}
+			if !strings.Contains(out, full) {
+				t.Errorf("detail COST kept but pair %q not rendered whole:\n%s", full, out)
+			}
+		})
+	}
+}
+
+// TestStatusDetailSummaryDropsCostWhole pins the summary-block currency rule:
+// at width 20 with a long path the fitted value column cannot hold the
+// $0.00/$41.20 pair, so the cost row is hidden with disclosure instead of
+// rendering a middle-cut $0….20 that reads as a wrong number.
+func TestStatusDetailSummaryDropsCostWhole(t *testing.T) {
+	env := sandbox(t)
+	u := piUsageOne(t, piProviderLine("openai-codex", 41.20))
+	cur := worktree{
+		Path:  filepath.Join(env.Home, "a", "very", "long", "checkout", "path", "that", "keeps", "going", "on"),
+		Usage: &u,
+	}
+	t.Setenv("COLUMNS", "20")
+	var errOut string
+	out := captureStdout(t, func() {
+		errOut = captureStderr(t, func() {
+			printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever)
+		})
+	})
+	if strings.Contains(out, "$0\u2026") || strings.Contains(out, "$0...") {
+		t.Fatalf("summary cut the pair instead of hiding it:\n%s", out)
+	}
+	if !strings.Contains(errOut, "hid cost") {
+		t.Fatalf("hidden summary cost is not disclosed on stderr: %q\n%s", errOut, out)
+	}
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if w := dispWidth(line); w > 20 {
+			t.Errorf("line exceeds 20 cells: %d\n%q", w, line)
+		}
+	}
+}
+
 // TestStatusDetailFitsNarrowBudget pins the detail block's shared width policy:
 // the summary and the breakdown both fit the budget, and the breakdown keeps
 // COST while the identity columns give up width first.

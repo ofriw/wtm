@@ -470,13 +470,16 @@ func lastUsed(wtPath string, idx sessionIndex) time.Time {
 type parsedSession struct {
 	harness string
 	events  []usageEvent
-	price   func(usageEvent) money
+	price   func(usageEvent) costPair
 }
 
 // buildUsage parses a worktree's owned sessions once and aggregates cost/time.
 // cat is nil when no catalog is available: a catalog-rated harness then reports
-// unknown cost instead of a wrong number.
-func buildUsage(wtPath string, idx sessionIndex, cat catalog) (worktreeUsage, error) {
+// unknown cost instead of a wrong number. subs is the run's credential proof; an
+// empty proof leaves every event at its list price, and a worktree-level metered
+// override drops the Claude proof for this worktree alone.
+func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
+	subs = subs.forWorktree(wtPath)
 	var u worktreeUsage
 	unreadable := map[string]bool{}
 	var firstErr error
@@ -497,7 +500,7 @@ func buildUsage(wtPath string, idx sessionIndex, cat catalog) (worktreeUsage, er
 			}
 			continue
 		}
-		sessions = append(sessions, parsedSession{harness: ref.harness, events: events, price: usagePricer(a, cat)})
+		sessions = append(sessions, parsedSession{harness: ref.harness, events: events, price: usagePricer(a, cat, subs)})
 	}
 	lists := make([][]usageEvent, len(sessions))
 	for i, s := range sessions {
@@ -536,22 +539,38 @@ func readUsage(a agent, path string) ([]usageEvent, error) {
 	return a.parseUsage(bufio.NewReader(f))
 }
 
-// usagePricer resolves one event to money: a harness-supplied cost wins, a
-// catalog-rated token record is priced from the catalog, and everything else
-// (including a catalog-rated record with no catalog) is unknown.
-func usagePricer(a agent, cat catalog) func(usageEvent) money {
-	return func(e usageEvent) money {
-		var m money
-		switch {
-		case e.cost != nil:
-			m.addKnown(*e.cost)
-		case a.catalogRated && cat != nil:
-			m = cat.price(e)
-		default:
-			m.addUnknown()
+// usagePricer resolves one event to its price pair. The list side is the
+// pay-as-you-go price today's code reports; a proven subscription replaces the
+// billed side with the $0 marginal cost while the list side stays visible.
+// The billed zero is the subscription's marginal cost only: overage, API-key
+// and otherwise metered usage still bills, so a proven $0 never claims the
+// whole invoice.
+func usagePricer(a agent, cat catalog, subs subscriptions) func(usageEvent) costPair {
+	return func(e usageEvent) costPair {
+		list := listPrice(a, cat, e)
+		p := costPair{list: list, billed: list}
+		if subs.proven(a.name, e.provider, e.at) {
+			p.billed = knownZero()
+			p.subscription = true
 		}
-		return m
+		return p
 	}
+}
+
+// listPrice resolves one event's pay-as-you-go price: a harness-supplied cost
+// wins, a catalog-rated token record is priced from the catalog, and everything
+// else (including a catalog-rated record with no catalog) is unknown.
+func listPrice(a agent, cat catalog, e usageEvent) money {
+	var m money
+	switch {
+	case e.cost != nil:
+		m.addKnown(*e.cost)
+	case a.catalogRated && cat != nil:
+		m = cat.price(e)
+	default:
+		m.addUnknown()
+	}
+	return m
 }
 
 // agentByName resolves a session owner to its descriptor.

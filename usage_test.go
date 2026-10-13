@@ -10,9 +10,20 @@ import (
 
 func at(sec int) time.Time { return time.Date(2026, 1, 1, 0, 0, sec, 0, time.UTC) }
 
+// pairPricer adapts a list-only pricer to the costPair fold contract: unit
+// tests care about the pay-as-you-go value, so billed mirrors list.
+func pairPricer(f func(usageEvent) money) func(usageEvent) costPair {
+	return func(e usageEvent) costPair {
+		m := f(e)
+		return costPair{list: m, billed: m}
+	}
+}
+
 func TestMoneyCellAndJSON(t *testing.T) {
 	var unknown money
 	unknown.addUnknown()
+	var estimated money
+	estimated.addEstimated(1.23)
 	cases := []struct {
 		name    string
 		m       money
@@ -21,6 +32,7 @@ func TestMoneyCellAndJSON(t *testing.T) {
 	}{
 		{"absent is dash and null", money{}, "-", true},
 		{"unknown is unknown and null", unknown, "unknown", true},
+		{"estimated is tilde and a number", estimated, "~$1.23", false},
 		{"zero is a real zero", money{any: true}, "$0.00", false},
 	}
 	for _, tc := range cases {
@@ -55,6 +67,74 @@ func TestMoneyUnknownIsSticky(t *testing.T) {
 	}
 }
 
+// TestMoneyEstimatedIsStickyAndQualified pins that an assumption survives
+// folding, that a later exact contribution keeps the flag, and that unknown
+// still dominates an estimate.
+func TestMoneyEstimatedIsStickyAndQualified(t *testing.T) {
+	var m money
+	m.addEstimated(1.0)
+	m.addKnown(0.5)
+	if got := m.cell(); got != "~$1.50" {
+		t.Fatalf("cell = %q, want ~$1.50", got)
+	}
+	if !m.isEstimated() || m.jsonValue() == nil {
+		t.Fatalf("estimated total lost its flag or its number: %+v", m)
+	}
+	m.addUnknown()
+	if got := m.cell(); got != "unknown" {
+		t.Fatalf("unknown must dominate estimated: %q", got)
+	}
+}
+
+// TestCostPairEstimatedListRendersBesideExactBilled pins the subscription
+// grammar: an exact zero billed beside an estimated list keeps both marks.
+func TestCostPairEstimatedListRendersBesideExactBilled(t *testing.T) {
+	p := costPair{billed: knownZero(), subscription: true}
+	p.list.addEstimated(1.23)
+	if got := p.cell(); got != "$0.00/~$1.23" {
+		t.Fatalf("cell = %q, want $0.00/~$1.23", got)
+	}
+}
+
+// TestCostPairShowsListIgnoresEstimateFlag pins the list rule: only priced-ness
+// and amount show a list, never the estimated flag. An estimated list beside
+// an equal exact billed stays single; a proven equal price shows no list.
+func TestCostPairShowsListIgnoresEstimateFlag(t *testing.T) {
+	equal := costPair{subscription: true}
+	equal.billed.addKnown(1.23)
+	equal.list.addEstimated(1.23)
+	if equal.showsList() {
+		t.Errorf("equal amounts must not show a list, estimated flag aside: %+v", equal)
+	}
+	if got := equal.cell(); got != "$1.23" {
+		t.Errorf("cell = %q, want $1.23", got)
+	}
+	exact := costPair{subscription: true}
+	exact.billed.addKnown(2.5)
+	exact.list.addKnown(2.5)
+	if exact.showsList() {
+		t.Errorf("proven equal price must not show a list: %+v", exact)
+	}
+	unproven := costPair{}
+	unproven.billed.addKnown(0)
+	unproven.list.addKnown(9.99)
+	if unproven.showsList() {
+		t.Errorf("unproven pair must not show a list: %+v", unproven)
+	}
+	knownUnknown := costPair{subscription: true}
+	knownUnknown.billed.addKnown(0)
+	knownUnknown.list.addUnknown()
+	if !knownUnknown.showsList() {
+		t.Errorf("known billed beside unknown list must show: %+v", knownUnknown)
+	}
+	bothUnknown := costPair{subscription: true}
+	bothUnknown.billed.addUnknown()
+	bothUnknown.list.addUnknown()
+	if bothUnknown.showsList() {
+		t.Errorf("two unpriced sides must not show a list: %+v", bothUnknown)
+	}
+}
+
 func TestUnionDuration(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -82,7 +162,7 @@ func TestUnionDuration(t *testing.T) {
 // accumulation for two sessions in one worktree.
 func TestWorktreeUsageAggregates(t *testing.T) {
 	costs := map[string]float64{"a": 1.0, "b": 2.0}
-	price := func(e usageEvent) money {
+	price := pairPricer(func(e usageEvent) money {
 		var m money
 		if c, ok := costs[e.model]; ok {
 			m.addKnown(c)
@@ -90,7 +170,7 @@ func TestWorktreeUsageAggregates(t *testing.T) {
 			m.addUnknown()
 		}
 		return m
-	}
+	})
 	var u worktreeUsage
 	// Session 1: model a at t0..t10, model b at t5..t15.
 	u.addSession("pi", []usageEvent{
@@ -131,11 +211,11 @@ func TestWorktreeUsageAggregates(t *testing.T) {
 // events chain (first→last), but a different model closes the run, so an
 // interleaved model never inherits another model's idle time.
 func TestModelRunsDoNotInheritIdleTime(t *testing.T) {
-	known := func(usageEvent) money {
+	known := pairPricer(func(usageEvent) money {
 		var m money
 		m.addKnown(0)
 		return m
-	}
+	})
 	var u worktreeUsage
 	// Session: a@0, b@10, a@20. Model b closes a's first run, so a is two points.
 	u.addSession("pi", []usageEvent{
@@ -158,11 +238,11 @@ func TestModelRunsDoNotInheritIdleTime(t *testing.T) {
 // TestSpawnSpanExtendsActiveTime pins that an event with an end (a spawn child)
 // contributes its running time to the model and the session, not a single point.
 func TestSpawnSpanExtendsActiveTime(t *testing.T) {
-	known := func(usageEvent) money {
+	known := pairPricer(func(usageEvent) money {
 		var m money
 		m.addKnown(0)
 		return m
-	}
+	})
 	var u worktreeUsage
 	u.addSession("pi", []usageEvent{
 		{at: at(0), model: "parent"},
@@ -178,11 +258,11 @@ func TestSpawnSpanExtendsActiveTime(t *testing.T) {
 
 func TestHarnessAndModelOrder(t *testing.T) {
 	var u worktreeUsage
-	price := func(e usageEvent) money {
+	price := pairPricer(func(e usageEvent) money {
 		var m money
 		m.addKnown(map[string]float64{"cheap": 1, "pricey": 5}[e.model])
 		return m
-	}
+	})
 	u.addSession("claude", []usageEvent{{at: at(0), model: "cheap"}}, price)
 	u.addSession("pi", []usageEvent{{at: at(0), model: "cheap"}, {at: at(0), model: "pricey"}}, price)
 	if names := u.harnessNames(); len(names) != 2 || names[0] != "pi" || names[1] != "claude" {
@@ -233,16 +313,16 @@ func TestTimeGrammar(t *testing.T) {
 // the worktree total unknown, so a partial sum never looks complete.
 func TestWorktreeCostUnknownAcrossHarnesses(t *testing.T) {
 	var u worktreeUsage
-	known := func(usageEvent) money {
+	known := pairPricer(func(usageEvent) money {
 		var m money
 		m.addKnown(2)
 		return m
-	}
-	unknown := func(usageEvent) money {
+	})
+	unknown := pairPricer(func(usageEvent) money {
 		var m money
 		m.addUnknown()
 		return m
-	}
+	})
 	u.addSession("pi", []usageEvent{{at: at(0), model: "a"}}, known)
 	u.addSession("claude", []usageEvent{{at: at(1), model: "b"}}, unknown)
 	if got := u.cost().cell(); got != "unknown" {

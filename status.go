@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -307,8 +308,10 @@ func (ws *workspace) loadUsage() {
 			cat = c
 		}
 	}
+	// Read the credential proof once: it is a per-run snapshot, not per-worktree.
+	subs := loadSubscriptions()
 	for i := range ws.wts {
-		u, err := buildUsage(ws.wts[i].Path, ws.idx, cat)
+		u, err := buildUsage(ws.wts[i].Path, ws.idx, cat, subs)
 		if err != nil {
 			warnf("usage for %s: %s", displayPath(ws.wts[i].Path), err)
 		}
@@ -438,7 +441,8 @@ func cellActive(w worktree, _ columnContext) string {
 }
 
 // cellCost is the sum of every harness cost; "-" when there are no events and
-// "unknown" when any contributor is unpriced.
+// "unknown" when any contributor is unpriced. A proven subscription renders
+// billed/list, so both the actual charge and the list price stay visible.
 func cellCost(w worktree, _ columnContext) string {
 	if w.Usage == nil {
 		return "-"
@@ -612,6 +616,9 @@ type jsonWorktree struct {
 	Status        string                      `json:"status"`
 	AgeSeconds    *int64                      `json:"ageSeconds"`
 	Cost          *float64                    `json:"cost"`
+	CostEstimated bool                        `json:"costEstimated,omitempty"`
+	ListCost      *optCost                    `json:"listCost,omitempty"`
+	ListCostEst   bool                        `json:"listCostEstimated,omitempty"`
 	ActiveSeconds *int64                      `json:"activeSeconds,omitempty"`
 	Usage         map[string]jsonHarnessUsage `json:"usage,omitempty"`
 	// Partial reports a total that lost an unreadable session, so a partial
@@ -624,13 +631,41 @@ type jsonWorktree struct {
 // (null when unpriced); activeSeconds and models follow the harness's events.
 type jsonHarnessUsage struct {
 	Cost          *float64                  `json:"cost"`
+	CostEstimated bool                      `json:"costEstimated,omitempty"`
+	ListCost      *optCost                  `json:"listCost,omitempty"`
+	ListCostEst   bool                      `json:"listCostEstimated,omitempty"`
 	ActiveSeconds int64                     `json:"activeSeconds"`
 	Models        map[string]jsonModelUsage `json:"models"`
 }
 
 type jsonModelUsage struct {
 	Cost          *float64 `json:"cost"`
+	CostEstimated bool     `json:"costEstimated,omitempty"`
+	ListCost      *optCost `json:"listCost,omitempty"`
+	ListCostEst   bool     `json:"listCostEstimated,omitempty"`
 	ActiveSeconds int64    `json:"activeSeconds"`
+}
+
+// optCost is the optional list price beside a machine cost. A nil pointer omits
+// the key entirely (no proven subscription); a pointer is always present, and
+// its nil value renders null (a subscription is proven but the list is unknown).
+type optCost struct{ v *float64 }
+
+func (o optCost) MarshalJSON() ([]byte, error) {
+	if o.v == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(*o.v)
+}
+
+// listCostJSON adds the list price only when the pair shows one, so unproven
+// output and a proven equal price stay exactly as before. A proven total with
+// neither side priced omits the key: null beside "unknown" adds no signal.
+func listCostJSON(p costPair) *optCost {
+	if !p.showsList() || p.bothUnpriced() {
+		return nil
+	}
+	return &optCost{v: p.list.jsonValue()}
 }
 
 func printStatusJSON(wts []worktree, now time.Time, ttl time.Duration, current string) error {
@@ -644,12 +679,20 @@ func printStatusJSON(wts []worktree, now time.Time, ttl time.Duration, current s
 
 // jsonWorktreeFrom projects one worktree into the machine contract.
 func jsonWorktreeFrom(w worktree, now time.Time, ttl time.Duration, active []capability, current string) jsonWorktree {
+	cost := w.cost()
 	j := jsonWorktree{
 		// WHY: branchName() is the SSOT for detached display so JSON matches the table's "(detached)".
 		Path: w.Path, Branch: w.branchName(), Upstream: w.Upstream.Short, Main: w.Main,
 		Current: w.Path == current, Status: w.status(now, ttl),
-		Integrations: integrationStates(w, active),
-		Cost:         w.costMoney().jsonValue(),
+		Integrations:  integrationStates(w, active),
+		Cost:          cost.billed.jsonValue(),
+		CostEstimated: cost.billed.isEstimated(),
+	}
+	// listCost is emitted only when a proven subscription makes it differ; its
+	// estimate flag then qualifies that same value.
+	if lc := listCostJSON(cost); lc != nil {
+		j.ListCost = lc
+		j.ListCostEst = cost.list.isEstimated()
 	}
 	j.LastUsed = rfc3339Ptr(w.LastUsed)
 	j.AgeSeconds = ageSeconds(w, now)
@@ -684,10 +727,10 @@ func applyUsageJSON(j *jsonWorktree, u *worktreeUsage) {
 	j.Partial = u.partial
 }
 
-// costMoney is the worktree's known/unknown total; empty when no events.
-func (w worktree) costMoney() money {
+// cost is the worktree's price pair; empty when it has no events.
+func (w worktree) cost() costPair {
 	if w.Usage == nil {
-		return money{}
+		return costPair{}
 	}
 	return w.Usage.cost()
 }
@@ -697,9 +740,19 @@ func usageJSON(u *worktreeUsage) map[string]jsonHarnessUsage {
 	for name, h := range u.harnesses {
 		models := make(map[string]jsonModelUsage, len(h.models))
 		for model, m := range h.models {
-			models[model] = jsonModelUsage{Cost: m.cost.jsonValue(), ActiveSeconds: seconds(m.active())}
+			mu := jsonModelUsage{Cost: m.cost.billed.jsonValue(), CostEstimated: m.cost.billed.isEstimated(), ActiveSeconds: seconds(m.active())}
+			if lc := listCostJSON(m.cost); lc != nil {
+				mu.ListCost = lc
+				mu.ListCostEst = m.cost.list.isEstimated()
+			}
+			models[model] = mu
 		}
-		out[name] = jsonHarnessUsage{Cost: h.cost.jsonValue(), ActiveSeconds: seconds(h.active()), Models: models}
+		hu := jsonHarnessUsage{Cost: h.cost.billed.jsonValue(), CostEstimated: h.cost.billed.isEstimated(), ActiveSeconds: seconds(h.active()), Models: models}
+		if lc := listCostJSON(h.cost); lc != nil {
+			hu.ListCost = lc
+			hu.ListCostEst = h.cost.list.isEstimated()
+		}
+		out[name] = hu
 	}
 	return out
 }
@@ -722,7 +775,7 @@ func printStatusDetail(wts []worktree, current string, now time.Time, colorMode 
 		return
 	}
 	fmt.Println()
-	printKeyValues(detailSummaryRows(*cur, now), detailTitleRows, colorMode)
+	printKeyValues(dropElidedCostRow(detailSummaryRows(*cur, now)), detailTitleRows, colorMode)
 	if cur.Usage == nil {
 		fmt.Println("no agent usage recorded")
 		return
@@ -737,6 +790,10 @@ func printStatusDetail(wts []worktree, current string, now time.Time, colorMode 
 // printKeyValues bolds their labels.
 const detailTitleRows = 1
 
+// detailCostLabel names the summary cost row; the builder and the narrow-
+// terminal drop share it, so they cannot disagree on which row is the cost.
+const detailCostLabel = "cost"
+
 // detailSummaryRows is the block's identity row plus its age/active/cost
 // measures. The identity value keeps the full path: identifying the current
 // worktree is the block's purpose, and the table above carries the elided form.
@@ -745,7 +802,7 @@ func detailSummaryRows(cur worktree, now time.Time) [][]string {
 		{"current worktree", displayPath(cur.Path)},
 		{"age", detailAge(cur, now)},
 		{"active time", detailActive(cur)},
-		{"cost", detailCost(cur)},
+		{detailCostLabel, detailCost(cur)},
 	}
 }
 
@@ -765,6 +822,39 @@ func findWorktree(wts []worktree, path string) *worktree {
 		}
 	}
 	return nil
+}
+
+// dropElidedCostRow drops the summary cost row when the fitted value column
+// cannot hold it whole. A middle-cut pair ($0….20) reads as a wrong number,
+// so the row is hidden with the same stderr disclosure as a dropped table
+// column instead of being elided.
+func dropElidedCostRow(rows [][]string) [][]string {
+	if !summaryCostElided(rows) {
+		return rows
+	}
+	for i, r := range rows {
+		if r[0] == detailCostLabel {
+			warnf("terminal too narrow; hid cost; widen the terminal or use --json")
+			return append(slices.Clone(rows[:i]), rows[i+1:]...)
+		}
+	}
+	return rows
+}
+
+// summaryCostElided reports whether the summary's fitted value column cannot
+// hold the cost value whole. A middle-cut pair reads as a wrong number, so the
+// caller hides the row instead of eliding it.
+func summaryCostElided(rows [][]string) bool {
+	if len(rows) == 0 || len(rows[0]) == 0 {
+		return false
+	}
+	_, fitted := sizedKeyValues(rows)
+	for _, r := range rows {
+		if r[0] == detailCostLabel {
+			return dispWidth(r[1]) > fitted[1]
+		}
+	}
+	return false
 }
 
 func detailAge(w worktree, now time.Time) string { return cellAge(w, columnContext{now: now}) }
