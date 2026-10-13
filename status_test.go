@@ -197,7 +197,10 @@ func TestWorktreeLastUsed(t *testing.T) {
 // RFC3339 value is honored, and a malformed value discloses itself and falls
 // back to the wall clock.
 func TestNowFunc(t *testing.T) {
+	// t.Setenv restores the original value at cleanup; unset here to hit the
+	// true absent-env path, not just the empty-value one.
 	t.Setenv("WTM_NOW", "")
+	_ = os.Unsetenv("WTM_NOW")
 	if got := nowFunc(); got.Before(time.Now().Add(-time.Minute)) {
 		t.Errorf("absent env = %v, want the wall clock", got)
 	}
@@ -207,8 +210,7 @@ func TestNowFunc(t *testing.T) {
 	}
 	t.Setenv("WTM_NOW", "nope")
 	var got time.Time
-	var warned string
-	warned = captureStderr(t, func() { got = nowFunc() })
+	warned := captureStderr(t, func() { got = nowFunc() })
 	if got.Before(time.Now().Add(-time.Minute)) {
 		t.Errorf("malformed env = %v, want the wall clock", got)
 	}

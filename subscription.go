@@ -286,7 +286,7 @@ func (s subscriptions) forWorktree(root string) subscriptions {
 			return s
 		}
 	}
-	v := !(s.managed || claudeProjectMetered(root) || claudeParentsMetered(root))
+	v := !s.managed && !claudeProjectMetered(root) && !claudeParentsMetered(root)
 	if s.wtVerdicts != nil {
 		s.wtVerdicts[root] = v
 	}
