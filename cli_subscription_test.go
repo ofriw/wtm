@@ -211,3 +211,15 @@ func TestSubscriptionBinaryWorktreeIsolation(t *testing.T) {
 	}
 }
 
+func TestSubscriptionBinaryCoveredCacheWriteEstimate(t *testing.T) {
+	repo, _ := subscriptionBinaryRepo(t)
+	seedSubscriptionSession(t, repo, "main", `{"input_tokens":100000,"cache_creation_input_tokens":100000}`)
+	rows := subscriptionStatus(t, repo)
+	if len(rows) != 1 {
+		t.Fatalf("got %d worktrees, want 1", len(rows))
+	}
+	// Missing cache TTL uses the fixture's 5-minute rate: $0.30 + $0.375.
+	assertSubscriptionPrices(t, rows[0], map[string]any{
+		"cost": float64(0), "listCost": 0.675, "listCostEstimated": true,
+	})
+}

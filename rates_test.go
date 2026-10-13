@@ -104,16 +104,16 @@ func TestPriceWebSearch(t *testing.T) {
 	assertCost(t, c.price(usageEvent{model: "m1", tier: "standard", webSearch: 3}), 0.03, true)
 }
 
-// TestPriceUnknown pins every unpriced path: missing model, unknown tier and an
-// omitted cache-write lifetime.
+// TestPriceUnknown pins every unpriced path: missing model, unknown tier, and a
+// cache-write lifetime that has no 5-minute rate to estimate from.
 func TestPriceUnknown(t *testing.T) {
 	c := testRates(t)
 	cases := map[string]usageEvent{
-		"missing model":              {model: "nope", tier: "standard", tokens: claudeTokens{input: 1}},
-		"unknown tier":               {model: "m1", tier: "priority", tokens: claudeTokens{input: 1}},
-		"omitted cache write time":   {model: "m1", tier: "standard", tokens: claudeTokens{unclassifiedCacheWrite: 100}},
-		"non-batch rate for batches": {model: "m1", tier: "batch", tokens: claudeTokens{cacheWrite1h: 1}},
-		"batch with long context":    {model: "m1", tier: "batch", tokens: claudeTokens{input: 250_000}},
+		"missing model":               {model: "nope", tier: "standard", tokens: claudeTokens{input: 1}},
+		"unknown tier":                {model: "m1", tier: "priority", tokens: claudeTokens{input: 1}},
+		"cache write with no 5m rate": {model: "claude-opus-4-6", tier: "standard", tokens: claudeTokens{unclassifiedCacheWrite: 100}},
+		"non-batch rate for batches":  {model: "m1", tier: "batch", tokens: claudeTokens{cacheWrite1h: 1}},
+		"batch with long context":     {model: "m1", tier: "batch", tokens: claudeTokens{input: 250_000}},
 	}
 	for name, e := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -121,6 +121,18 @@ func TestPriceUnknown(t *testing.T) {
 				t.Fatalf("price = %+v, want unknown", m)
 			}
 		})
+	}
+}
+
+// TestPriceUnclassifiedCacheWriteIsEstimated pins the one assumption wtm makes:
+// tokens with no 5m/1h lifetime are priced at the 5-minute rate and flagged
+// estimated, because a 1-hour write would cost more.
+func TestPriceUnclassifiedCacheWriteIsEstimated(t *testing.T) {
+	c := testRates(t)
+	m := c.price(usageEvent{model: "m1", tier: "standard", tokens: claudeTokens{unclassifiedCacheWrite: 100}})
+	assertCost(t, m, 100*0.00000125, true)
+	if !m.isEstimated() {
+		t.Fatalf("price = %+v, want estimated", m)
 	}
 }
 

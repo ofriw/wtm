@@ -78,6 +78,105 @@ func TestStatusJSONUsageContract(t *testing.T) {
 	}
 }
 
+// estimatedUsage is a worktree whose only cost rests on an assumption, so the
+// tilde and the JSON flag have something to mark.
+func estimatedUsage() *worktreeUsage {
+	var u worktreeUsage
+	u.addSession("claude", []usageEvent{{at: at(0), model: "claude-sonnet-4-6"}}, pairPricer(func(usageEvent) money {
+		var m money
+		m.addEstimated(1.23)
+		return m
+	}))
+	return &u
+}
+
+// TestStatusJSONEstimatedFlag pins the machine caveat: an estimated amount still
+// serializes as a number, and its side carries an explicit flag.
+func TestStatusJSONEstimatedFlag(t *testing.T) {
+	with := worktree{Path: "/with", Usage: estimatedUsage()}
+	out := captureStdout(t, func() {
+		if err := printStatusJSON([]worktree{with}, at(0), 10*time.Hour, "/with"); err != nil {
+			t.Errorf("printStatusJSON: %v", err)
+		}
+	})
+	var got []jsonWorktree
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if !got[0].CostEstimated {
+		t.Errorf("costEstimated = false, want true\n%s", out)
+	}
+	if got[0].Cost == nil {
+		t.Errorf("estimated cost lost its number\n%s", out)
+	}
+	if m := got[0].Usage["claude"].Models["claude-sonnet-4-6"]; !m.CostEstimated {
+		t.Errorf("model costEstimated = false, want true\n%s", out)
+	}
+}
+
+// TestStatusEstimateLegend pins the one explanation: the legend states the SSOT
+// reason and stays silent when every displayed price is exact. The assert
+// references the constant, so prose edits move both sides together.
+func TestStatusEstimateLegend(t *testing.T) {
+	out := captureStdout(t, func() { printEstimateLegend(true) })
+	if !strings.Contains(out, "~ estimated: "+estimateCacheWriteLifetime) {
+		t.Fatalf("legend missing its mark or its reason:\n%s", out)
+	}
+	if got := captureStdout(t, func() { printEstimateLegend(false) }); got != "" {
+		t.Fatalf("no-estimate legend must be empty, got:\n%q", got)
+	}
+}
+
+// TestEstimateLegendNeededFollowsRenderedCells pins the anti-dangle rule: the
+// legend is needed only when a "~" cell actually renders, so a dropped COST
+// column suppresses it. The estimated worktree is not the current one, so only
+// the table can show the mark.
+func TestEstimateLegendNeededFollowsRenderedCells(t *testing.T) {
+	with := worktree{Path: "/with", Usage: estimatedUsage()}
+	cols := statusColumnsFor(false)
+	if !estimateLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour) {
+		t.Fatal("an estimated table total must ask for the legend")
+	}
+	t.Setenv("COLUMNS", "5")
+	if estimateLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour) {
+		t.Fatal("a dropped COST column must not ask for the legend")
+	}
+}
+
+func TestListCostJSONOmitsProvenUnknown(t *testing.T) {
+	both := costPair{subscription: true}
+	both.billed.addUnknown()
+	both.list.addUnknown()
+	if got := listCostJSON(both); got != nil {
+		t.Errorf("both-unknown listCost = %+v, want nil (omit the key)", got)
+	}
+	unproven := costPair{}
+	unproven.billed.addKnown(1)
+	unproven.list.addKnown(2)
+	if got := listCostJSON(unproven); got != nil {
+		t.Errorf("unproven listCost = %+v, want nil", got)
+	}
+	equal := costPair{subscription: true}
+	equal.billed.addKnown(3)
+	equal.list.addKnown(3)
+	if got := listCostJSON(equal); got != nil {
+		t.Errorf("proven-equal listCost = %+v, want nil", got)
+	}
+	mixed := costPair{subscription: true, billed: knownZero()}
+	mixed.list.addUnknown()
+	lc := listCostJSON(mixed)
+	if lc == nil {
+		t.Fatalf("known-billed/unknown-list listCost = nil, want explicit null")
+	}
+	raw, err := json.Marshal(lc)
+	if err != nil {
+		t.Fatalf("marshal listCost: %v", err)
+	}
+	if string(raw) != "null" {
+		t.Errorf("listCost = %s, want null", raw)
+	}
+}
+
 func TestStatusDetailBlock(t *testing.T) {
 	t.Setenv("COLUMNS", "0")
 	with := worktree{Path: "/with", Usage: fixtureUsage()}

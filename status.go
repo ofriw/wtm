@@ -251,7 +251,9 @@ func cmdStatus(g *globals, args []string) error {
 	if g.json {
 		return printStatusJSON(ws.wts, now, ws.ttl, current)
 	}
-	printStatusTable(statusColumnsFor(wide), ws.wts, now, ws.ttl, g.color)
+	cols := statusColumnsFor(wide)
+	printStatusTable(cols, ws.wts, now, ws.ttl, g.color)
+	printEstimateLegend(estimateLegendNeeded(cols, ws.wts, current, now, ws.ttl))
 	printStatusDetail(ws.wts, current, now, g.color)
 	return nil
 }
@@ -755,6 +757,67 @@ func usageJSON(u *worktreeUsage) map[string]jsonHarnessUsage {
 		out[name] = hu
 	}
 	return out
+}
+
+// estimateLegendNeeded reports whether the table or the detail block will
+// render an estimated "~" cell. It reuses the same width fit as the renderers,
+// so a dropped COST column cannot leave a legend with no mark to explain.
+func estimateLegendNeeded(cols []worktreeColumn, wts []worktree, current string, now time.Time, ttl time.Duration) bool {
+	ctx := columnContext{now: now, ttl: ttl}
+	if costColumnKept(cols, gridRows(cols, wts, ctx)) {
+		for _, w := range wts {
+			if w.cost().isEstimated() {
+				return true
+			}
+		}
+	}
+	cur := findWorktree(wts, current)
+	if cur == nil {
+		return false
+	}
+	if cur.cost().isEstimated() && !summaryCostElided(detailSummaryRows(*cur, now)) {
+		return true
+	}
+	return modelsEstimated(cur.Usage) && costColumnKept(detailColumns, detailRows(cur.Usage))
+}
+
+// costColumnKept reports whether the COST column survives the width fit, so a
+// caller can know whether a cost cell will actually render.
+func costColumnKept(cols []worktreeColumn, rows [][]string) bool {
+	widths := columnWidths(columnHeaders(cols), rows, widthBudget())
+	for i, c := range cols {
+		if c.header == colCost.header {
+			return widths[i] != 0
+		}
+	}
+	return false
+}
+
+// modelsEstimated reports whether any visible (harness, model) row rests on an
+// assumption.
+func modelsEstimated(u *worktreeUsage) bool {
+	if u == nil {
+		return false
+	}
+	for _, h := range u.harnesses {
+		for _, m := range h.models {
+			if m.cost.isEstimated() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// printEstimateLegend discloses, once under the table, every assumed price. The
+// reason text is the SSOT constant, so the explanation cannot drift from the
+// estimate it explains. A table of reported prices prints nothing here.
+func printEstimateLegend(needed bool) {
+	if !needed {
+		return
+	}
+	fmt.Println()
+	fmt.Println("~ estimated: " + estimateCacheWriteLifetime)
 }
 
 // detailColumns is the detail block's table schema. It shares the status column

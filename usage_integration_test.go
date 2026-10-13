@@ -26,7 +26,10 @@ func usageIndex(t *testing.T, dir, name, harness, line string) sessionIndex {
 	return sessionIndex{canonical(dir): {{path: p, harness: harness}}}
 }
 
-func TestBuildUsageClaudeUnclassifiedCacheWriteIsUnknown(t *testing.T) {
+// TestBuildUsageClaudeUnclassifiedCacheWriteIsEstimated pins the end-to-end
+// estimate: tokens with no 5m/1h lifetime are priced at the 5-minute rate, the
+// cell carries the tilde, and the JSON keeps the number and sets the flag.
+func TestBuildUsageClaudeUnclassifiedCacheWriteIsEstimated(t *testing.T) {
 	dir := t.TempDir()
 	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name,
 		claudeUsageLine(`{"input_tokens":1000,"cache_creation_input_tokens":100}`))
@@ -35,11 +38,15 @@ func TestBuildUsageClaudeUnclassifiedCacheWriteIsUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := worktree{Path: dir, Usage: &u}
-	if got := cellCost(w, columnContext{}); got != "unknown" {
-		t.Errorf("cost = %q, want unknown", got)
+	if got := cellCost(w, columnContext{}); got != "~$0.00" {
+		t.Errorf("cost = %q, want ~$0.00", got)
 	}
-	if v := w.cost().billed.jsonValue(); v != nil {
-		t.Errorf("json cost = %v, want null", v)
+	cost := w.cost()
+	if v := cost.billed.jsonValue(); v == nil {
+		t.Errorf("json cost = nil, want a number")
+	}
+	if !cost.billed.isEstimated() {
+		t.Errorf("json cost missing the estimated flag: %+v", cost.billed)
 	}
 }
 

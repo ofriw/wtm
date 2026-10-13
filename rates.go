@@ -82,8 +82,15 @@ func (r modelRate) ratesFor(tier string, context int64) *tokenRates {
 // catalog maps a model name to its rate.
 type catalog map[string]modelRate
 
+// estimateCacheWriteLifetime is the exact reason a cost reads estimated. wtm
+// prints it verbatim in the status legend, and a test asserts it, so the stated
+// reason can never drift from the estimate it explains.
+const estimateCacheWriteLifetime = "a usage record omitted the cache-write lifetime (5m vs 1h), so wtm priced those tokens at the 5-minute rate; a 1-hour write costs more, so the value is a lower bound, not exact data"
+
 // price turns one Claude event into money. A resolved model with zero tokens is
-// a known $0.00; a missing model, tier, or needed class is unknown.
+// a known $0.00; a missing model, tier, or needed class is unknown. A record
+// that omits the cache-write lifetime is priced at the 5-minute rate and marked
+// estimated, because the true 5m/1h split is unknowable.
 func (c catalog) price(e usageEvent) money {
 	r, ok := resolveModel(c, e.model)
 	if !ok {
@@ -96,10 +103,7 @@ func (c catalog) price(e usageEvent) money {
 	var m money
 	m.addKnown(0) // resolved: a zero is a real zero
 	priceClasses(&m, *rates, e.tokens)
-	if e.tokens.unclassifiedCacheWrite > 0 {
-		// The record omitted the cache-write lifetime; that part is unpriced.
-		m.addUnknown()
-	}
+	addEstimatedClass(&m, rates.cacheWrite5m, e.tokens.unclassifiedCacheWrite)
 	priceWebSearch(&m, r, e.webSearch)
 	return m
 }
@@ -140,6 +144,20 @@ func addClass(m *money, rate *float64, n int64) {
 		return
 	}
 	m.addKnown(float64(n) * *rate)
+}
+
+// addEstimatedClass prices a class whose split is unknown, at an assumed rate.
+// A nil rate leaves the part unknown: without any basis, an estimate would
+// invent a number, which is worse than an honest gap.
+func addEstimatedClass(m *money, rate *float64, n int64) {
+	if n == 0 {
+		return
+	}
+	if rate == nil {
+		m.addUnknown()
+		return
+	}
+	m.addEstimated(float64(n) * *rate)
 }
 
 // resolveModel finds a rate for a recorded model id. The catalog uses many
