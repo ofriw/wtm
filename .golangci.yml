@@ -1,0 +1,16 @@
+# Lint behavior is pinned, not inherited: golangci-lint's implicit defaults can
+# change between releases and turn unrelated PRs red. The binary version is the
+# single source of truth in .golangci-lint-version; the linter set is fixed here.
+#
+# The action resolves versions as `version` > a go.mod golangci-lint dependency >
+# this file. Never add golangci-lint to go.mod, or this file stops being the pin.
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
