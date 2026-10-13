@@ -6,7 +6,7 @@ d	755	-	/SBX/home/claude/projects
 d	755	-	/SBX/home/pi-agent
 d	755	-	/SBX/home/pi-agent/sessions
 d	755	-	/SBX/home/pi-agent/sessions/pi-usage
-f	644	42b72ab2e9432678e9f13af49a7be499ab0f32918516cd2084d524b17600ccb7	/SBX/home/pi-agent/sessions/pi-usage/pi-usage.jsonl
+f	644	90934de83c7d4ca98af9bf6057c9e9f39f322250c04ab4321f5405dbf895e4e7	/SBX/home/pi-agent/sessions/pi-usage/pi-usage.jsonl
 d	755	-	/SBX/repo
 d	755	-	/SBX/repo/.git
 f	644	4a6689419b00b11700c9b6246bcfa8936c8f5e1e824db3a7e57030e2d1c1a684	/SBX/repo/.git/COMMIT_EDITMSG

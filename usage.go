@@ -106,6 +106,7 @@ type usageEvent struct {
 	end       time.Time
 	key       string
 	model     string
+	provider  string // Pi provider id; empty for Claude (never dual-mode)
 	cost      *float64
 	tokens    claudeTokens
 	tier      string

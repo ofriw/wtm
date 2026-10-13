@@ -1,6 +1,6 @@
 PATH       BRANCH  UPSTREAM   LAST USED  AGE  ACTIVE   COST  STATUS  INTEGRATIONS
 /SBX/repo  main    -         2020-01-01   6y       -      -  ACTIVE  -
-/SBX/wt    wt      -         2020-01-01   6y  1h 30m  $4.85  ACTIVE  -
+/SBX/wt    wt      -         2020-01-01   6y  1h 40m  $5.15  ACTIVE  -
 
 current worktree  /SBX/repo
 age               6y
@@ -34,12 +34,12 @@ no agent usage recorded
     "lastUsed": "2020-01-01T00:00:00Z",
     "status": "ACTIVE",
     "ageSeconds": 189388800,
-    "cost": 4.85,
-    "activeSeconds": 5400,
+    "cost": 5.15,
+    "activeSeconds": 6000,
     "usage": {
       "pi": {
-        "cost": 4.85,
-        "activeSeconds": 5400,
+        "cost": 5.15,
+        "activeSeconds": 6000,
         "models": {
           "deepseek-flash": {
             "cost": 4,
@@ -52,6 +52,10 @@ no agent usage recorded
           "grok-4.3": {
             "cost": 0.6,
             "activeSeconds": 600
+          },
+          "legacy-child": {
+            "cost": 0.3,
+            "activeSeconds": 0
           }
         }
       }

@@ -17,6 +17,7 @@ import (
 type piUsageRecord struct {
 	Type      string     `json:"type"`
 	Timestamp string     `json:"timestamp"`
+	Provider  string     `json:"provider"`
 	ModelID   string     `json:"modelId"`
 	Message   *piMessage `json:"message"`
 }
@@ -31,6 +32,7 @@ type piCost struct {
 
 type piMessage struct {
 	Role          string           `json:"role"`
+	Provider      string           `json:"provider"`
 	Model         string           `json:"model"`
 	ResponseModel string           `json:"responseModel"`
 	ToolName      string           `json:"toolName"`
@@ -50,13 +52,38 @@ type piContentBlock struct {
 	Name string `json:"name"`
 }
 
+// piSpawnDetails is the two shapes Pi has used for a spawn result. Modern Pi
+// writes one child under Model/Route/Stats; older Pi writes one entry per child
+// under Results, each with its own model and cost. Both are read so a session
+// written by either version prices exactly.
 type piSpawnDetails struct {
-	Model string        `json:"model"`
-	Stats *piSpawnStats `json:"stats"`
+	Model   string          `json:"model"`
+	Route   piSpawnRoute    `json:"route"`
+	Stats   *piSpawnStats   `json:"stats"`
+	Results []piSpawnResult `json:"results"`
+}
+
+// piSpawnRoute is where Pi records the provider that served a spawn child. An
+// inherited child omits it, so the child then bills on the parent's provider.
+type piSpawnRoute struct {
+	Provider string `json:"provider"`
 }
 
 type piSpawnStats struct {
 	Cost *float64 `json:"cost"`
+}
+
+// piSpawnResult is one child in an older spawn result. Only the usage block is
+// read; the sibling prompt and output are content-heavy and stay undecoded.
+type piSpawnResult struct {
+	Usage *piSpawnUsage `json:"usage"`
+}
+
+// piSpawnUsage is an older child's own billing: the model that answered and the
+// cost Pi computed for it.
+type piSpawnUsage struct {
+	Model string   `json:"model"`
+	Cost  *float64 `json:"cost"`
 }
 
 // piUsageEvents parses one Pi session into cost/time events. Malformed lines are
@@ -64,13 +91,13 @@ type piSpawnStats struct {
 func piUsageEvents(r *bufio.Reader) ([]usageEvent, error) {
 	var events []usageEvent
 	spawnAt := map[string]time.Time{}
-	current := ""
+	current, provider := "", ""
 	for {
 		line, err := sessionRecord(r)
 		if len(line) > 0 && piInteresting(line) {
 			var rec piUsageRecord
 			if json.Unmarshal(line, &rec) == nil {
-				current = appendPiRecord(&events, &rec, current, spawnAt)
+				current, provider = appendPiRecord(&events, &rec, current, provider, spawnAt)
 			}
 		}
 		if err != nil {
@@ -82,24 +109,34 @@ func piUsageEvents(r *bufio.Reader) ([]usageEvent, error) {
 	}
 }
 
-// appendPiRecord folds one record in and returns the session's current model.
-// Only a message carries usage; a model change only moves the current model.
-func appendPiRecord(events *[]usageEvent, rec *piUsageRecord, current string, spawnAt map[string]time.Time) string {
+// appendPiRecord folds one record in and returns the session's current model and
+// provider. Only a message carries usage; a model change only moves both.
+func appendPiRecord(events *[]usageEvent, rec *piUsageRecord, current, provider string, spawnAt map[string]time.Time) (string, string) {
 	if rec.Type == "model_change" {
 		if rec.ModelID != "" {
-			return rec.ModelID
+			current = rec.ModelID
 		}
-		return current
+		if rec.Provider != "" {
+			provider = rec.Provider
+		}
+		return current, provider
 	}
 	if rec.Type != "message" {
-		return current
+		return current, provider
 	}
 	at, ok := parseUsageTime(rec.Timestamp)
 	if !ok {
-		return current
+		return current, provider
+	}
+	// The message's provider is authoritative for its event; the model change
+	// only seeds the running value. Only assistant messages carry the session's
+	// current provider; a toolResult with a provider field belongs to a child
+	// and must not update the running provider the parent inherits next.
+	if rec.Message != nil && rec.Message.Provider != "" && rec.Message.Role == "assistant" {
+		provider = rec.Message.Provider
 	}
 	recordSpawnCalls(rec.Message, at, spawnAt)
-	return appendPiMessage(events, rec.Message, at, current, spawnAt)
+	return appendPiMessage(events, rec.Message, at, current, provider, spawnAt), provider
 }
 
 // recordSpawnCalls remembers when each spawn tool call started. The call and its
@@ -115,7 +152,7 @@ func recordSpawnCalls(msg *piMessage, at time.Time, spawnAt map[string]time.Time
 	}
 }
 
-func appendPiMessage(events *[]usageEvent, msg *piMessage, at time.Time, current string, spawnAt map[string]time.Time) string {
+func appendPiMessage(events *[]usageEvent, msg *piMessage, at time.Time, current, provider string, spawnAt map[string]time.Time) string {
 	if msg == nil {
 		return current
 	}
@@ -130,15 +167,15 @@ func appendPiMessage(events *[]usageEvent, msg *piMessage, at time.Time, current
 		if model != "" {
 			current = model
 		}
-		addPiEvent(events, at, model, msg.Usage)
+		addPiEvent(events, at, model, provider, msg.Usage)
 	case "toolResult":
 		// A spawn result is the child agent's only record. Pi may express its
 		// cost in the tool-result usage or in details.stats; the two hold the
 		// same number, so read one, never both.
 		if msg.ToolName == "spawn" {
-			appendPiSpawn(events, at, current, msg, spawnAt)
+			appendPiSpawn(events, at, current, provider, msg, spawnAt)
 		} else {
-			addPiEvent(events, at, current, msg.Usage)
+			addPiEvent(events, at, current, provider, msg.Usage)
 		}
 	}
 	return current
@@ -158,31 +195,90 @@ func piMessageModel(msg *piMessage) string {
 // spawn is still an event: it carries a known-zero cost when it reports neither
 // a child nor a cost, so it cannot poison the total. A non-error child with no
 // cost stays an unknown-cost event (design open item).
-func appendPiSpawn(events *[]usageEvent, at time.Time, current string, msg *piMessage, spawnAt map[string]time.Time) {
+// piSpawnChild is one spawned child's billing facts.
+type piSpawnChild struct {
+	model    string
+	provider string
+	cost     *float64
+}
+
+// appendPiSpawn records one event per child Pi reports on the parent's spawn
+// result, so a batch spawn that mixed models prices each on its own model.
+func appendPiSpawn(events *[]usageEvent, at time.Time, current, provider string, msg *piMessage, spawnAt map[string]time.Time) {
+	// Pair every child with its tool call so its running time counts. A missing
+	// call (older session) or a result before the call degrades to a point event.
+	start, paired := spawnAt[msg.ToolCallID]
+	paired = paired && !start.After(at)
+	for i, child := range piSpawnChildren(current, provider, msg) {
+		e := usageEvent{at: at, model: child.model, provider: child.provider, cost: child.cost, end: at}
+		if paired {
+			e.at, e.end = start, at
+		}
+		// The child index keeps two identical children of one batch distinct:
+		// the dedupe treats equal (time, model, cost) keys as repeats.
+		e.key = piEventKeyN(e, fmt.Sprintf("spawn:%d", i))
+		*events = append(*events, e)
+	}
+}
+
+// piSpawnChildren returns every child a spawn result reports. Older Pi writes N
+// children under details.results, each with its own model and cost; modern Pi
+// writes a single child under details.{model,stats}. Both yield the same list,
+// so the caller never branches on the schema.
+func piSpawnChildren(current, provider string, msg *piMessage) []piSpawnChild {
+	if d := msg.Details; d != nil && len(d.Results) > 0 {
+		children := make([]piSpawnChild, 0, len(d.Results))
+		for _, r := range d.Results {
+			model, cost := "", (*float64)(nil)
+			if r.Usage != nil {
+				model, cost = r.Usage.Model, r.Usage.Cost
+			}
+			// An older result carries no route, so the child proves nothing: it
+			// keeps an empty provider, which piProven rejects, instead of
+			// inheriting the parent's subscription.
+			children = append(children, piSpawnChild{model: piChildModel(model, current), provider: "", cost: cost})
+		}
+		return children
+	}
 	child := msg.Details != nil && msg.Details.Model != ""
-	model := ""
-	if msg.Details != nil {
-		model = msg.Details.Model
-	}
-	if model == "" {
-		model = current
-	}
-	if model == "" {
-		model = "unknown"
-	}
 	cost := spawnCost(msg)
 	if cost == nil && msg.IsError && !child {
 		zero := 0.0
 		cost = &zero
 	}
-	e := usageEvent{at: at, model: model, cost: cost, end: at}
-	// Pair the result with its tool call so the child's running time counts.
-	// A missing call (older session) degrades to a point event.
-	if start, ok := spawnAt[msg.ToolCallID]; ok && !start.After(at) {
-		e.at, e.end = start, at
+	return []piSpawnChild{{model: piSpawnModel(current, msg), provider: piChildProvider(provider, msg), cost: cost}}
+}
+
+// piSpawnModel is the child's model: Pi records it on the result, and a result
+// that omits it is attributed to the parent's running model, never lost.
+func piSpawnModel(current string, msg *piMessage) string {
+	if msg.Details != nil {
+		return piChildModel(msg.Details.Model, current)
 	}
-	e.key = piEventKey(e)
-	*events = append(*events, e)
+	return piChildModel("", current)
+}
+
+// piChildModel falls back from the child's own model to the parent's running
+// model, and only then to "unknown".
+func piChildModel(model, current string) string {
+	if model != "" {
+		return model
+	}
+	if current != "" {
+		return current
+	}
+	return "unknown"
+}
+
+// piChildProvider is the child's billing provider. A routed child names its own
+// provider on the spawn result; an inherited child names none and bills on the
+// parent's. Reading the parent's provider for a routed child would misattribute
+// a metered child to the parent's subscription.
+func piChildProvider(parent string, msg *piMessage) string {
+	if msg.Details != nil && msg.Details.Route.Provider != "" {
+		return msg.Details.Route.Provider
+	}
+	return parent
 }
 
 // spawnCost reads the child cost from details.stats, the documented location,
@@ -199,7 +295,7 @@ func spawnCost(msg *piMessage) *float64 {
 
 // addPiEvent records one Pi usage; a missing cost.total is a priced-unknown
 // event that still counts toward active time.
-func addPiEvent(events *[]usageEvent, at time.Time, model string, u *piUsage) {
+func addPiEvent(events *[]usageEvent, at time.Time, model, provider string, u *piUsage) {
 	if u == nil {
 		return
 	}
@@ -210,7 +306,7 @@ func addPiEvent(events *[]usageEvent, at time.Time, model string, u *piUsage) {
 	if u.Cost != nil {
 		cost = u.Cost.Total
 	}
-	e := usageEvent{at: at, model: model, cost: cost}
+	e := usageEvent{at: at, model: model, provider: provider, cost: cost}
 	e.key = piEventKey(e)
 	*events = append(*events, e)
 }
@@ -218,13 +314,24 @@ func addPiEvent(events *[]usageEvent, at time.Time, model string, u *piUsage) {
 // piEventKey is the content identity of a Pi event. A resumed or forked
 // transcript repeats the same records across session files, so identical
 // content bills once at the worktree-level dedupe. Costs compare by value:
-// pointer identity would keep every repeat.
-func piEventKey(e usageEvent) string {
+// pointer identity would keep every repeat. Provider is not part of the
+// identity: the same record can attribute a different running provider when
+// re-parsed, and that must still dedupe.
+func piEventKey(e usageEvent) string { return piEventKeyN(e, "") }
+
+// piEventKeyN is piEventKey with a per-event tag. A spawn batch passes the
+// child index so two children with equal time, model and cost stay distinct;
+// an empty tag reproduces the identity of every non-spawn event.
+func piEventKeyN(e usageEvent, tag string) string {
 	var cost float64
 	if e.cost != nil {
 		cost = *e.cost
 	}
-	return fmt.Sprintf("%d|%d|%s|%v", e.at.UnixNano(), e.end.UnixNano(), e.model, cost)
+	key := fmt.Sprintf("%d|%d|%s|%v", e.at.UnixNano(), e.end.UnixNano(), e.model, cost)
+	if tag == "" {
+		return key
+	}
+	return key + "|" + tag
 }
 
 // piInteresting is the cheap pre-filter: only usage records, a spawn child's
