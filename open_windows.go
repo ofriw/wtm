@@ -11,9 +11,11 @@ import (
 )
 
 // openShared opens path for reading with FILE_SHARE_DELETE. Go's os.Open grants
-// only FILE_SHARE_READ|FILE_SHARE_WRITE, so an ordinary reader handle blocks
-// MoveFileEx (os.Rename) with ERROR_ACCESS_DENIED. Store readers must not block
-// the atomic replace that keeps settings.json and temp.json consistent.
+// only FILE_SHARE_READ|FILE_SHARE_WRITE, so an ordinary reader handle makes
+// MoveFileEx (os.Rename) fail with ERROR_ACCESS_DENIED. Share delete is
+// necessary but not sufficient: the writer must also rename with POSIX
+// semantics (rename_windows.go), or MoveFileEx still refuses an open
+// destination.
 func openShared(path string) (*os.File, error) {
 	name, err := windowsPath(path)
 	if err != nil {
@@ -32,20 +34,30 @@ func openShared(path string) (*os.File, error) {
 // os.fixLongPath: shorter paths need no extended prefix.
 const maxPathWithoutPrefix = 248
 
-// windowsPath returns the UTF-16 name for CreateFile, extended-length prefixed
-// (\\?\) only when the absolute path may exceed MAX_PATH. Go's os package does
-// the same internally; a custom CreateFile must repeat it because the prefix is
-// what lifts the limit.
-func windowsPath(path string) (*uint16, error) {
+// longPath returns the absolute form of path, extended-length prefixed (\\?\)
+// only when it may exceed MAX_PATH. The rename target (rename_windows.go)
+// reuses this so the prefix rule has one home.
+func longPath(path string) (string, error) {
 	abs := path
 	if !filepath.IsAbs(abs) {
 		var err error
 		if abs, err = filepath.Abs(path); err != nil {
-			return nil, err
+			return "", err
 		}
 	}
 	if len(abs) >= maxPathWithoutPrefix {
 		abs = extendedPath(abs)
+	}
+	return abs, nil
+}
+
+// windowsPath returns the UTF-16 name for CreateFile. Go's os package does the
+// same internally; a custom CreateFile must repeat it because the prefix is
+// what lifts the limit.
+func windowsPath(path string) (*uint16, error) {
+	abs, err := longPath(path)
+	if err != nil {
+		return nil, err
 	}
 	return windows.UTF16PtrFromString(abs)
 }

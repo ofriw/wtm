@@ -110,9 +110,6 @@ func TestReadFileShared(t *testing.T) {
 }
 
 func TestWriteFileAtomicConcurrentWriters(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("os.Rename does not guarantee atomic replacement on Windows")
-	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "concurrent.json")
 	payloads := atomicTestPayloads()
@@ -145,7 +142,7 @@ func atomicTestPayloads() []string {
 }
 
 func checkAtomicPayload(path string, payloads []string) error {
-	data, err := os.ReadFile(path)
+	data, err := readFileShared(path)
 	if err != nil {
 		return err
 	}

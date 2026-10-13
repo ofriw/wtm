@@ -180,10 +180,10 @@ func readJSON(path string, v any) error {
 	return json.Unmarshal(b, v)
 }
 
-// readFileShared reads path while permitting a concurrent atomic replace
-// (os.Rename) or delete (os.Remove) of that path. On Windows the reader must
-// share delete, or its open handle makes the writer fail with
-// ERROR_ACCESS_DENIED (open_windows.go).
+// readFileShared reads path while permitting a concurrent atomic replace or
+// delete of that path. On Windows the reader must share delete, and the writer
+// must rename with POSIX semantics: FILE_SHARE_DELETE alone does not let
+// MoveFileEx replace an open destination (open_windows.go, rename_windows.go).
 func readFileShared(path string) ([]byte, error) {
 	f, err := openShared(path)
 	if err != nil {
@@ -222,7 +222,7 @@ func replaceAtomicFile(f *os.File, path string, data []byte, mode os.FileMode) (
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path)
+	return renameReplace(f.Name(), path)
 }
 
 func writeAtomicContents(f *os.File, data []byte, mode os.FileMode) error {
