@@ -45,7 +45,7 @@ func agents() []agent { return []agent{piAgent, claudeAgent} }
 func (a agent) capability() capability {
 	return capability{
 		id: a.name, token: a.statusToken,
-		probe: func(in capInput) capState { return binary(a.wired(in)) },
+		probe: func(in capInput) capState { return presentIf(a.wired(in)) },
 	}
 }
 
