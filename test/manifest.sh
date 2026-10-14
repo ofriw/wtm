@@ -22,6 +22,36 @@ volatile_path() {
   return 1
 }
 
+# Keep registry keys, branch, TTL, and all schema fields in the digest.
+# Only random identities, creation times, and sandbox roots vary between runs.
+normalized_temp_store() {
+  python3 - "$1" "$root" "$prefix" <<'PY'
+import datetime, json, re, sys
+path, root, prefix = sys.argv[1:]
+with open(path) as source:
+    store = json.load(source)
+assert isinstance(store, dict), 'temp registry must be an object'
+for record in store.values():
+    assert re.fullmatch('[0-9a-f]{64}', record['identity']), 'invalid temp identity'
+    datetime.datetime.fromisoformat(record['createdAt'].replace('Z', '+00:00'))
+    record['identity'] = '<identity>'
+    record['createdAt'] = '<createdAt>'
+store = {key.replace(root + '/', prefix + '/', 1): value for key, value in store.items()}
+print(json.dumps(store, sort_keys=True, separators=(',', ':')))
+PY
+}
+
+normalized_hash() {
+  case "$1" in
+    */.wtm/temp.json) normalized_temp_store "$1" | sha256sum | cut -d' ' -f1 ;;
+    */.git/worktrees/*/wtm-temp-identity)
+      [[ $(wc -c <"$1") -eq 64 ]] || return 1
+      grep -qxE '[0-9a-f]{64}' "$1" || return 1
+      printf '<identity>\n' | sha256sum | cut -d' ' -f1 ;;
+    *) sha256sum "$1" | cut -d' ' -f1 ;;
+  esac
+}
+
 emit() {
   local p=$1 rel type mode sha
   rel=${p#"$root"}
@@ -39,7 +69,7 @@ emit() {
     if volatile_path "$rel"; then
       sha=volatile
     else
-      sha=$(sha256sum "$p" | cut -d' ' -f1)
+      sha=$(normalized_hash "$p")
     fi
   fi
   printf '%s\t%s\t%s\t%s\n' "$type" "$mode" "$sha" "$prefix$rel"

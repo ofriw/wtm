@@ -18,12 +18,31 @@ type settings struct {
 	UnusedTTL string `json:"unusedTTL"`
 }
 
-func settingsPath() (string, error) {
+func wtmDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".wtm", "settings.json"), nil
+	return filepath.Join(home, ".wtm"), nil
+}
+
+// wtmFilePath resolves a file directly inside ~/.wtm — the SSOT for the store
+// layout shared by settings.json and temp.json and their lock files.
+func wtmFilePath(name string) (string, error) {
+	dir, err := wtmDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, name), nil
+}
+
+func settingsPath() (string, error) { return wtmFilePath("settings.json") }
+
+func settingsLockPath() (string, error) { return wtmFilePath("settings.lock") }
+
+// defaultSettings is the SSOT for settings when no file exists.
+func defaultSettings() settings {
+	return settings{UnusedTTL: fmt.Sprintf("%dd", defaultUnusedDays)}
 }
 
 func ttlDays(s string) (int, error) {
@@ -60,14 +79,17 @@ func decodeSettings(data []byte, p string) (settings, error) {
 	return s, nil
 }
 
+// loadSettings reads settings.json. The shared read handle lets a concurrent
+// `config set` atomically replace the file (open_windows.go); POSIX rename
+// already preserves open handles.
 func loadSettings() (settings, string, error) {
 	p, err := settingsPath()
 	if err != nil {
 		return settings{}, "", err
 	}
-	data, err := os.ReadFile(p)
+	data, err := readFileShared(p)
 	if os.IsNotExist(err) {
-		return settings{UnusedTTL: fmt.Sprintf("%dd", defaultUnusedDays)}, p, nil
+		return defaultSettings(), p, nil
 	}
 	if err != nil {
 		return settings{}, p, err
@@ -95,15 +117,30 @@ func cmdConfigSet(val string) error {
 	if err != nil {
 		return err
 	}
-	// Preserve unknown keys: decode into a raw map so a `config set` round-trip
-	// cannot drop forward-compat fields (decodeSettings already tolerates them).
-	// A corrupt existing file is an explicit (exit 1) error, not a usage error.
-	m := map[string]json.RawMessage{}
-	if data, err := os.ReadFile(p); err == nil {
-		if err := json.Unmarshal(data, &m); err != nil {
-			return fmt.Errorf("%s: %w", p, err)
-		}
-	} else if !os.IsNotExist(err) {
+	return writeSettings(p, val)
+}
+
+// writeSettings serializes the whole read-merge-write under the settings lock so
+// concurrent writers cannot lose an update (read-then-replace). Reader safety is
+// separate: reads share the handle for delete (openShared), so they never block
+// the rename.
+func writeSettings(p, val string) error {
+	lock, err := settingsLockPath()
+	if err != nil {
+		return err
+	}
+	return withFileLock(lock, func() error {
+		return writeSettingsLocked(p, val)
+	})
+}
+
+// writeSettingsLocked merges unusedTTL into the settings map, preserving
+// unknown keys so a round-trip cannot drop forward-compat fields
+// (decodeSettings tolerates them). A corrupt existing file is an explicit
+// (exit 1) error, not a usage one. Callers must hold the settings lock.
+func writeSettingsLocked(p, val string) error {
+	m, err := readSettingsMapUnlocked(p)
+	if err != nil {
 		return err
 	}
 	raw, err := json.Marshal(val)
@@ -116,10 +153,26 @@ func cmdConfigSet(val string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
+	// writeFileAtomic creates the directory itself, so no MkdirAll here: a
+	// truncated settings file would break every command that reads it.
+	return writeFileAtomic(p, append(data, '\n'), 0o600)
+}
+
+func readSettingsMapUnlocked(p string) (map[string]json.RawMessage, error) {
+	m := map[string]json.RawMessage{}
+	if data, err := readFileShared(p); err == nil {
+		if err := json.Unmarshal(data, &m); err != nil {
+			return nil, fmt.Errorf("%s: %w", p, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
-	return os.WriteFile(p, append(data, '\n'), 0600)
+	// A top-level JSON null unmarshals into a nil map without error; assigning
+	// to it panics, so a corrupt file must still surface as an explicit error.
+	if m == nil {
+		return nil, fmt.Errorf("%s: want a settings object", p)
+	}
+	return m, nil
 }
 
 func cmdConfigGet(g *globals) error {

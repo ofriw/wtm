@@ -141,7 +141,7 @@ func TestBuildWorktreeClaude(t *testing.T) {
 			if rel != "" {
 				writeFile(t, filepath.Join(root, rel), "{}", 0o644)
 			}
-			w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil)
+			w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil, nil)
 			want := capAbsent
 			if rel != "" {
 				want = capPresent
@@ -156,7 +156,7 @@ func TestBuildWorktreeClaude(t *testing.T) {
 	t.Run("corrupt settings still wired", func(t *testing.T) {
 		root := t.TempDir()
 		writeFile(t, filepath.Join(root, claudeSettingsFile), "{not json", 0o644)
-		w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil)
+		w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil, nil)
 		if w.Caps["claude"] != capPresent {
 			t.Fatalf("corrupt settings: claude = %v, want present", w.Caps["claude"])
 		}

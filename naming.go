@@ -17,8 +17,12 @@ import (
 // Windows path limits and readable in CI.
 const maxBranchLen = 80
 
+// tempBranchPrefix marks an ephemeral branch that gc may reclaim once idle.
+const tempBranchPrefix = "tmp/"
+
 // branchPrefixes is the taxonomy the warn-only convention check recognizes.
 var branchPrefixes = []string{
+	tempBranchPrefix,
 	"feature/", "fix/", "hotfix/", "chore/", "refactor/",
 	"docs/", "test/", "perf/", "ci/", "release/",
 }
@@ -105,6 +109,23 @@ func trimRuns(s string, sep rune) string {
 		out.WriteRune(r)
 	}
 	return strings.TrimRight(out.String(), string(sep))
+}
+
+// tempBranch prefixes a requested name with tmp/ unless it is already
+// prefixed, so `add --temp` is idempotent on an already-temp name. The prefix
+// is applied before the length check, since it is part of the branch identity.
+func tempBranch(raw string) (string, error) {
+	b, err := normalizeBranch(raw)
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(b, tempBranchPrefix) {
+		b = tempBranchPrefix + b
+	}
+	if len(b) > maxBranchLen {
+		return "", fmt.Errorf("branch %q exceeds %d characters", b, maxBranchLen)
+	}
+	return b, nil
 }
 
 // slugify flattens a branch into a filesystem-safe directory component: every

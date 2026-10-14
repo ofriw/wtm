@@ -53,7 +53,21 @@ mk_claude_session() { # mk_claude_session <worktree> <session-id> <touch-stamp>
   touch -t "$stamp" "$project/$id.jsonl"
 }
 
-backdate() { # backdate <path>... — pin mtimes to SEED epoch so activity reads old
+touch_git_activity() { # touch_git_activity <checkout> <touch options>...
+  local root=$1 private
+  shift
+  private=$(git -C "$root" rev-parse --absolute-git-dir)
+  touch "$@" "$root/.git" "$private/index"
+}
+
+backdate() { # backdate <path>... — pin all selected activity to SEED epoch
+  local path
+  for path in "$@"; do
+    if [[ $path == */.git ]]; then
+      # Staging activity lives in the private index, not the checkout backlink.
+      touch_git_activity "${path%/.git}" -t "$OLD_STAMP"
+    fi
+  done
   touch -t "$OLD_STAMP" "$@"
 }
 

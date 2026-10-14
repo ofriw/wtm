@@ -234,13 +234,14 @@ func decodeStatus(t *testing.T, out string) []jsonWorktree {
 func TestClaudeTranscriptKeepsOldWorktreeActive(t *testing.T) {
 	sandbox(t)
 	setTTL(t, "30d")
+	old := time.Now().Add(-400 * 24 * time.Hour).Truncate(time.Second)
+	t.Setenv("GIT_AUTHOR_DATE", old.Format(time.RFC3339))
+	t.Setenv("GIT_COMMITTER_DATE", old.Format(time.RFC3339))
 	repo := nativeRepo(t)
 	wt := filepath.Join(filepath.Dir(repo), "old-worktree")
 	gitWorktreeAdd(t, repo, wt, "old-worktree", "main")
-	old := time.Now().Add(-400 * 24 * time.Hour)
-	if err := os.Chtimes(filepath.Join(wt, ".git"), old, old); err != nil {
-		t.Fatal(err)
-	}
+	// Git activity now participates alongside sessions; isolate the transcript.
+	backdateGitActivity(t, wt, old)
 	assertTranscriptActivity(t, repo, wt)
 }
 
@@ -274,27 +275,43 @@ func assertCLIWorktreeActivity(t *testing.T, repo, path, status string, stamp ti
 	t.Fatalf("worktree absent from status: %s", path)
 }
 
-// An unlistable directory (typically another user's project on a shared host)
-// must not abort indexing: no evidence, no failure. Enumerated sessions
-// elsewhere still index.
-func TestIndexSkipsUnlistableDirectory(t *testing.T) {
+func unlistableSessionFixture(t *testing.T) (owner, owned, blocked string) {
+	t.Helper()
 	sandbox(t)
-	owner := t.TempDir()
-	owned := mkClaudeSession(t, owner, "visible", time.Now())
-	blocked := filepath.Join(claudeAgent.configDir(), claudeAgent.sessionSubdir, "blocked")
+	owner = t.TempDir()
+	owned = mkClaudeSession(t, owner, "visible", time.Now())
+	blocked = filepath.Join(claudeAgent.configDir(), claudeAgent.sessionSubdir, "blocked")
 	writeFile(t, filepath.Join(blocked, "inside.jsonl"), claudeTranscript(owner), 0o644)
 	if err := os.Chmod(blocked, 0); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
-	if entries, err := os.ReadDir(blocked); err == nil {
-		_ = entries
+	if _, err := os.ReadDir(blocked); err == nil {
 		t.Skip("host allows listing mode-000 directories")
 	}
+	return
+}
 
-	idx, err := indexSessions(agents(), sessionErrPolicy{failClosed: true})
-	if err != nil {
-		t.Fatalf("unlistable directory must not abort indexing: %v", err)
+// Hidden child contents cannot prove inactivity, so reclamation must stop.
+func TestIndexRejectsUnlistableDirectory(t *testing.T) {
+	_, _, blocked := unlistableSessionFixture(t)
+	if _, err := indexSessions(agents(), sessionErrPolicy{failClosed: true}); err == nil || !strings.Contains(err.Error(), blocked) {
+		t.Fatalf("strict index must identify unreadable child %s: %v", blocked, err)
+	}
+}
+
+func TestIndexWarnsOnUnlistableDirectory(t *testing.T) {
+	owner, owned, blocked := unlistableSessionFixture(t)
+	var idx sessionIndex
+	warning := captureStderr(t, func() {
+		var err error
+		idx, err = indexSessions(agents(), sessionErrPolicy{})
+		if err != nil {
+			t.Fatalf("lenient index: %v", err)
+		}
+	})
+	if !strings.Contains(warning, blocked) || !strings.Contains(warning, warnPrefix) {
+		t.Fatalf("unreadable child warning missing: %q", warning)
 	}
 	if !idxContains(idx, owner, owned) {
 		t.Fatalf("sibling session not indexed: %s", owned)
@@ -391,8 +408,8 @@ func cwdAfterRecords(owner string, before int) string {
 	return b.String()
 }
 
-// An unreadable session root is fatal under every policy — discovery included:
-// an empty index misclassifies every worktree as UNUSED and risks a wrongful GC.
+// Destructive indexing refuses an unreadable root; display reports the gap
+// without blocking the inventory.
 func TestIndexUnreadableSessionRootIsFatal(t *testing.T) {
 	sandbox(t)
 	owner := t.TempDir()
@@ -405,10 +422,15 @@ func TestIndexUnreadableSessionRootIsFatal(t *testing.T) {
 	if _, err := os.ReadDir(root); err == nil {
 		t.Skip("host allows listing mode-000 session root")
 	}
-	for _, failClosed := range []bool{true, false} {
-		_, err := indexSessions(agents(), sessionErrPolicy{failClosed: failClosed})
-		if err == nil || !strings.Contains(err.Error(), root) {
-			t.Fatalf("indexSessions(failClosed=%v) on unreadable root = %v, want error naming %s", failClosed, err, root)
+	if _, err := indexSessions(agents(), sessionErrPolicy{failClosed: true}); err == nil || !strings.Contains(err.Error(), root) {
+		t.Fatalf("strict index on unreadable root = %v, want error naming %s", err, root)
+	}
+	warning := captureStderr(t, func() {
+		if _, err := indexSessions(agents(), sessionErrPolicy{}); err != nil {
+			t.Fatalf("display index on unreadable root: %v", err)
 		}
+	})
+	if !strings.Contains(warning, root) {
+		t.Fatalf("display warning must name %s, got %q", root, warning)
 	}
 }

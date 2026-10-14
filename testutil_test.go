@@ -107,6 +107,16 @@ func assertWorktreeNotListed(t *testing.T, repo, wt string) {
 	}
 }
 
+// assertErrorNamesPath pins that err names path. Both sides compare canonically:
+// a raw t.TempDir path can be a Windows 8.3 alias (RUNNER~1), while production
+// errors embed the canonical store key, so a raw compare fails only on Windows.
+func assertErrorNamesPath(t *testing.T, what string, err error, path string) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), canonical(path)) {
+		t.Fatalf("%s (want %s): %v", what, path, err)
+	}
+}
+
 // setHomeEnv points os.UserHomeDir at home on every OS: it reads HOME on Unix
 // and USERPROFILE on Windows, so tests must set both or the rewrite is a no-op.
 func setHomeEnv(t *testing.T, home string) {

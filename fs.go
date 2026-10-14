@@ -180,6 +180,79 @@ func readJSON(path string, v any) error {
 	return json.Unmarshal(b, v)
 }
 
+// readFileShared reads path while permitting a concurrent atomic replace or
+// delete of that path. On Windows the reader must share delete, and the writer
+// must rename with POSIX semantics: FILE_SHARE_DELETE alone does not let
+// MoveFileEx replace an open destination (open_windows.go, rename_windows.go).
+func readFileShared(path string) ([]byte, error) {
+	f, err := openShared(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
+}
+
+// writeFileAtomic replaces path by writing a sibling temp file and renaming it
+// into place. A rename within one directory is atomic, so a concurrent reader
+// sees either the old file or the new one, never a half-written file.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	return replaceAtomicFile(f, path, data, mode)
+}
+
+func replaceAtomicFile(f *os.File, path string, data []byte, mode os.FileMode) (err error) {
+	// Remove only failed writes; a successful rename releases the temp path.
+	defer func() {
+		if err != nil {
+			_ = os.Remove(f.Name())
+		}
+	}()
+	if err := writeAtomicContents(f, data, mode); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return renameReplace(f.Name(), path)
+}
+
+func writeAtomicContents(f *os.File, data []byte, mode os.FileMode) error {
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	return f.Chmod(mode)
+}
+
+// withFileLock runs fn while holding an exclusive OS lock on lockPath, blocking
+// until it is available. The lock file is created once and never removed or
+// renamed: the OS releases the lock on process exit, so a crash cannot leave a
+// stale lock, and unlinking it would let the next locker lock a different inode.
+func withFileLock(lockPath string, fn func() error) error {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	if err := lockFile(f); err != nil {
+		return err
+	}
+	defer func() { _ = unlockFile(f) }()
+	return fn()
+}
+
+// writeJSON writes indented JSON with world-readable 0644.
 func writeJSON(path string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

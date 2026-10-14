@@ -244,9 +244,7 @@ func gcTUIFixture(t *testing.T) (repo, wt1, session string) {
 	wt1 = filepath.Join(filepath.Dir(repo), "wt1")
 	gitWorktreeAdd(t, repo, wt1, "wt1", "main")
 	session = mkSession(t, wt1, "s-wt1", gcTUISeedTime())
-	if err := os.Chtimes(filepath.Join(wt1, ".git"), gcTUISeedTime(), gcTUISeedTime()); err != nil {
-		t.Fatal(err)
-	}
+	backdateGitActivity(t, wt1, gcTUISeedTime())
 	return repo, wt1, session
 }
 

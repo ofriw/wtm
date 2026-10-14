@@ -128,6 +128,31 @@ func repoRoot(dir string) (string, error) {
 	return wts[0].Path, nil
 }
 
+// gitPrivateDir resolves the per-worktree private admin dir ($GIT_DIR) via
+// --absolute-git-dir: a linked worktree's own metadata dir holding its .git
+// backlink target (e.g. <main>/.git/worktrees/<name>), not the shared repo dir.
+// Callers needing per-checkout state (not common objects) start here.
+func gitPrivateDir(dir string) (string, error) {
+	out, err := git(dir, "rev-parse", "--absolute-git-dir")
+	return strings.TrimSpace(out), err
+}
+
+// gitCurrentBranch returns an empty branch for valid detached HEADs only.
+func gitCurrentBranch(dir string) (string, error) {
+	cmd := exec.Command("git", "symbolic-ref", "--quiet", "--short", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		// Exit 1 means non-symbolic; verify HEAD to reject broken checkouts.
+		_, err = git(dir, "rev-parse", "--verify", "HEAD")
+		return "", err
+	}
+	return "", fmt.Errorf("git symbolic-ref --quiet --short HEAD: %s: %w", strings.TrimSpace(string(out)), err)
+}
+
 // gitTopLevel returns the root of the worktree containing dir (main or linked).
 func gitTopLevel(dir string) (string, error) {
 	return git(dir, "rev-parse", "--show-toplevel")
@@ -144,8 +169,8 @@ func worktreeAdd(repoDir, path, branch, baseRef string) error {
 // worktreeDirty reports whether git would refuse `worktree remove` for
 // uncommitted changes. It mirrors git's check_clean_worktree predicate
 // (builtin/worktree.c): non-empty `status --porcelain --ignore-submodules=none`.
-// --no-optional-locks keeps this query read-only: a plain status refreshes
-// .git/index, bumping the .git mtime that worktreeLastUsed reads as creation.
+// --no-optional-locks prevents index refresh from becoming false activity;
+// scanIndexTime uses the private index mtime to protect staged changes.
 // Best-effort: a failed status read reports clean, like isIgnored.
 func worktreeDirty(dir string) bool {
 	out, err := git(dir, "--no-optional-locks", "status", "--porcelain", "--ignore-submodules=none")
@@ -356,11 +381,12 @@ func deleteRemoteBranch(dir, remote, ref string) error {
 	return err
 }
 
-// deleteLocalBranch force-deletes a local branch. `delete <branch>` names the
-// branch as its target, so -D is intended: the user chose to drop it even if
-// it is unmerged. The worktree that checked it out must already be removed.
-// -- stops a branch name from being read as a git option.
-func deleteLocalBranch(dir, branch string) error {
+// branchDelete force-deletes a local branch. `delete <branch>` and gc's temp
+// purge both name the branch as their target, so -D is intended: the user (or a
+// collected temp) chose to drop it even if it is unmerged. The worktree that
+// checked it out must already be removed. -- stops a branch name from being
+// read as a git option.
+func branchDelete(dir, branch string) error {
 	_, err := git(dir, "branch", "-D", "--", branch)
 	return err
 }

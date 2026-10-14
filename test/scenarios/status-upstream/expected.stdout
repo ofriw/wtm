@@ -1,6 +1,6 @@
-PATH       BRANCH  UPSTREAM     LAST USED  STATUS  INTEGRATIONS
-/SBX/repo  main    -           2020-01-01  UNUSED  -
-/SBX/wt1   wt1     origin/wt1  2020-01-01  UNUSED  -
+PATH       BRANCH  UPSTREAM     LAST USED  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -           2020-01-01  UNUSED  -     -
+/SBX/wt1   wt1     origin/wt1  2020-01-01  UNUSED  -     -
 [
   {
     "path": "/SBX/repo",
@@ -14,7 +14,9 @@ PATH       BRANCH  UPSTREAM     LAST USED  STATUS  INTEGRATIONS
       "claude": "n/a",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   },
   {
     "path": "/SBX/wt1",
@@ -28,6 +30,8 @@ PATH       BRANCH  UPSTREAM     LAST USED  STATUS  INTEGRATIONS
       "claude": "n/a",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   }
 ]
