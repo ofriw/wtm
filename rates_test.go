@@ -27,6 +27,7 @@ const testCatalog = `{
     "cache_creation_input_token_cost_batches": 0.000000625,
     "input_cost_per_token_above_200k_tokens": 0.000002,
     "output_cost_per_token_above_200k_tokens": 0.000004,
+    "cache_creation_input_token_cost_above_1hr_above_200k_tokens": 0.000003,
     "search_context_cost_per_query": {"search_context_size_medium": 0.01}
   },
   "claude-opus-4-6": {"input_cost_per_token": 0.000005, "output_cost_per_token": 0.000025},
@@ -97,6 +98,14 @@ func TestPriceLongContextBoundary(t *testing.T) {
 	assertCost(t, c.price(atThreshold), 0.2, true)
 	above := usageEvent{model: "m1", tier: "standard", tokens: claudeTokens{input: 200_001}}
 	assertCost(t, c.price(above), 200_001*0.000002, true)
+}
+
+// TestPriceLongContextOneHourCacheWrite pins C1: a 1-hour cache write above
+// 200k context bills at the above-200k 1-hour rate, not unknown.
+func TestPriceLongContextOneHourCacheWrite(t *testing.T) {
+	c := testRates(t)
+	e := usageEvent{model: "m1", tier: "standard", tokens: claudeTokens{input: 250_000, cacheWrite1h: 10_000}}
+	assertCost(t, c.price(e), 250_000*0.000002+10_000*0.000003, true)
 }
 
 func TestPriceWebSearch(t *testing.T) {
@@ -351,4 +360,13 @@ func TestModelCandidatesRejectsVersionFragments(t *testing.T) {
 	if _, ok := resolveModel(c, "anthropic.claude-opus-4-6-v1"); !ok {
 		t.Error("provider-qualified dot must still split")
 	}
+}
+
+// TestPriceLongContextPartialAboveFallsBack pins the per-class merge: a catalog
+// entry with only the 1h-write above rate still prices other classes above
+// 200k context at their standard rates, not unknown.
+func TestPriceLongContextPartialAboveFallsBack(t *testing.T) {
+	c := catalog{"mx": {standard: tokenRates{input: fptr(0.000001)}, above: tokenRates{cacheWrite1h: fptr(0.000003)}, hasAbove: true}}
+	e := usageEvent{model: "mx", tier: "standard", tokens: claudeTokens{input: 250_000, cacheWrite1h: 10_000}}
+	assertCost(t, c.price(e), 250_000*0.000001+10_000*0.000003, true)
 }

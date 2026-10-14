@@ -64,7 +64,27 @@ func (r modelRate) ratesFor(tier string, context int64) *tokenRates {
 	switch tier {
 	case "", "standard", "default":
 		if above {
-			return &r.above
+			// Merge per class: an above-200k field wins when listed, else the
+			// standard rate prices that class. A whole-set switch would turn a
+			// partially-listed catalog (e.g. only the 1h-write above rate) into
+			// unknown for every other class.
+			merged := r.above
+			if merged.input == nil {
+				merged.input = r.standard.input
+			}
+			if merged.output == nil {
+				merged.output = r.standard.output
+			}
+			if merged.cacheRead == nil {
+				merged.cacheRead = r.standard.cacheRead
+			}
+			if merged.cacheWrite5m == nil {
+				merged.cacheWrite5m = r.standard.cacheWrite5m
+			}
+			if merged.cacheWrite1h == nil {
+				merged.cacheWrite1h = r.standard.cacheWrite1h
+			}
+			return &merged
 		}
 		return &r.standard
 	case "batch":
@@ -269,6 +289,7 @@ type litellmEntry struct {
 	OutAbove     *float64           `json:"output_cost_per_token_above_200k_tokens"`
 	CrAbove      *float64           `json:"cache_read_input_token_cost_above_200k_tokens"`
 	Cw5Above     *float64           `json:"cache_creation_input_token_cost_above_200k_tokens"`
+	Cw1Above     *float64           `json:"cache_creation_input_token_cost_above_1hr_above_200k_tokens"`
 	InBatch      *float64           `json:"input_cost_per_token_batches"`
 	OutBatch     *float64           `json:"output_cost_per_token_batches"`
 	CrBatch      *float64           `json:"cache_read_input_token_cost_batches"`
@@ -288,9 +309,9 @@ func (e litellmEntry) toRate() modelRate {
 		},
 		above: tokenRates{
 			input: e.InAbove, output: e.OutAbove, cacheRead: e.CrAbove,
-			cacheWrite5m: e.Cw5Above,
+			cacheWrite5m: e.Cw5Above, cacheWrite1h: e.Cw1Above,
 		},
-		hasAbove:  e.InAbove != nil || e.OutAbove != nil || e.CrAbove != nil || e.Cw5Above != nil,
+		hasAbove:  e.InAbove != nil || e.OutAbove != nil || e.CrAbove != nil || e.Cw5Above != nil || e.Cw1Above != nil,
 		webSearch: searchRate(e.Search),
 	}
 }
