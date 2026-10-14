@@ -106,8 +106,8 @@ func claudeTurnKey(msgID, requestID string) string {
 // claudeTokensFrom splits the usage into the four priced classes. A record that
 // omits the cache_creation breakdown keeps the flat count as unclassified, and
 // any total not covered by the breakdown is unclassified too.
-func claudeTokensFrom(u *claudeUsage) (claudeTokens, string, int64) {
-	var t claudeTokens
+func claudeTokensFrom(u *claudeUsage) (promptTokens, string, int64) {
+	var t promptTokens
 	t.input = derefInt(u.InputTokens)
 	t.output = derefInt(u.OutputTokens)
 	t.cacheRead = derefInt(u.CacheRead)
@@ -123,7 +123,7 @@ func claudeTokensFrom(u *claudeUsage) (claudeTokens, string, int64) {
 	return t, tier, web
 }
 
-func classifyCacheWrite(t *claudeTokens, u *claudeUsage) {
+func classifyCacheWrite(t *promptTokens, u *claudeUsage) {
 	if u.CacheDetail != nil {
 		t.cacheWrite5m = derefInt(u.CacheDetail.Ephemeral5m)
 		t.cacheWrite1h = derefInt(u.CacheDetail.Ephemeral1h)
@@ -133,7 +133,7 @@ func classifyCacheWrite(t *claudeTokens, u *claudeUsage) {
 	}
 }
 
-func (t claudeTokens) total() int64 {
+func (t promptTokens) total() int64 {
 	return t.input + t.output + t.cacheRead + t.cacheWrite5m + t.cacheWrite1h + t.unclassifiedCacheWrite
 }
 

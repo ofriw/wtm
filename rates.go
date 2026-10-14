@@ -136,7 +136,7 @@ func unknownMoney() money {
 
 // priceClasses sums each priced token class in a fixed order so floating-point
 // addition stays deterministic.
-func priceClasses(m *money, r tokenRates, t claudeTokens) {
+func priceClasses(m *money, r tokenRates, t promptTokens) {
 	addClass(m, r.input, t.input)
 	addClass(m, r.output, t.output)
 	addClass(m, r.cacheRead, t.cacheRead)

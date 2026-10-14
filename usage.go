@@ -205,10 +205,10 @@ func formatCost(v float64) string { return fmt.Sprintf("$%.2f", roundCost(v)) }
 // lines are never unmarshalled.
 var usageKey = []byte("\"usage\"")
 
-// claudeTokens are the four priced Claude Code token classes. The harness keeps
+// promptTokens are the four priced Claude Code token classes. The harness keeps
 // the 5-minute and 1-hour cache writes apart; unclassifiedCacheWrite is the
 // flat cache_creation count when the record omits the lifetime breakdown.
-type claudeTokens struct {
+type promptTokens struct {
 	input                  int64
 	output                 int64
 	cacheRead              int64
@@ -218,7 +218,7 @@ type claudeTokens struct {
 }
 
 // context is the request's input size, used for the long-context rate.
-func (t claudeTokens) context() int64 {
+func (t promptTokens) context() int64 {
 	return t.input + t.cacheRead + t.cacheWrite5m + t.cacheWrite1h + t.unclassifiedCacheWrite
 }
 
@@ -236,7 +236,7 @@ type usageEvent struct {
 	model     string
 	provider  string // Pi provider id; empty for Claude (never dual-mode)
 	cost      *float64
-	tokens    claudeTokens
+	tokens    promptTokens
 	tier      string
 	webSearch int64
 }

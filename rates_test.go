@@ -68,7 +68,7 @@ func TestParseCatalogSkipsUnpricedEntries(t *testing.T) {
 // The context stays below 200k so the long-context rate does not apply.
 func TestPriceTokenClasses(t *testing.T) {
 	c := testRates(t)
-	e := usageEvent{model: "m1", tier: "standard", tokens: claudeTokens{
+	e := usageEvent{model: "m1", tier: "standard", tokens: promptTokens{
 		input: 80_000, output: 100_000, cacheRead: 10_000, cacheWrite5m: 10_000, cacheWrite1h: 10_000,
 	}}
 	assertCost(t, c.price(e), 0.08+0.2+0.001+0.0125+0.02, true)
@@ -76,7 +76,7 @@ func TestPriceTokenClasses(t *testing.T) {
 
 func TestPriceBatchTier(t *testing.T) {
 	c := testRates(t)
-	e := usageEvent{model: "m1", tier: "batch", tokens: claudeTokens{
+	e := usageEvent{model: "m1", tier: "batch", tokens: promptTokens{
 		input: 80_000, output: 100_000, cacheRead: 10_000, cacheWrite5m: 10_000,
 	}}
 	// The batch 1-hour class is absent in the fixture and unused here.
@@ -85,7 +85,7 @@ func TestPriceBatchTier(t *testing.T) {
 
 func TestPriceLongContext(t *testing.T) {
 	c := testRates(t)
-	e := usageEvent{model: "m1", tier: "standard", tokens: claudeTokens{input: 250_000, output: 1_000_000}}
+	e := usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 250_000, output: 1_000_000}}
 	// Context exceeds 200k, so the above-200k rates apply.
 	assertCost(t, c.price(e), 0.5+4, true)
 }
@@ -94,9 +94,9 @@ func TestPriceLongContext(t *testing.T) {
 // uses standard rates; above it uses long-context rates.
 func TestPriceLongContextBoundary(t *testing.T) {
 	c := testRates(t)
-	atThreshold := usageEvent{model: "m1", tier: "standard", tokens: claudeTokens{input: 200_000}}
+	atThreshold := usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 200_000}}
 	assertCost(t, c.price(atThreshold), 0.2, true)
-	above := usageEvent{model: "m1", tier: "standard", tokens: claudeTokens{input: 200_001}}
+	above := usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 200_001}}
 	assertCost(t, c.price(above), 200_001*0.000002, true)
 }
 
@@ -104,7 +104,7 @@ func TestPriceLongContextBoundary(t *testing.T) {
 // 200k context bills at the above-200k 1-hour rate, not unknown.
 func TestPriceLongContextOneHourCacheWrite(t *testing.T) {
 	c := testRates(t)
-	e := usageEvent{model: "m1", tier: "standard", tokens: claudeTokens{input: 250_000, cacheWrite1h: 10_000}}
+	e := usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 250_000, cacheWrite1h: 10_000}}
 	assertCost(t, c.price(e), 250_000*0.000002+10_000*0.000003, true)
 }
 
@@ -118,11 +118,11 @@ func TestPriceWebSearch(t *testing.T) {
 func TestPriceUnknown(t *testing.T) {
 	c := testRates(t)
 	cases := map[string]usageEvent{
-		"missing model":               {model: "nope", tier: "standard", tokens: claudeTokens{input: 1}},
-		"unknown tier":                {model: "m1", tier: "priority", tokens: claudeTokens{input: 1}},
-		"cache write with no 5m rate": {model: "claude-opus-4-6", tier: "standard", tokens: claudeTokens{unclassifiedCacheWrite: 100}},
-		"non-batch rate for batches":  {model: "m1", tier: "batch", tokens: claudeTokens{cacheWrite1h: 1}},
-		"batch with long context":     {model: "m1", tier: "batch", tokens: claudeTokens{input: 250_000}},
+		"missing model":               {model: "nope", tier: "standard", tokens: promptTokens{input: 1}},
+		"unknown tier":                {model: "m1", tier: "priority", tokens: promptTokens{input: 1}},
+		"cache write with no 5m rate": {model: "claude-opus-4-6", tier: "standard", tokens: promptTokens{unclassifiedCacheWrite: 100}},
+		"non-batch rate for batches":  {model: "m1", tier: "batch", tokens: promptTokens{cacheWrite1h: 1}},
+		"batch with long context":     {model: "m1", tier: "batch", tokens: promptTokens{input: 250_000}},
 	}
 	for name, e := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -138,7 +138,7 @@ func TestPriceUnknown(t *testing.T) {
 // estimated, because a 1-hour write would cost more.
 func TestPriceUnclassifiedCacheWriteIsEstimated(t *testing.T) {
 	c := testRates(t)
-	m := c.price(usageEvent{model: "m1", tier: "standard", tokens: claudeTokens{unclassifiedCacheWrite: 100}})
+	m := c.price(usageEvent{model: "m1", tier: "standard", tokens: promptTokens{unclassifiedCacheWrite: 100}})
 	assertCost(t, m, 100*0.00000125, true)
 	if !m.isEstimated() {
 		t.Fatalf("price = %+v, want estimated", m)
@@ -164,10 +164,10 @@ func TestParseCatalogMissingVsZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertCost(t, c.price(usageEvent{model: "z", tier: "standard", tokens: claudeTokens{input: 500}}), 0, true)
+	assertCost(t, c.price(usageEvent{model: "z", tier: "standard", tokens: promptTokens{input: 500}}), 0, true)
 	// An absent output rate with nonzero output tokens is unknown.
 	c2, _ := parseCatalog(strings.NewReader(`{"z": {"input_cost_per_token": 0.001}}`))
-	if m := c2.price(usageEvent{model: "z", tier: "standard", tokens: claudeTokens{output: 5}}); m.known() {
+	if m := c2.price(usageEvent{model: "z", tier: "standard", tokens: promptTokens{output: 5}}); m.known() {
 		t.Fatalf("absent rate must be unknown, got %+v", m)
 	}
 }
@@ -313,7 +313,7 @@ func TestRatesFetchSuccessCachesAndPrices(t *testing.T) {
 	if err != nil || string(raw) != testCatalog {
 		t.Fatalf("cache = %q, err = %v, want the fetched body", raw, err)
 	}
-	assertCost(t, c.price(usageEvent{model: "m1", tier: "standard", tokens: claudeTokens{input: 1000}}), 0.001, true)
+	assertCost(t, c.price(usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 1000}}), 0.001, true)
 }
 
 // TestRatesFetchErrorFallsBackToStale pins the outage path: an HTTP 500 with a
@@ -367,6 +367,6 @@ func TestModelCandidatesRejectsVersionFragments(t *testing.T) {
 // 200k context at their standard rates, not unknown.
 func TestPriceLongContextPartialAboveFallsBack(t *testing.T) {
 	c := catalog{"mx": {standard: tokenRates{input: fptr(0.000001)}, above: tokenRates{cacheWrite1h: fptr(0.000003)}, hasAbove: true}}
-	e := usageEvent{model: "mx", tier: "standard", tokens: claudeTokens{input: 250_000, cacheWrite1h: 10_000}}
+	e := usageEvent{model: "mx", tier: "standard", tokens: promptTokens{input: 250_000, cacheWrite1h: 10_000}}
 	assertCost(t, c.price(e), 250_000*0.000001+10_000*0.000003, true)
 }

@@ -87,7 +87,7 @@ func TestClaudeUsageDedupePrefersLargest(t *testing.T) {
 // holds it.
 func TestClaudeUsageDedupeAcrossSessions(t *testing.T) {
 	event := func(id string, output int64) usageEvent {
-		return usageEvent{at: at(0), key: id + ":r1", model: "m", tokens: claudeTokens{output: output}}
+		return usageEvent{at: at(0), key: id + ":r1", model: "m", tokens: promptTokens{output: output}}
 	}
 	sessions := [][]usageEvent{
 		{event("m1", 100), event("m2", 10)},
@@ -111,7 +111,7 @@ func TestClaudeUsageDedupeAcrossSessions(t *testing.T) {
 // price is real money.
 func TestClaudeDedupeWebSearchBreaksTokenTie(t *testing.T) {
 	mk := func(web int64) usageEvent {
-		return usageEvent{at: at(0), key: "m1:r1", model: "m", tokens: claudeTokens{output: 10}, webSearch: web}
+		return usageEvent{at: at(0), key: "m1:r1", model: "m", tokens: promptTokens{output: 10}, webSearch: web}
 	}
 	sessions := [][]usageEvent{{mk(1)}, {mk(3)}}
 	billed := dedupeKeyedEvents(sessions)
