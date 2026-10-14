@@ -330,6 +330,21 @@ func TestWorktreeCostUnknownAcrossHarnesses(t *testing.T) {
 	}
 }
 
+// TestEstimatedZeroRendersTildeZero pins the overage grammar: a subscription
+// $0 inside the allowance reads "~$0.00" and stays estimated.
+func TestEstimatedZeroRendersTildeZero(t *testing.T) {
+	m := estimatedZero()
+	if got := m.cell(); got != "~$0.00" {
+		t.Fatalf("cell = %q, want ~$0.00", got)
+	}
+	if !m.isEstimated() {
+		t.Fatalf("estimatedZero lost its flag: %+v", m)
+	}
+	if m.jsonValue() == nil {
+		t.Fatal("estimated zero must serialize as a number")
+	}
+}
+
 // TestFoldEventUnbilledKeepsSpanNotCost pins the mask guard: a non-billed event
 // still extends the run, while both cost sides stay absent and unknown-free.
 func TestFoldEventUnbilledKeepsSpanNotCost(t *testing.T) {
@@ -409,3 +424,35 @@ func TestDedupeEqualScoresElectFirst(t *testing.T) {
 	}
 }
 
+// TestCostPairReasons pins the legend selectivity: each estimate kind reports
+// only its own reason, both merge, and an exact total reports neither.
+func TestCostPairReasons(t *testing.T) {
+	var estM money
+	estM.addEstimated(1)
+	knownM := func(v float64) money { var m money; m.addKnown(v); return m }
+	cacheOnly := costPair{list: estM, billed: estM}
+	if !cacheOnly.needsCacheLegend() || cacheOnly.needsOverageLegend() {
+		t.Errorf("cache-only reasons = %+v, want cache only", cacheOnly.reasons())
+	}
+	overageOnly := costPair{list: knownM(1), billed: estimatedZero(), subscription: true}
+	if overageOnly.needsCacheLegend() || !overageOnly.needsOverageLegend() {
+		t.Errorf("overage-only reasons = %+v, want overage only", overageOnly.reasons())
+	}
+	both := costPair{list: estM, billed: estimatedZero(), subscription: true}
+	if r := both.reasons(); !r.cache || !r.overage {
+		t.Errorf("both reasons = %+v, want cache+overage", r)
+	}
+	// A subscription hides a list whose amount equals the billed one, so its
+	// estimate must not ask for a cache line the cell cannot show.
+	hidden := costPair{list: estM, billed: knownM(1), subscription: true}
+	if hidden.showsList() || hidden.needsCacheLegend() {
+		t.Errorf("hidden-list reasons = %+v, want no cache line", hidden.reasons())
+	}
+	exact := costPair{list: knownM(1), billed: knownM(0), subscription: true}
+	if r := exact.reasons(); r.any() {
+		t.Errorf("exact reasons = %+v, want none", r)
+	}
+	if got := (estimateReasons{cache: true}.merge(estimateReasons{overage: true})); !got.cache || !got.overage {
+		t.Errorf("merge = %+v, want both", got)
+	}
+}

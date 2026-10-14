@@ -114,15 +114,29 @@ func TestStatusJSONEstimatedFlag(t *testing.T) {
 	}
 }
 
-// TestStatusEstimateLegend pins the one explanation: the legend states the SSOT
-// reason and stays silent when every displayed price is exact. The assert
-// references the constant, so prose edits move both sides together.
+// TestStatusEstimateLegend pins the reason-aware legend: each set reason prints
+// its SSOT line, an unset reason stays silent, and no reason prints nothing.
+// The asserts reference the constants, so prose edits move both sides together.
 func TestStatusEstimateLegend(t *testing.T) {
-	out := captureStdout(t, func() { printEstimateLegend(true) })
-	if !strings.Contains(out, "~ estimated: "+estimateCacheWriteLifetime) {
-		t.Fatalf("legend missing its mark or its reason:\n%s", out)
+	cacheOnly := captureStdout(t, func() { printEstimateLegend(estimateReasons{cache: true}) })
+	if !strings.Contains(cacheOnly, "~ estimated: "+estimateCacheWriteLifetime) {
+		t.Fatalf("cache-only legend missing its line:\n%s", cacheOnly)
 	}
-	if got := captureStdout(t, func() { printEstimateLegend(false) }); got != "" {
+	if strings.Contains(cacheOnly, estimateSubscriptionOverage) {
+		t.Fatalf("cache-only legend must not explain overage:\n%s", cacheOnly)
+	}
+	overageOnly := captureStdout(t, func() { printEstimateLegend(estimateReasons{overage: true}) })
+	if !strings.Contains(overageOnly, "~ estimated: "+estimateSubscriptionOverage) {
+		t.Fatalf("overage-only legend missing its line:\n%s", overageOnly)
+	}
+	if strings.Contains(overageOnly, estimateCacheWriteLifetime) {
+		t.Fatalf("overage-only legend must not explain the cache split:\n%s", overageOnly)
+	}
+	both := captureStdout(t, func() { printEstimateLegend(estimateReasons{cache: true, overage: true}) })
+	if strings.Count(both, "~ estimated: ") != 2 {
+		t.Fatalf("both-reasons legend must print 2 lines, got:\n%s", both)
+	}
+	if got := captureStdout(t, func() { printEstimateLegend(estimateReasons{}) }); got != "" {
 		t.Fatalf("no-estimate legend must be empty, got:\n%q", got)
 	}
 }
@@ -134,13 +148,76 @@ func TestStatusEstimateLegend(t *testing.T) {
 func TestEstimateLegendNeededFollowsRenderedCells(t *testing.T) {
 	with := worktree{Path: "/with", Usage: estimatedUsage()}
 	cols := statusColumnsFor(false)
-	if !estimateLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour) {
+	if r := estimateLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour); !r.any() {
 		t.Fatal("an estimated table total must ask for the legend")
 	}
 	t.Setenv("COLUMNS", "5")
-	if estimateLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour) {
+	if r := estimateLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour); r.any() {
 		t.Fatal("a dropped COST column must not ask for the legend")
 	}
+}
+
+// TestEstimateLegendSelectivity pins the reason-aware legend: a cache-only
+// total prints one line, an overage-only total prints the other, both print
+// two, and an exact total prints none.
+func TestEstimateLegendSelectivity(t *testing.T) {
+	cacheEst := func() money { var m money; m.addEstimated(1); return m }()
+	overageEst := func() costPair {
+		var p costPair
+		p.list.addKnown(1)
+		p.billed = estimatedZero()
+		p.subscription = true
+		return p
+	}()
+	pairUsage := func(p costPair) *worktreeUsage {
+		u := &worktreeUsage{harnesses: map[string]*harnessUsage{
+			"pi": {cost: p, models: map[string]*modelUsage{"m": {cost: p}}},
+		}}
+		return u
+	}
+	cols := statusColumnsFor(false)
+	cases := []struct {
+		name      string
+		pair      costPair
+		wantCache bool
+		wantOver  bool
+	}{
+		{"cache-only", costPair{list: cacheEst, billed: cacheEst}, true, false},
+		{"overage-only", overageEst, false, true},
+		{"exact", costPair{list: func() money { var m money; m.addKnown(1); return m }(), billed: func() money { var m money; m.addKnown(0); return m }(), subscription: true}, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := worktree{Path: "/with", Usage: pairUsage(tc.pair)}
+			r := estimateLegendNeeded(cols, []worktree{w}, "/elsewhere", at(0), 10*time.Hour)
+			if r.cache != tc.wantCache || r.overage != tc.wantOver {
+				t.Fatalf("reasons = %+v, want cache=%v overage=%v", r, tc.wantCache, tc.wantOver)
+			}
+			out := captureStdout(t, func() { printEstimateLegend(r) })
+			wantLines := 0
+			if tc.wantCache {
+				wantLines++
+			}
+			if tc.wantOver {
+				wantLines++
+			}
+			if got := strings.Count(out, "~ estimated: "); got != wantLines {
+				t.Fatalf("legend lines = %d, want %d:\n%s", got, wantLines, out)
+			}
+		})
+	}
+	t.Run("both", func(t *testing.T) {
+		both := overageEst
+		both.list = cacheEst
+		w := worktree{Path: "/with", Usage: pairUsage(both)}
+		r := estimateLegendNeeded(cols, []worktree{w}, "/elsewhere", at(0), 10*time.Hour)
+		if !r.cache || !r.overage {
+			t.Fatalf("reasons = %+v, want both", r)
+		}
+		if out := captureStdout(t, func() { printEstimateLegend(r) }); strings.Count(out, "~ estimated: ") != 2 {
+			t.Fatalf("both-reasons legend must print 2 lines:\n%s", out)
+		}
+	})
 }
 
 func TestListCostJSONOmitsProvenUnknown(t *testing.T) {

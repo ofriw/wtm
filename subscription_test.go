@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,16 +49,31 @@ func writeAuthJSON(t *testing.T, body string) {
 	writeFile(t, filepath.Join(piAgent.configDir(), "auth.json"), body, 0o600)
 }
 
-// writeClaudeAccount seeds ~/.claude.json, which stays at the HOME root even
-// when CLAUDE_CONFIG_DIR relocates the settings directory.
+// claudeAccountBody renders one oauthAccount record. extraUsage is the raw
+// hasExtraUsageEnabled JSON literal; an empty value omits the field, which
+// states that extra usage may be billed.
+func claudeAccountBody(billingType, since, extraUsage string) string {
+	extra := ""
+	if extraUsage != "" {
+		extra = fmt.Sprintf(`,"hasExtraUsageEnabled":%s`, extraUsage)
+	}
+	return fmt.Sprintf(`{"oauthAccount":{"billingType":%q,"subscriptionCreatedAt":%q%s}}`, billingType, since, extra)
+}
+
+// writeClaudeAccount seeds the account file Claude Code actually reads under the
+// sandbox: the selected config dir's .claude.json, with extra usage disabled so
+// the covered cost is exact.
 func writeClaudeAccount(t *testing.T, billingType, since string) {
 	t.Helper()
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, filepath.Join(home, ".claude.json"),
-		fmt.Sprintf(`{"oauthAccount":{"billingType":%q,"subscriptionCreatedAt":%q}}`, billingType, since), 0o600)
+	writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"),
+		claudeAccountBody(billingType, since, "false"))
+}
+
+// writeClaudeAccountAt seeds an arbitrary account file, so a test can place a
+// legacy HOME file, a .config.json primary, or a custom-oauth file.
+func writeClaudeAccountAt(t *testing.T, path, body string) {
+	t.Helper()
+	writeFile(t, path, body, 0o600)
 }
 
 // claudeWorktreeDir seeds one Claude session in a fresh dir and returns the dir
@@ -308,6 +322,111 @@ func TestSubscriptionClaudeCovered(t *testing.T) {
 	}
 }
 
+// TestSubscriptionClaudeAccountFollowsSelectedFile pins the resolver: the file
+// under the selected config dir decides the proof, so a stale HOME file can
+// neither grant nor steal it.
+func TestSubscriptionClaudeAccountFollowsSelectedFile(t *testing.T) {
+	cases := map[string]struct {
+		homeBody     string
+		selectedBody string
+		want         string
+	}{
+		"selected subscription wins": {
+			homeBody:     claudeAccountBody("invoice", "2020-01-01T00:00:00Z", ""),
+			selectedBody: claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "false"),
+			want:         "$0.00/$0.10",
+		},
+		"selected metered loses": {
+			homeBody:     claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "false"),
+			selectedBody: claudeAccountBody("invoice", "2020-01-01T00:00:00Z", ""),
+			want:         "$0.10",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := sandbox(t)
+			writeClaudeAccountAt(t, filepath.Join(env.Home, ".claude.json"), tc.homeBody)
+			writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"), tc.selectedBody)
+			u := claudeUsageWorktree(t)
+			if got := u.cost().cell(); got != tc.want {
+				t.Fatalf("cost = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSubscriptionClaudeConfigJSONPrimary pins the primary path: a .config.json
+// in the config dir wins over .claude.json beside it, whatever the suffix.
+func TestSubscriptionClaudeConfigJSONPrimary(t *testing.T) {
+	sandbox(t)
+	dir := claudeAgent.configDir()
+	writeClaudeAccountAt(t, filepath.Join(dir, ".config.json"),
+		claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "false"))
+	writeClaudeAccountAt(t, filepath.Join(dir, ".claude.json"),
+		claudeAccountBody("invoice", "2020-01-01T00:00:00Z", ""))
+	u := claudeUsageWorktree(t)
+	if got := u.cost().cell(); got != "$0.00/$0.10" {
+		t.Fatalf("cost = %q, want $0.00/$0.10 (the primary .config.json wins)", got)
+	}
+}
+
+// TestSubscriptionClaudeCustomOAuthFile pins the custom-oauth suffix: when
+// CLAUDE_CODE_CUSTOM_OAUTH_URL is set, the resolver reads
+// .claude-custom-oauth.json instead of .claude.json.
+func TestSubscriptionClaudeCustomOAuthFile(t *testing.T) {
+	sandbox(t)
+	t.Setenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", "https://oauth.example")
+	dir := claudeAgent.configDir()
+	writeClaudeAccountAt(t, filepath.Join(dir, ".claude-custom-oauth.json"),
+		claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "false"))
+	writeClaudeAccountAt(t, filepath.Join(dir, ".claude.json"),
+		claudeAccountBody("invoice", "2020-01-01T00:00:00Z", ""))
+	u := claudeUsageWorktree(t)
+	if got := u.cost().cell(); got != "$0.00/$0.10" {
+		t.Fatalf("cost = %q, want the custom-oauth file's proof", got)
+	}
+}
+
+// TestSubscriptionClaudeOveragePossibleIsEstimated pins the tri-state: a proven
+// subscription that still allows extra usage bills $0 inside the allowance but
+// may charge list price over it, so the billed zero is an estimate and the list
+// price is shown beside it.
+func TestSubscriptionClaudeOveragePossibleIsEstimated(t *testing.T) {
+	for _, tc := range []struct{ name, extra string }{{"enabled", "true"}, {"absent", ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox(t)
+			writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"),
+				claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", tc.extra))
+			u := claudeUsageWorktree(t)
+			if got := u.cost().cell(); got != "~$0.00/$0.10" {
+				t.Fatalf("cost = %q, want ~$0.00/$0.10", got)
+			}
+			j := worktreeJSON(t, &u)
+			if j["cost"] != 0.0 {
+				t.Errorf("json cost = %v, want 0", j["cost"])
+			}
+			if j["costEstimated"] != true {
+				t.Errorf("json costEstimated = %v, want true", j["costEstimated"])
+			}
+		})
+	}
+}
+
+// TestSubscriptionClaudeAllowanceOnlyIsExact pins the exact side: the account
+// explicitly disables extra usage, so the $0 marginal cost is known, not
+// estimated, and the estimated flag stays absent.
+func TestSubscriptionClaudeAllowanceOnlyIsExact(t *testing.T) {
+	sandbox(t)
+	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+	u := claudeUsageWorktree(t)
+	if got := u.cost().cell(); got != "$0.00/$0.10" {
+		t.Fatalf("cost = %q, want $0.00/$0.10", got)
+	}
+	if _, ok := worktreeJSON(t, &u)["costEstimated"]; ok {
+		t.Error("an exact allowance-only cost must omit costEstimated")
+	}
+}
+
 // TestSubscriptionClaudeUnprovenStaysList pins every way the Claude proof fails:
 // a metered override, a different billing type, and an event before the
 // subscription was created.
@@ -409,26 +528,39 @@ func TestSubscriptionClaudeCleanProjectStaysCovered(t *testing.T) {
 	}
 }
 
-// TestSubscriptionClaudeParentOverrideStaysList pins the ancestor rule: Claude
-// Code merges .claude/settings*.json up to the filesystem root, so a helper
-// above the worktree bills outside the subscription even when the repo is clean.
-func TestSubscriptionClaudeParentOverrideStaysList(t *testing.T) {
+// TestSubscriptionClaudeParentSettingsIgnored pins the scope: a metered helper
+// in an ancestor directory voids the proof, so the turn stays at list price;
+// WTM_CLAUDE_PARENT_SCOPE=0 disables the ancestor walk and keeps it covered.
+func TestSubscriptionClaudeParentSettingsIgnored(t *testing.T) {
 	for _, file := range []string{claudeSettingsFile, claudeLocalSettingsFile} {
 		t.Run(file, func(t *testing.T) {
-			sandbox(t)
-			t.Setenv("WTM_MANAGED_SETTINGS", "")
-			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
-			parent := t.TempDir()
-			writeFile(t, filepath.Join(parent, file), `{"apiKeyHelper":"/bin/fetch"}`, 0o600)
-			dir := filepath.Join(parent, "child")
-			idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{"input_tokens":100000}`))
-			u := buildClaudeUsage(t, dir, idx)
-			if got := u.cost().cell(); got != "$0.10" {
-				t.Fatalf("cost = %q, want the list price $0.10", got)
+			seed := func(t *testing.T) (string, sessionIndex) {
+				t.Helper()
+				sandbox(t)
+				writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+				parent := t.TempDir()
+				writeFile(t, filepath.Join(parent, file), `{"apiKeyHelper":"/bin/fetch"}`, 0o600)
+				dir := filepath.Join(parent, "child")
+				return dir, usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{"input_tokens":100000}`))
 			}
-			if _, ok := worktreeJSON(t, &u)["listCost"]; ok {
-				t.Error("an ancestor override must omit listCost")
-			}
+			t.Run("parent voids", func(t *testing.T) {
+				dir, idx := seed(t)
+				u := buildClaudeUsage(t, dir, idx)
+				if got := u.cost().cell(); got != "$0.10" {
+					t.Fatalf("cost = %q, want $0.10 (ancestor settings void the proof)", got)
+				}
+				if _, ok := worktreeJSON(t, &u)["listCost"]; ok {
+					t.Error("unproven output must omit listCost")
+				}
+			})
+			t.Run("scope disabled", func(t *testing.T) {
+				dir, idx := seed(t)
+				t.Setenv("WTM_CLAUDE_PARENT_SCOPE", "0")
+				u := buildClaudeUsage(t, dir, idx)
+				if got := u.cost().cell(); got != "$0.00/$0.10" {
+					t.Fatalf("cost = %q, want $0.00/$0.10 (disabled ancestor walk)", got)
+				}
+			})
 		})
 	}
 }
@@ -459,39 +591,22 @@ func TestSubscriptionClaudeManagedOverrideStaysList(t *testing.T) {
 	}
 }
 
-// TestSubscriptionClaudeCleanParentAndMissingManagedStaysCovered pins the
-// other side: an unrelated ancestor setting and no managed file keep proof.
-func TestSubscriptionClaudeCleanParentAndMissingManagedStaysCovered(t *testing.T) {
+// TestSubscriptionClaudeWorktreeSettingsIsolation pins the per-worktree scope:
+// one loaded proof covers a clean worktree and drops only the worktree carrying
+// its own metered settings, with no leak either way.
+func TestSubscriptionClaudeWorktreeSettingsIsolation(t *testing.T) {
 	sandbox(t)
-	t.Setenv("WTM_MANAGED_SETTINGS", "")
-	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
-	parent := t.TempDir()
-	writeFile(t, filepath.Join(parent, claudeSettingsFile), `{"env":{"WTM_UNRELATED":"1"}}`, 0o600)
-	dir := filepath.Join(parent, "child")
-	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{"input_tokens":100000}`))
-	u := buildClaudeUsage(t, dir, idx)
-	if got := u.cost().cell(); got != "$0.00/$0.10" {
-		t.Fatalf("cost = %q, want $0.00/$0.10", got)
-	}
-}
-
-// TestSubscriptionClaudeAncestorIsolation pins the scope: one loaded proof
-// scoped to two sibling worktrees covers the clean one and drops the one
-// under a metered ancestor, with no leak either way.
-func TestSubscriptionClaudeAncestorIsolation(t *testing.T) {
-	sandbox(t)
-	t.Setenv("WTM_MANAGED_SETTINGS", "")
 	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
 	base := t.TempDir()
-	dirtyParent := filepath.Join(base, "dirty")
-	writeFile(t, filepath.Join(dirtyParent, claudeSettingsFile), `{"apiKeyHelper":"/bin/fetch"}`, 0o600)
+	dirty := filepath.Join(base, "dirty")
+	writeFile(t, filepath.Join(dirty, claudeSettingsFile), `{"apiKeyHelper":"/bin/fetch"}`, 0o600)
 	subs := loadSubscriptions()
 	if !subs.claude {
 		t.Fatal("the account proof must load before scoping")
 	}
 	for dir, want := range map[string]string{
-		filepath.Join(base, "clean"):        "$0.00/$0.10",
-		filepath.Join(dirtyParent, "child"): "$0.10",
+		filepath.Join(base, "clean"): "$0.00/$0.10",
+		dirty:                        "$0.10",
 	} {
 		idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{"input_tokens":100000}`))
 		u, err := buildUsage(dir, idx, testRates(t), subs)
@@ -640,5 +755,189 @@ func TestSubscriptionUnprovenOutputUnchanged(t *testing.T) {
 	model := harness["models"].(map[string]any)["m"].(map[string]any)
 	if _, ok := model["listCost"]; ok {
 		t.Error("unproven output must omit listCost at the model level")
+	}
+}
+
+// TestSubscriptionClaudeLegacyMissingFieldIsOveragePossible pins 2D: a legacy
+// account file without hasExtraUsageEnabled may still bill overage, so the
+// covered $0 is an estimate. A future upgrade that writes the field as false
+// flips this to an exact $0.
+func TestSubscriptionClaudeLegacyMissingFieldIsOveragePossible(t *testing.T) {
+	sandbox(t)
+	writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"),
+		`{"oauthAccount":{"billingType":"stripe_subscription","subscriptionCreatedAt":"2020-01-01T00:00:00Z"}}`)
+	u := claudeUsageWorktree(t)
+	if got := u.cost().cell(); got != "~$0.00/$0.10" {
+		t.Fatalf("cost = %q, want ~$0.00/$0.10 (absent field means overage possible)", got)
+	}
+	if _, ok := worktreeJSON(t, &u)["costEstimated"]; !ok {
+		t.Error("a legacy overage-possible cost must set costEstimated")
+	}
+}
+
+// TestSubscriptionClaudeZeroTokenStaysExact pins 2C: a zero-token turn under an
+// overage-possible proof costs exactly $0 — there is nothing to push into
+// overage, so the estimate flag must stay absent.
+func TestSubscriptionClaudeZeroTokenStaysExact(t *testing.T) {
+	sandbox(t)
+	writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"),
+		claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "true"))
+	dir := t.TempDir()
+	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{}`))
+	u, err := buildUsage(dir, idx, testRates(t), loadSubscriptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.cost().cell(); got != "$0.00" {
+		t.Fatalf("cost = %q, want $0.00 (a zero-token turn is exact)", got)
+	}
+	if _, ok := worktreeJSON(t, &u)["costEstimated"]; ok {
+		t.Error("a zero-token turn must omit costEstimated")
+	}
+}
+
+// TestClaudeAccountFileMatrix pins 1B: the resolver precedence across HOME,
+// the selected config dir, the .config.json primary, the custom-oauth suffix,
+// and a missing file. It drives the real files and the real parser, so a HOME
+// regression fails here instead of hiding.
+func TestClaudeAccountFileMatrix(t *testing.T) {
+	sub := claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "false")
+	metered := claudeAccountBody("invoice", "2020-01-01T00:00:00Z", "")
+	cases := map[string]struct {
+		setup func(t *testing.T, env sandboxEnv)
+		oauth bool
+		want  string
+	}{
+		"selected config dir wins over HOME": {func(t *testing.T, env sandboxEnv) {
+			writeClaudeAccountAt(t, filepath.Join(env.Home, ".claude.json"), sub)
+			writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"), metered)
+		}, false, "$0.10"},
+		"HOME subscription loses to selected metered": {func(t *testing.T, env sandboxEnv) {
+			writeClaudeAccountAt(t, filepath.Join(env.Home, ".claude.json"), metered)
+			writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"), sub)
+		}, false, "$0.00/$0.10"},
+		"HOME file decides when config dir unset": {func(t *testing.T, env sandboxEnv) {
+			t.Setenv("CLAUDE_CONFIG_DIR", "")
+			writeClaudeAccountAt(t, filepath.Join(env.Home, ".claude.json"), sub)
+		}, false, "$0.00/$0.10"},
+		"config.json primary wins over selected claude file": {func(t *testing.T, env sandboxEnv) {
+			writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".config.json"), sub)
+			writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"), metered)
+		}, false, "$0.00/$0.10"},
+		"custom-oauth suffix wins when endpoint set": {func(t *testing.T, env sandboxEnv) {
+			writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude-custom-oauth.json"), sub)
+			writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"), metered)
+		}, true, "$0.00/$0.10"},
+		"plain file ignored when endpoint set": {func(t *testing.T, env sandboxEnv) {
+			writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"), sub)
+		}, true, "$0.10"},
+		"missing file stays list": {func(t *testing.T, env sandboxEnv) {}, false, "$0.10"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := sandbox(t)
+			if tc.oauth {
+				t.Setenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", "https://oauth.example")
+			}
+			tc.setup(t, env)
+			u := claudeUsageWorktree(t)
+			if got := u.cost().cell(); got != tc.want {
+				t.Fatalf("cost = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSubscriptionOverageUnknownListShape pins 3B: a proven overage-possible
+// turn with no catalog bills ~$0.00 against an unknown list, and the JSON keeps
+// the number, the estimate flag, and an explicit null listCost.
+func TestSubscriptionOverageUnknownListShape(t *testing.T) {
+	sandbox(t)
+	writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"),
+		claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "true"))
+	dir := t.TempDir()
+	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{"input_tokens":100000}`))
+	u, err := buildUsage(dir, idx, nil, loadSubscriptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.cost().cell(); got != "~$0.00/unknown" {
+		t.Fatalf("cost = %q, want ~$0.00/unknown", got)
+	}
+	j := worktreeJSON(t, &u)
+	if j["cost"] != 0.0 {
+		t.Errorf("json cost = %v, want 0", j["cost"])
+	}
+	if j["costEstimated"] != true {
+		t.Errorf("json costEstimated = %v, want true", j["costEstimated"])
+	}
+	lc, present := j["listCost"]
+	if !present {
+		t.Fatal("a proven subscription with an unknown list must keep listCost (null)")
+	}
+	if lc != nil {
+		t.Errorf("json listCost = %v, want null", lc)
+	}
+	if _, ok := j["listCostEstimated"]; ok {
+		t.Error("an unknown list must omit listCostEstimated")
+	}
+}
+
+// parentScopeSeed seeds a clean child worktree under a metered parent, so the
+// ancestor walk is the only thing voiding the proof.
+func parentScopeSeed(t *testing.T) (string, sessionIndex) {
+	t.Helper()
+	sandbox(t)
+	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+	parent := t.TempDir()
+	writeFile(t, filepath.Join(parent, claudeSettingsFile), `{"apiKeyHelper":"/bin/fetch"}`, 0o600)
+	dir := filepath.Join(parent, "child")
+	return dir, usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{"input_tokens":100000}`))
+}
+
+// TestParentScopeKillSwitchWarnsOnceAndSkipsCache pins 3A: disabling the
+// ancestor walk warns once per run, stays fail-open, and never caches the
+// verdict (a cached verdict would go stale across env changes).
+func TestParentScopeKillSwitchWarnsOnceAndSkipsCache(t *testing.T) {
+	dir, _ := parentScopeSeed(t)
+	t.Setenv("WTM_CLAUDE_PARENT_SCOPE", "0")
+	parentScopeWarned = false
+	defer func() { parentScopeWarned = false }()
+	subs := loadSubscriptions()
+	var first, second subscriptions
+	errOut := captureStderr(t, func() {
+		first = subs.forWorktree(dir)
+		second = subs.forWorktree(dir)
+	})
+	if !first.claude || !second.claude {
+		t.Fatalf("claude = %v/%v, want fail-open true/true", first.claude, second.claude)
+	}
+	if got := strings.Count(errOut, "WTM_CLAUDE_PARENT_SCOPE=0"); got != 1 {
+		t.Fatalf("warnings = %d, want exactly 1:\n%s", got, errOut)
+	}
+	if _, ok := subs.wtVerdicts[dir]; ok {
+		t.Error("the kill-switch verdict must skip the cache")
+	}
+}
+
+// TestParentScopeCacheSkippedWhenDisabled pins the no-stale-cache direction: a
+// verdict cached while the walk ran must not void the proof once the operator
+// disables the walk.
+func TestParentScopeCacheSkippedWhenDisabled(t *testing.T) {
+	dir, _ := parentScopeSeed(t)
+	parentScopeWarned = true
+	defer func() { parentScopeWarned = false }()
+	subs := loadSubscriptions()
+	if got := subs.forWorktree(dir); got.claude {
+		t.Fatal("enabled walk must void the proof under a metered parent")
+	}
+	t.Setenv("WTM_CLAUDE_PARENT_SCOPE", "0")
+	var disabled subscriptions
+	captureStderr(t, func() {
+		// Reuse the stale cache: the disabled walk must recompute, not trust it.
+		disabled = subs.forWorktree(dir)
+	})
+	if !disabled.claude {
+		t.Fatal("a cached void verdict must not survive disabling the walk")
 	}
 }

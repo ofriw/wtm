@@ -544,16 +544,26 @@ func readUsage(a agent, path string) ([]usageEvent, error) {
 
 // usagePricer resolves one event to its price pair. The list side is the
 // pay-as-you-go price today's code reports; a proven subscription replaces the
-// billed side with the $0 marginal cost while the list side stays visible.
-// The billed zero is the subscription's marginal cost only: overage, API-key
-// and otherwise metered usage still bills, so a proven $0 never claims the
-// whole invoice.
+// billed side with the $0 marginal cost while the list side stays visible. A
+// Claude proof that still permits overage yields an estimated zero only when
+// the event priced something (a known nonzero list, real tokens, or a
+// self-priced cost); a zero-token event keeps the exact zero, so an empty turn
+// never reads estimated. API-key and otherwise metered usage still bills, so a
+// proven $0 never claims the whole invoice.
 func usagePricer(a agent, cat catalog, subs subscriptions) func(usageEvent) costPair {
 	return func(e usageEvent) costPair {
 		list := listPrice(a, cat, e)
 		p := costPair{list: list, billed: list}
-		if subs.proven(a.name, e.provider, e.at) {
+		switch subs.coverage(a.name, e.provider, e.at) {
+		case coverageAllowance:
 			p.billed = knownZero()
+			p.subscription = true
+		case coverageOveragePossible:
+			if (list.known() && list.amount != 0) || e.tokens.total() > 0 || e.cost != nil {
+				p.billed = estimatedZero()
+			} else {
+				p.billed = knownZero()
+			}
 			p.subscription = true
 		}
 		return p

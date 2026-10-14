@@ -35,11 +35,14 @@ const piAlwaysSubscription = "kimi-coding"
 type subscriptions struct {
 	piOAuth map[string]bool // provider whose auth.json type is "oauth"
 	claude  bool            // stripe_subscription with no metered override
-	managed bool            // cached managed-settings metered verdict (machine-global)
-	since   time.Time       // subscription start; zero when unknown
-	// wtVerdicts caches the per-worktree Claude verdict, so the ancestor and
-	// settings walk runs once per worktree per run. The map is shared by every
-	// forWorktree copy; a nil map skips the cache (zero-value proof in tests).
+	// claudeAllowanceOnly proves the account has no extra-usage billing, so a
+	// completed request costs exactly $0 instead of a possible overage charge.
+	claudeAllowanceOnly bool
+	managed             bool      // cached managed-settings metered verdict (machine-global)
+	since               time.Time // subscription start; zero when unknown
+	// wtVerdicts caches the per-worktree Claude verdict, so the settings walk
+	// runs once per worktree per run. The map is shared by every forWorktree
+	// copy; a nil map skips the cache (zero-value proof in tests).
 	wtVerdicts map[string]bool
 }
 
@@ -50,7 +53,7 @@ func loadSubscriptions() subscriptions {
 	if dir := piAgent.configDir(); dir != "" {
 		s.piOAuth = readPiOAuth(filepath.Join(dir, "auth.json"))
 	}
-	s.claude, s.since = readClaudeSubscription()
+	s.claude, s.since, s.claudeAllowanceOnly = readClaudeSubscription()
 	s.managed = s.claude && managedMetered()
 	return s
 }
@@ -75,32 +78,64 @@ func readPiOAuth(path string) map[string]bool {
 	return oauth
 }
 
+// claudeAccountFile resolves Claude Code's global account file the way the
+// binary does. A suffix-independent .config.json under the config dir wins;
+// otherwise the file is .claude<suffix>.json beside CLAUDE_CONFIG_DIR or HOME.
+// The suffix is "-custom-oauth" when a custom OAuth endpoint is configured.
+// It returns false when neither HOME nor the config dir is resolvable.
+func claudeAccountFile() (string, bool) {
+	configDir := claudeAgent.configDir()
+	if configDir != "" {
+		if primary := filepath.Join(configDir, ".config.json"); exists(primary) {
+			return primary, true
+		}
+	}
+	suffix := ""
+	if os.Getenv("CLAUDE_CODE_CUSTOM_OAUTH_URL") != "" {
+		suffix = "-custom-oauth"
+	}
+	base := os.Getenv("CLAUDE_CONFIG_DIR")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", false
+		}
+		base = home
+	}
+	return filepath.Join(base, ".claude"+suffix+".json"), true
+}
+
 // readClaudeSubscription proves the Claude Code subscription: the account must
 // bill by stripe_subscription and no metered override may be configured, since
 // an API key, Bedrock or Vertex bills every request outside the subscription.
-func readClaudeSubscription() (bool, time.Time) {
+// The third result is true only when the account explicitly disables extra
+// usage, which pins a completed request's marginal cost at exactly $0.
+func readClaudeSubscription() (bool, time.Time, bool) {
 	if claudeMeteredOverride() {
-		return false, time.Time{}
+		return false, time.Time{}, false
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false, time.Time{}
+	path, ok := claudeAccountFile()
+	if !ok {
+		return false, time.Time{}, false
 	}
-	// ~/.claude.json is HOME-rooted: CLAUDE_CONFIG_DIR relocates ~/.claude but
-	// leaves this file in place, so configDir() would read the wrong path.
 	var acct struct {
 		OAuthAccount *struct {
 			BillingType           string `json:"billingType"`
 			SubscriptionCreatedAt string `json:"subscriptionCreatedAt"`
+			HasExtraUsageEnabled  *bool  `json:"hasExtraUsageEnabled"`
 		} `json:"oauthAccount"`
 	}
-	if readJSON(filepath.Join(home, ".claude.json"), &acct) != nil || acct.OAuthAccount == nil {
-		return false, time.Time{}
+	if readJSON(path, &acct) != nil || acct.OAuthAccount == nil {
+		return false, time.Time{}, false
 	}
 	if acct.OAuthAccount.BillingType != "stripe_subscription" {
-		return false, time.Time{}
+		return false, time.Time{}, false
 	}
-	return true, parseSubscriptionSince(acct.OAuthAccount.SubscriptionCreatedAt)
+	allowanceOnly := acct.OAuthAccount.HasExtraUsageEnabled != nil && !*acct.OAuthAccount.HasExtraUsageEnabled
+	// An absent field means overage is possible, not disabled: a legacy account
+	// file (or a future upgrade that writes the field) flips a covered $0 to
+	// ~$0.00, which the overage-possible test pins.
+	return true, parseSubscriptionSince(acct.OAuthAccount.SubscriptionCreatedAt), allowanceOnly
 }
 
 // claudeMeteredKeys are the environment keys that bill Claude Code outside the
@@ -148,19 +183,24 @@ func claudeUserMetered() bool {
 // claudeProjectMetered reports a worktree settings file that bills outside the
 // subscription: Claude Code reads the repo's own .claude/settings*.json, so a
 // repo can run an apiKeyHelper or export a metered key without touching the user
-// account. Parent directories and the enterprise managed-settings.json are
-// separate checks (claudeParentsMetered, managedMetered): one is per-worktree,
-// the other is machine-global and cached on subscriptions.
+// account. Parent directories are a separate check (claudeParentsMetered); the
+// enterprise managed-settings.json is machine-global (managedMetered and the
+// cached subscriptions.managed).
 func claudeProjectMetered(root string) bool {
 	return settingsMetered(filepath.Join(root, claudeSettingsFile)) ||
 		settingsMetered(filepath.Join(root, claudeLocalSettingsFile))
 }
 
+// claudeParentScopeEnabled reports whether ancestor settings void the proof.
+// Fail-closed by default: WTM_CLAUDE_PARENT_SCOPE=0 disables the ancestor walk
+// only when the operator proves the harness never merges parent settings.
+func claudeParentScopeEnabled() bool { return os.Getenv("WTM_CLAUDE_PARENT_SCOPE") != "0" }
+
 // claudeParentsMetered reports a metered settings file in any ancestor of the
-// worktree: Claude Code merges .claude/settings*.json from the worktree up to
-// the filesystem root, so a helper above the repo bills every request. The
-// worktree root itself belongs to claudeProjectMetered, so the walk starts at
-// its parent; every file reuses settingsMetered (missing is harmless).
+// worktree: a helper above the repo bills every request when the harness
+// merges .claude/settings*.json up the tree. The worktree root itself belongs
+// to claudeProjectMetered, so the walk starts at its parent; every file reuses
+// settingsMetered (missing is harmless).
 func claudeParentsMetered(root string) bool {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -244,17 +284,37 @@ func parseSubscriptionSince(s string) time.Time {
 	return t
 }
 
-// proven reports whether one event billed under a proven subscription. The
-// harness is the registry name; an unknown harness proves nothing.
-func (s subscriptions) proven(harness, provider string, at time.Time) bool {
+// coverage is the tri-state subscription verdict for one event. coverageNone
+// means bill list; coverageAllowance means the subscription covers the event
+// exactly; coverageOveragePossible means the subscription covers it inside the
+// allowance but a request over the limit may bill at list price.
+type coverage int
+
+const (
+	coverageNone coverage = iota
+	coverageAllowance
+	coverageOveragePossible
+)
+
+// coverage classifies one event under the credential proof. The harness is the
+// registry name; an unknown harness proves nothing. Pi has no overage signal,
+// so it is always exact. Claude is exact only when the account disables extra
+// usage.
+func (s subscriptions) coverage(harness, provider string, at time.Time) coverage {
 	switch harness {
 	case piAgent.name:
-		return s.piProven(provider)
+		if s.piProven(provider) {
+			return coverageAllowance
+		}
 	case claudeAgent.name:
-		return s.claudeProven(at)
-	default:
-		return false
+		if s.claudeProven(at) {
+			if s.claudeAllowanceOnly {
+				return coverageAllowance
+			}
+			return coverageOveragePossible
+		}
 	}
+	return coverageNone
 }
 
 // piProven applies the Pi rules: an oauth-only provider and the kimi-coding
@@ -270,14 +330,30 @@ func (s subscriptions) piProven(provider string) bool {
 	return s.piOAuth[provider]
 }
 
+// parentScopeWarned keeps the kill-switch disclosure to one line per run:
+// forWorktree runs once per worktree, but the operator needs the warning once.
+var parentScopeWarned bool
+
 // forWorktree drops a proof that a worktree setting invalidates: a per-repo
 // metered override bills outside the subscription even when the process env and
-// user account are clean. Ancestor settings and the cached machine-global
-// managed verdict void the proof the same way; a copy per worktree keeps one
-// repo's override from leaking into its neighbor. The verdict is cached per
-// root, so a multi-worktree run walks each ancestor chain once.
+// user account are clean. Ancestor settings void the proof the same way unless
+// WTM_CLAUDE_PARENT_SCOPE=0 disables the walk; the cached machine-global
+// managed verdict voids it too. A copy per worktree keeps one repo's override
+// from leaking into its neighbor. The verdict is cached per root, so a
+// multi-worktree run walks each chain once.
 func (s subscriptions) forWorktree(root string) subscriptions {
 	if !s.claude {
+		return s
+	}
+	if !claudeParentScopeEnabled() {
+		// Fail-open and uncached: the kill-switch proves the harness never
+		// merges parent settings, so the ancestor walk is skipped and no
+		// verdict is cached (a cached verdict would go stale across env changes).
+		if !parentScopeWarned {
+			parentScopeWarned = true
+			warnf("WTM_CLAUDE_PARENT_SCOPE=0 disables ancestor settings check")
+		}
+		s.claude = !s.managed && !claudeProjectMetered(root)
 		return s
 	}
 	if s.wtVerdicts != nil {

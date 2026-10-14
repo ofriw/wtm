@@ -759,26 +759,28 @@ func usageJSON(u *worktreeUsage) map[string]jsonHarnessUsage {
 	return out
 }
 
-// estimateLegendNeeded reports whether the table or the detail block will
-// render an estimated "~" cell. It reuses the same width fit as the renderers,
-// so a dropped COST column cannot leave a legend with no mark to explain.
-func estimateLegendNeeded(cols []worktreeColumn, wts []worktree, current string, now time.Time, ttl time.Duration) bool {
+// estimateLegendNeeded reports which legend reasons the table and the detail
+// block will render. It reuses the same width fit as the renderers, so a
+// dropped COST column cannot leave a legend with no mark to explain.
+func estimateLegendNeeded(cols []worktreeColumn, wts []worktree, current string, now time.Time, ttl time.Duration) estimateReasons {
+	var r estimateReasons
 	ctx := columnContext{now: now, ttl: ttl}
 	if costColumnKept(cols, gridRows(cols, wts, ctx)) {
 		for _, w := range wts {
-			if w.cost().isEstimated() {
-				return true
-			}
+			r = r.merge(w.cost().reasons())
 		}
 	}
 	cur := findWorktree(wts, current)
 	if cur == nil {
-		return false
+		return r
 	}
-	if cur.cost().isEstimated() && !summaryCostElided(detailSummaryRows(*cur, now)) {
-		return true
+	if !summaryCostElided(detailSummaryRows(*cur, now)) {
+		r = r.merge(cur.cost().reasons())
 	}
-	return modelsEstimated(cur.Usage) && costColumnKept(detailColumns, detailRows(cur.Usage))
+	if cur.Usage != nil && costColumnKept(detailColumns, detailRows(cur.Usage)) {
+		r = r.merge(modelsEstimated(cur.Usage))
+	}
+	return r
 }
 
 // costColumnKept reports whether the COST column survives the width fit, so a
@@ -793,31 +795,36 @@ func costColumnKept(cols []worktreeColumn, rows [][]string) bool {
 	return false
 }
 
-// modelsEstimated reports whether any visible (harness, model) row rests on an
-// assumption.
-func modelsEstimated(u *worktreeUsage) bool {
+// modelsEstimated reports which legend reasons any (harness, model) row rests on.
+func modelsEstimated(u *worktreeUsage) estimateReasons {
+	var r estimateReasons
 	if u == nil {
-		return false
+		return r
 	}
 	for _, h := range u.harnesses {
 		for _, m := range h.models {
-			if m.cost.isEstimated() {
-				return true
-			}
+			r = r.merge(m.cost.reasons())
 		}
 	}
-	return false
+	return r
 }
 
-// printEstimateLegend discloses, once under the table, every assumed price. The
-// reason text is the SSOT constant, so the explanation cannot drift from the
-// estimate it explains. A table of reported prices prints nothing here.
-func printEstimateLegend(needed bool) {
-	if !needed {
+// printEstimateLegend discloses, once under the table, each assumed price the
+// rendered cells rest on. The reason text is the SSOT constant, so the
+// explanation cannot drift from the estimate it explains. A table of reported
+// prices prints nothing here, and a table with one kind of estimate prints
+// only its line.
+func printEstimateLegend(r estimateReasons) {
+	if !r.any() {
 		return
 	}
 	fmt.Println()
-	fmt.Println("~ estimated: " + estimateCacheWriteLifetime)
+	if r.cache {
+		fmt.Println("~ estimated: " + estimateCacheWriteLifetime)
+	}
+	if r.overage {
+		fmt.Println("~ estimated: " + estimateSubscriptionOverage)
+	}
 }
 
 // detailColumns is the detail block's table schema. It shares the status column

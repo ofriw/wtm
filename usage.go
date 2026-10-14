@@ -91,6 +91,21 @@ func (m money) isEstimated() bool { return m.known() && m.estimated }
 // distinct from an absent or unknown total.
 func knownZero() money { return money{any: true} }
 
+// estimatedZero is a priced $0.00 that rests on an assumption: a proven
+// subscription that may bill overage at list price once its allowance is used
+// up. The marginal cost inside the allowance is $0; the estimate flag carries
+// that caveat, and the list price is shown beside it.
+func estimatedZero() money {
+	var m money
+	m.addEstimated(0)
+	return m
+}
+
+// estimateSubscriptionOverage is the exact reason a subscription-billed $0
+// reads estimated. status prints it verbatim beside the cache-write reason, so
+// the reader can tell an allowance caveat from a token-split guess.
+const estimateSubscriptionOverage = "a subscription covers the request inside its allowance, but extra usage may bill at list price, so the $0 billed cost is an estimate"
+
 // costPair is the two prices of one accumulator. list is the pay-as-you-go
 // value; billed is what the credentials actually charge. subscription marks a
 // total where at least one event was proven subscription-billed, so the display
@@ -131,10 +146,34 @@ func (p costPair) showsList() bool {
 	return p.subscription && (p.billed.known() != p.list.known() || p.billed.amount != p.list.amount)
 }
 
-// isEstimated qualifies only prices the pair renders, not hidden contributors.
-func (p costPair) isEstimated() bool {
-	return p.billed.isEstimated() || (p.showsList() && p.list.isEstimated())
+// estimateReasons names which "~" caveats a rendered total carries: the cache-write
+// lifetime guess vs the subscription-overage allowance caveat. The legend prints
+// only the set reasons, so a table with one kind of estimate never explains the other.
+type estimateReasons struct{ cache, overage bool }
+
+// needsOverageLegend reports the allowance caveat: a proven subscription bills $0
+// on an estimate because extra usage may still bill at list price.
+func (p costPair) needsOverageLegend() bool { return p.subscription && p.billed.isEstimated() }
+
+// needsCacheLegend reports the token-split guess: the list price (or an
+// unproven billed total) rests on the 5-minute cache-write assumption. A list
+// the pair hides (showsList false) carries no "~" cell, so it asks for no line.
+func (p costPair) needsCacheLegend() bool {
+	return (p.showsList() && p.list.isEstimated()) || (!p.subscription && p.billed.isEstimated())
 }
+
+// reasons resolves the pair to the legend lines its rendered cells need.
+func (p costPair) reasons() estimateReasons {
+	return estimateReasons{cache: p.needsCacheLegend(), overage: p.needsOverageLegend()}
+}
+
+// merge unions two reason sets, so table, summary and model rows accumulate.
+func (r estimateReasons) merge(o estimateReasons) estimateReasons {
+	return estimateReasons{cache: r.cache || o.cache, overage: r.overage || o.overage}
+}
+
+// any reports whether any legend line is needed.
+func (r estimateReasons) any() bool { return r.cache || r.overage }
 
 // bothUnpriced reports a pair whose two sides are both unpriced, so a partial
 // taint collapses to one "unknown" instead of "unknown/unknown". One rule
