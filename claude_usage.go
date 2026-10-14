@@ -12,8 +12,9 @@ import (
 // cost, and writes one API turn as several streaming records that share a
 // message id and repeat the usage object. The parser emits one candidate event
 // per assistant record and tags it with the turn's identity; the worktree-level
-// dedupe (dedupeKeyedEvents) keeps the largest record, so a turn counts once
-// even when a resumed or forked session file repeats it.
+// dedupe (dedupeKeyedEvents) keeps the occurrence with the best score (tokens,
+// then web-search count, then self-priced cost), so a turn counts once even when
+// a resumed or forked session file repeats it.
 
 type claudeUsageRecord struct {
 	Type      string         `json:"type"`
@@ -87,9 +88,19 @@ func claudeEvent(rec *claudeUsageRecord) (usageEvent, bool) {
 	}
 	tokens, tier, web := claudeTokensFrom(msg.Usage)
 	return usageEvent{
-		at: at, key: msg.ID + ":" + rec.RequestID, model: msg.Model,
+		at: at, key: claudeTurnKey(msg.ID, rec.RequestID), model: msg.Model,
 		tokens: tokens, tier: tier, webSearch: web,
 	}, true
+}
+
+// claudeTurnKey is the billed-turn identity. Both ids absent is an empty key,
+// not ":": only an empty key takes the keyless pass-through, so unrelated
+// id-less records never collapse into one winner.
+func claudeTurnKey(msgID, requestID string) string {
+	if msgID == "" && requestID == "" {
+		return ""
+	}
+	return msgID + ":" + requestID
 }
 
 // claudeTokensFrom splits the usage into the four priced classes. A record that

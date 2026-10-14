@@ -301,11 +301,19 @@ func (u *worktreeUsage) harness(name string) *harnessUsage {
 // addSession folds one session's events into the worktree: the session span for
 // the harness, each model's span inside the session, and every cost.
 func (u *worktreeUsage) addSession(harness string, events []usageEvent, price func(usageEvent) costPair) {
+	u.addBilledSession(harness, events, nil, price)
+}
+
+// addBilledSession folds one session where billed[i] marks the events that
+// contribute cost. Every event still folds into the spans, so dedupe never
+// changes activity time; only the billed subset contributes money. A nil mask
+// bills every event, which is the no-dedupe case.
+func (u *worktreeUsage) addBilledSession(harness string, events []usageEvent, billed []bool, price func(usageEvent) costPair) {
 	if len(events) == 0 {
 		return
 	}
 	h := u.harness(harness)
-	session, perModel := foldSession(events, h, price)
+	session, perModel := foldSession(events, h, billed, price)
 	h.spans = append(h.spans, session)
 	for name, m := range perModel {
 		h.model(name).absorb(m)
@@ -314,14 +322,14 @@ func (u *worktreeUsage) addSession(harness string, events []usageEvent, price fu
 
 // foldSession accumulates one session's harness cost and returns the session
 // span plus each model's per-session spans and cost.
-func foldSession(events []usageEvent, h *harnessUsage, price func(usageEvent) costPair) (span, map[string]*modelUsage) {
+func foldSession(events []usageEvent, h *harnessUsage, billed []bool, price func(usageEvent) costPair) (span, map[string]*modelUsage) {
 	session := span{start: events[0].at, end: events[0].at}
 	perModel := map[string]*modelUsage{}
 	prev := ""
-	for _, e := range events {
+	for i, e := range events {
 		session.start = minTime(session.start, e.at)
 		session.end = maxTime(session.end, e.endAt())
-		prev = foldEvent(perModel, h, e, prev, price)
+		prev = foldEvent(perModel, h, e, billed == nil || i >= len(billed) || billed[i], prev, price)
 	}
 	return session, perModel
 }
@@ -330,7 +338,8 @@ func foldSession(events []usageEvent, h *harnessUsage, price func(usageEvent) co
 // the previous event's model: consecutive same-model events chain into one run
 // (first→last event), a different model closes the run, so an interleaved
 // model never inherits another model's idle time. An isolated event is a point.
-func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, prev string, price func(usageEvent) costPair) string {
+// A non-billed event still chains spans; only its money is skipped.
+func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, bill bool, prev string, price func(usageEvent) costPair) string {
 	m := perModel[e.model]
 	if m == nil {
 		m = &modelUsage{}
@@ -343,50 +352,91 @@ func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, p
 	} else {
 		m.spans = append(m.spans, span{start: e.at, end: e.endAt()})
 	}
-	c := price(e)
-	m.cost.add(c)
-	h.cost.add(c)
+	if bill {
+		c := price(e)
+		m.cost.add(c)
+		h.cost.add(c)
+	}
 	return e.model
 }
 
-// dedupeKeyedEvents collapses repeated billed turns across a worktree's
-// sessions. The same billed record (same key) can appear in two
-// session files, so it must price once; the largest token total wins, because a
-// partial stream undercounts. Ties keep the first occurrence. Keyless events
-// pass through untouched. Winners compare by billed size, never by struct
-// equality: cost pointers compare by identity and times by location, so an
-// equal-looking repeat would otherwise drop every copy. Each kept session stays
-// a subsequence of its time-sorted input, so folding order is preserved.
-// Results are read from the passed slice: dedupeKeyedEvents replaces its inner
-// slices, so a caller-held event slice cannot observe the change.
-func dedupeKeyedEvents(sessions [][]usageEvent) {
-	best := map[string]int64{}
+// dedupeScore orders two copies of one billed turn. The larger token total wins
+// because a partial stream undercounts; a token tie breaks on the web-search
+// count, which the catalog prices as real money, then on the self-priced Pi
+// cost, where a known cost beats an unknown one and the larger wins. Either
+// field alone can carry cost the other copy lacks.
+type dedupeScore struct {
+	tokens  int64
+	web     int64
+	cost    float64
+	hasCost bool
+}
+
+func (s dedupeScore) beats(o dedupeScore) bool {
+	if s.tokens != o.tokens {
+		return s.tokens > o.tokens
+	}
+	if s.web != o.web {
+		return s.web > o.web
+	}
+	if s.hasCost != o.hasCost {
+		return s.hasCost
+	}
+	return s.cost > o.cost
+}
+
+// scoreOf reads the comparable size of one event for dedupe: token and
+// web-search counts for catalog-priced turns, self-priced cost for Pi turns.
+func scoreOf(e usageEvent) dedupeScore {
+	s := dedupeScore{tokens: e.tokens.total(), web: e.webSearch}
+	if e.cost != nil {
+		s.cost, s.hasCost = *e.cost, true
+	}
+	return s
+}
+
+// dedupeKeyedEvents decides which occurrence of each billed turn prices. It
+// returns a per-session billed mask: true marks the occurrence that contributes
+// cost. Spans ignore the mask and fold every event, so dedupe never changes
+// activity time. Keyless events always bill. The winner is the first occurrence
+// of a key with the best score, so the billed money total is stable across
+// session order; which tied copy wins can vary, and it carries the provider,
+// model and timestamp the pricer reads. The caller keeps its event slices;
+// only the returned masks describe the change.
+func dedupeKeyedEvents(sessions [][]usageEvent) [][]bool {
+	best := map[string]dedupeScore{}
 	for _, events := range sessions {
 		for _, e := range events {
 			if e.key == "" {
 				continue
 			}
-			if w, ok := best[e.key]; !ok || e.tokens.total() > w {
-				best[e.key] = e.tokens.total()
+			s := scoreOf(e)
+			if w, ok := best[e.key]; !ok || s.beats(w) {
+				best[e.key] = s
 			}
 		}
 	}
+	masks := make([][]bool, len(sessions))
 	for si, events := range sessions {
-		kept := make([]usageEvent, 0, len(events))
-		for _, e := range events {
+		mask := make([]bool, len(events))
+		for ei, e := range events {
 			if e.key == "" {
-				kept = append(kept, e)
+				mask[ei] = true
 				continue
 			}
-			// Keep only the largest record; delete its key so equal
-			// duplicates later in the walk drop too.
-			if w, ok := best[e.key]; ok && e.tokens.total() == w {
-				kept = append(kept, e)
+			// Keep only the first record matching the best score; delete its
+			// key so equal duplicates later in the walk drop too. Equality is
+			// the beats tie (neither side wins), so equal-cost copies elect the first.
+			w, ok := best[e.key]
+			s := scoreOf(e)
+			if ok && !s.beats(w) && !w.beats(s) {
+				mask[ei] = true
 				delete(best, e.key)
 			}
 		}
-		sessions[si] = kept
+		masks[si] = mask
 	}
+	return masks
 }
 
 // model returns the harness's accumulator for one model, creating it on demand.

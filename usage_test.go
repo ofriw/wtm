@@ -329,3 +329,83 @@ func TestWorktreeCostUnknownAcrossHarnesses(t *testing.T) {
 		t.Errorf("worktree cost = %q, want unknown", got)
 	}
 }
+
+// TestFoldEventUnbilledKeepsSpanNotCost pins the mask guard: a non-billed event
+// still extends the run, while both cost sides stay absent and unknown-free.
+func TestFoldEventUnbilledKeepsSpanNotCost(t *testing.T) {
+	per := map[string]*modelUsage{}
+	var h harnessUsage
+	price := func(usageEvent) costPair {
+		var c costPair
+		c.billed.addKnown(1)
+		c.list.addKnown(1)
+		return c
+	}
+	prev := foldEvent(per, &h, usageEvent{at: at(0), model: "m"}, false, "", price)
+	foldEvent(per, &h, usageEvent{at: at(10), model: "m"}, false, prev, price)
+	if got := per["m"].active(); got != 10*time.Second {
+		t.Errorf("model active = %v, want 10s", got)
+	}
+	if got := h.cost.cell(); got != "-" {
+		t.Errorf("harness cost = %q, want absent -", got)
+	}
+}
+
+// TestClaudeTurnKey pins the turn identity: only the both-empty case is
+// keyless, so unrelated id-less records never collapse.
+func TestClaudeTurnKey(t *testing.T) {
+	for _, tc := range []struct{ msg, req, want string }{
+		{"", "", ""},
+		{"a", "", "a:"},
+		{"", "r", ":r"},
+		{"a", "r", "a:r"},
+	} {
+		if got := claudeTurnKey(tc.msg, tc.req); got != tc.want {
+			t.Errorf("claudeTurnKey(%q,%q) = %q, want %q", tc.msg, tc.req, got, tc.want)
+		}
+	}
+}
+
+// TestFoldSessionShortMaskBills pins the fail-to-bill rule: a billed mask
+// shorter than the event list bills the uncovered tail, so a truncated mask
+// never silently zeroes real cost. Spans fold every event either way.
+func TestFoldSessionShortMaskBills(t *testing.T) {
+	events := []usageEvent{
+		{at: at(1), model: "m", cost: fptr(1)},
+		{at: at(2), model: "m", cost: fptr(2)},
+	}
+	price := pairPricer(func(e usageEvent) money {
+		var m money
+		if e.cost != nil {
+			m.addKnown(*e.cost)
+		} else {
+			m.addUnknown()
+		}
+		return m
+	})
+	var u worktreeUsage
+	u.addBilledSession("pi", events, []bool{false}, price)
+	if got := u.cost().cell(); got != "$2.00" {
+		t.Errorf("cost = %q, want $2.00 (short mask bills the tail)", got)
+	}
+	if got := u.active(); got != time.Second {
+		t.Errorf("active = %v, want 1s (spans ignore the mask)", got)
+	}
+}
+
+// TestDedupeEqualScoresElectFirst pins the beats-tie rule: two copies of one
+// billed turn with equal cost elect the first only, so a repeated transcript
+// never double-bills.
+func TestDedupeEqualScoresElectFirst(t *testing.T) {
+	a := usageEvent{at: at(1), model: "m", key: "k", cost: fptr(1)}
+	b := usageEvent{at: at(2), model: "m", key: "k", cost: fptr(1)}
+	masks := dedupeKeyedEvents([][]usageEvent{{a}, {b}})
+	if !masks[0][0] || masks[1][0] {
+		t.Fatalf("masks = %v, want the first equal copy billed only", masks)
+	}
+	same := dedupeKeyedEvents([][]usageEvent{{a, b}})
+	if !same[0][0] || same[0][1] {
+		t.Fatalf("same-session masks = %v, want the first equal copy billed only", same)
+	}
+}
+

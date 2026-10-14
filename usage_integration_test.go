@@ -113,6 +113,43 @@ func piUsageLine(total float64) string {
 	return fmt.Sprintf(`{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":%v}}}}`, total)
 }
 
+// TestBuildUsageActivityOrderIndependent pins D1: activity time comes from the
+// original events, so deduplicating a shared transcript never shrinks a session
+// span. Both session orders yield the same active time and the same total.
+func TestBuildUsageActivityOrderIndependent(t *testing.T) {
+	piLine := func(id, ts string, cost float64) string {
+		return fmt.Sprintf(`{"type":"message","id":%q,"timestamp":%q,"message":{"role":"assistant","model":"m","usage":{"cost":{"total":%v}}}}`, id, ts, cost)
+	}
+	bodyA := piLine("e0", "2026-01-01T00:00:00Z", 1) + "\n" + piLine("e1", "2026-01-01T00:00:10Z", 1) + "\n"
+	bodyB := bodyA + piLine("e2", "2026-01-01T00:00:20Z", 1) + "\n"
+	for _, order := range []string{"ab", "ba"} {
+		t.Run(order, func(t *testing.T) {
+			dir := t.TempDir()
+			a := filepath.Join(dir, "a.jsonl")
+			b := filepath.Join(dir, "b.jsonl")
+			writeFile(t, a, bodyA, 0o644)
+			writeFile(t, b, bodyB, 0o644)
+			refs := []sessionRef{{path: a, harness: piAgent.name}, {path: b, harness: piAgent.name}}
+			if order == "ba" {
+				refs[0], refs[1] = refs[1], refs[0]
+			}
+			u, err := buildUsage(dir, sessionIndex{canonical(dir): refs}, nil, subscriptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := seconds(u.active()); got != 20 {
+				t.Errorf("active = %ds, want 20s regardless of session order", got)
+			}
+			if h := u.harnesses[piAgent.name]; h == nil || seconds(h.active()) != 20 {
+				t.Errorf("harness active = %v, want 20s", h)
+			}
+			if got := u.cost().billed.amount; math.Abs(got-3) > 1e-9 {
+				t.Errorf("cost = %v, want 3 (each record billed once)", got)
+			}
+		})
+	}
+}
+
 // TestBuildUsageDedupesPiForkAcrossSessionFiles pins that a resumed or forked
 // Pi transcript prices once: identical content across files shares one key, so
 // the second copy drops instead of doubling the total.
@@ -211,5 +248,54 @@ func TestBuildUsageDedupesProviderVariantTurns(t *testing.T) {
 				t.Errorf("cost = %v, want 7: a provider-variant turn must bill once", got)
 			}
 		})
+	}
+}
+
+// TestBuildUsageBatchTierWith1hWriteIsUnknown pins 3B: the catalog has no
+// batch 1-hour-write rate, so a batch-tier turn with 1h cache writes reads
+// unknown rather than silently mispriced.
+func TestBuildUsageBatchTierWith1hWriteIsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name,
+		claudeUsageLine(`{"input_tokens":100,"service_tier":"batch","cache_creation":{"ephemeral_1h_input_tokens":50}}`))
+	u, err := buildUsage(dir, idx, testRates(t), subscriptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.cost().cell(); got != "unknown" {
+		t.Fatalf("cost = %q, want unknown (no batch 1h-write rate)", got)
+	}
+	if v := u.cost().billed.jsonValue(); v != nil {
+		t.Fatalf("json cost = %v, want null", *v)
+	}
+}
+
+// TestBuildUsageActiveTimeSurvivesDedupe pins 3D: dedupe decides which copy of
+// a billed turn prices, but activity time folds every event, so the billed mask
+// never changes the active total while the cost drops the repeat.
+func TestBuildUsageActiveTimeSurvivesDedupe(t *testing.T) {
+	a := usageEvent{at: at(0), end: at(10), model: "m", key: "k", cost: fptr(1)}
+	b := usageEvent{at: at(20), end: at(30), model: "m", key: "k", cost: fptr(1)}
+	price := pairPricer(func(e usageEvent) money {
+		var m money
+		if e.cost != nil {
+			m.addKnown(*e.cost)
+		} else {
+			m.addUnknown()
+		}
+		return m
+	})
+	var whole, deduped worktreeUsage
+	whole.addBilledSession("pi", []usageEvent{a, b}, nil, price)
+	masks := dedupeKeyedEvents([][]usageEvent{{a, b}})
+	deduped.addBilledSession("pi", []usageEvent{a, b}, masks[0], price)
+	if whole.active() != deduped.active() {
+		t.Fatalf("active = %v after dedupe, want %v (dedupe never changes time)", deduped.active(), whole.active())
+	}
+	if got := whole.cost().cell(); got != "$2.00" {
+		t.Fatalf("whole cost = %q, want $2.00", got)
+	}
+	if got := deduped.cost().cell(); got != "$1.00" {
+		t.Fatalf("deduped cost = %q, want $1.00", got)
 	}
 }

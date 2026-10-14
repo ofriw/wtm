@@ -506,9 +506,12 @@ func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions
 	for i, s := range sessions {
 		lists[i] = s.events
 	}
-	dedupeKeyedEvents(lists)
+	// Spans fold the original events; only the billed winners carry cost. This
+	// keeps activity time independent of the session order and of what dedupe
+	// removes from a shared transcript.
+	billed := dedupeKeyedEvents(lists)
 	for i, s := range sessions {
-		u.addSession(s.harness, lists[i], s.price)
+		u.addBilledSession(s.harness, s.events, billed[i], s.price)
 	}
 	markPartial(&u, unreadable)
 	return u, firstErr

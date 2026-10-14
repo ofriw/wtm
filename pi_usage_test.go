@@ -150,17 +150,97 @@ func TestPiSpawnLegacyIdenticalChildrenKeepBoth(t *testing.T) {
 func TestPiEventKeyIgnoresProvider(t *testing.T) {
 	a := usageEvent{at: at(5), model: "m", provider: "p-a", cost: fptr(0.5)}
 	b := usageEvent{at: at(5), model: "m", provider: "p-b", cost: fptr(0.5)}
-	a.key, b.key = piEventKey(a), piEventKey(b)
+	// Content fallback (no ids): the same record re-attributed to another
+	// running provider still dedupes.
+	a.key, b.key = piEventKey(a, ""), piEventKey(b, "")
 	if a.key != b.key {
 		t.Fatalf("same content keys differ: %q vs %q", a.key, b.key)
 	}
-	if piEventKeyN(a, "spawn:0") == piEventKeyN(a, "spawn:1") {
+	// An explicit id is the identity, and it is provider-independent too.
+	a.key, b.key = piEventKey(a, "e1"), piEventKey(b, "e1")
+	if a.key != b.key {
+		t.Fatalf("same id keys differ: %q vs %q", a.key, b.key)
+	}
+	if piEventKeyN(a, "e1", "spawn:0") == piEventKeyN(a, "e1", "spawn:1") {
 		t.Errorf("spawn batch index must keep equal children distinct")
 	}
 	lists := [][]usageEvent{{a}, {b}}
-	dedupeKeyedEvents(lists)
-	if n := len(lists[0]) + len(lists[1]); n != 1 {
+	masks := dedupeKeyedEvents(lists)
+	if n := len(keptBilled(lists[0], masks[0])) + len(keptBilled(lists[1], masks[1])); n != 1 {
 		t.Errorf("forked repeat kept %d events, want 1", n)
+	}
+}
+
+// TestPiTopLevelUsageRecords pins P1: a top-level `usage` record (cache
+// warming) and a compaction/branch_summary that carries usage all bill. The
+// top-level usage record names its own model and provider and seeds the
+// running attribution the model-less summary records inherit.
+func TestPiTopLevelUsageRecords(t *testing.T) {
+	events := parsePi(t,
+		`{"type":"model_change","id":"mc","timestamp":"2026-01-01T00:00:00Z","provider":"p-start","modelId":"m-start"}`,
+		`{"type":"usage","id":"u1","timestamp":"2026-01-01T00:00:01Z","kind":"cache_warm","provider":"p-warm","model":"m-warm","usage":{"cost":{"total":0.3}}}`,
+		`{"type":"compaction","id":"cmp","timestamp":"2026-01-01T00:00:02Z","summary":"s","usage":{"cost":{"total":0.2}}}`,
+		`{"type":"branch_summary","id":"br","timestamp":"2026-01-01T00:00:03Z","summary":"s","usage":{"cost":{"total":0.1}}}`)
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 3: %+v", len(events), events)
+	}
+	assertPiEvent(t, events[0], "m-warm", fptr(0.3))
+	if events[0].provider != "p-warm" {
+		t.Errorf("top-level usage provider = %q, want p-warm", events[0].provider)
+	}
+	assertPiEvent(t, events[1], "m-warm", fptr(0.2))
+	assertPiEvent(t, events[2], "m-warm", fptr(0.1))
+}
+
+// TestPiRecordIdentityUsesID pins P2: the entry id is the identity, so two
+// distinct records with equal content stay two, while the same id repeated (a
+// fork copy) bills once.
+func TestPiRecordIdentityUsesID(t *testing.T) {
+	events := parsePi(t,
+		`{"type":"message","id":"a1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":0.5}}}}`,
+		`{"type":"message","id":"a2","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":0.5}}}}`)
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2: %+v", len(events), events)
+	}
+	if events[0].key == events[1].key {
+		t.Errorf("distinct ids share key %q; dedupe would drop one", events[0].key)
+	}
+	lists := [][]usageEvent{{events[0]}, {events[0]}}
+	masks := dedupeKeyedEvents(lists)
+	if n := len(keptBilled(lists[0], masks[0])) + len(keptBilled(lists[1], masks[1])); n != 1 {
+		t.Errorf("forked record kept %d events, want 1", n)
+	}
+}
+
+// TestPiMissingCostAndZeroCostDiffer pins P2's cost-presence rule: with no id
+// the content fallback still separates a known zero from a missing cost, so an
+// unknown total is never hidden behind a zero.
+func TestPiMissingCostAndZeroCostDiffer(t *testing.T) {
+	zero := parsePi(t, `{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":0}}}}`)
+	missing := parsePi(t, `{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{}}}`)
+	if len(zero) != 1 || len(missing) != 1 {
+		t.Fatalf("want one event each, got %d and %d", len(zero), len(missing))
+	}
+	if zero[0].key == missing[0].key {
+		t.Errorf("missing cost and known zero share key %q; dedupe would hide the unknown", zero[0].key)
+	}
+}
+
+// TestPiIdlessCostRevisionBillsOnce pins the fallback mirror of the id key: two
+// id-less copies of one record (partial vs complete stream) share the content
+// key, so exactly one bills and the larger cost wins.
+func TestPiIdlessCostRevisionBillsOnce(t *testing.T) {
+	partial := parsePi(t, `{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":0.01}}}}`)
+	complete := parsePi(t, `{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":0.02}}}}`)
+	if len(partial) != 1 || len(complete) != 1 {
+		t.Fatalf("want one event each, got %d and %d", len(partial), len(complete))
+	}
+	kept := dedupeOne(partial, complete)
+	if len(kept) != 1 {
+		t.Fatalf("kept %d events, want 1 (revised copy bills once)", len(kept))
+	}
+	if kept[0].cost == nil || *kept[0].cost != 0.02 {
+		t.Fatalf("winner cost = %v, want 0.02", kept[0].cost)
 	}
 }
 
@@ -370,4 +450,118 @@ func TestPiCacheMissBillsOnce(t *testing.T) {
 		t.Fatalf("got %d events, want 1", len(events))
 	}
 	assertPiEvent(t, events[0], "m", fptr(0.5))
+}
+
+// TestPiSameIDCostRevisionBillsOnce pins the id-key rule: two copies of one
+// record (partial vs complete stream) share the id, so exactly one bills and
+// the larger cost wins.
+func TestPiSameIDCostRevisionBillsOnce(t *testing.T) {
+	a := usageEvent{at: at(1), model: "m", cost: fptr(0.01)}
+	b := usageEvent{at: at(1), model: "m", cost: fptr(0.02)}
+	a.key = piEventKeyN(a, "e1", "")
+	b.key = piEventKeyN(b, "e1", "")
+	if a.key != b.key {
+		t.Fatalf("same id keys differ: %q vs %q", a.key, b.key)
+	}
+	lists := [][]usageEvent{{a}, {b}}
+	masks := dedupeKeyedEvents(lists)
+	kept := append(keptBilled(lists[0], masks[0]), keptBilled(lists[1], masks[1])...)
+	if len(kept) != 1 {
+		t.Fatalf("kept %d events, want 1", len(kept))
+	}
+	if kept[0].cost == nil || *kept[0].cost != 0.02 {
+		t.Fatalf("winner cost = %v, want 0.02", kept[0].cost)
+	}
+}
+
+// TestPiSameIDNilVsZeroBillsOnce pins the presence rule under an id key: a
+// nil-cost copy and a known-zero copy share the id, so exactly one bills and
+// the known zero wins over the unknown.
+func TestPiSameIDNilVsZeroBillsOnce(t *testing.T) {
+	a := usageEvent{at: at(1), model: "m"}
+	b := usageEvent{at: at(1), model: "m", cost: fptr(0)}
+	a.key = piEventKeyN(a, "e1", "")
+	b.key = piEventKeyN(b, "e1", "")
+	if a.key != b.key {
+		t.Fatalf("same id keys differ: %q vs %q", a.key, b.key)
+	}
+	lists := [][]usageEvent{{a}, {b}}
+	masks := dedupeKeyedEvents(lists)
+	kept := append(keptBilled(lists[0], masks[0]), keptBilled(lists[1], masks[1])...)
+	if len(kept) != 1 {
+		t.Fatalf("kept %d events, want 1", len(kept))
+	}
+	if kept[0].cost == nil || *kept[0].cost != 0 {
+		t.Fatalf("winner cost = %v, want the known 0", kept[0].cost)
+	}
+}
+
+// TestPiSameIDDifferentTimestampBillsTwice pins the time binding on the id key:
+// two unrelated sessions can collide on the short random id, but not on the
+// exact timestamp, so both turns must bill.
+func TestPiSameIDDifferentTimestampBillsTwice(t *testing.T) {
+	a := usageEvent{at: at(1), model: "m", cost: fptr(0.5)}
+	b := usageEvent{at: at(2), model: "m", cost: fptr(0.5)}
+	a.key = piEventKeyN(a, "e1", "")
+	b.key = piEventKeyN(b, "e1", "")
+	if a.key == b.key {
+		t.Fatalf("same id but different time share key %q; one turn would drop", a.key)
+	}
+	lists := [][]usageEvent{{a}, {b}}
+	masks := dedupeKeyedEvents(lists)
+	kept := append(keptBilled(lists[0], masks[0]), keptBilled(lists[1], masks[1])...)
+	if len(kept) != 2 {
+		t.Fatalf("kept %d events, want 2 (distinct times bill separately)", len(kept))
+	}
+}
+
+// TestPiIdlessSameTimestampCollisionBillsOnce pins 3C: id-less records with
+// equal time, model and cost share one fallback key, so the same record seen in
+// two sessions bills once. Both sessions still count toward active time.
+func TestPiIdlessSameTimestampCollisionBillsOnce(t *testing.T) {
+	line := `{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":0.5}}}}`
+	a := parsePi(t, line)
+	b := parsePi(t, line)
+	if len(a) != 1 || len(b) != 1 {
+		t.Fatalf("want one event each, got %d and %d", len(a), len(b))
+	}
+	if a[0].key != b[0].key {
+		t.Fatalf("equal id-less records keys differ: %q vs %q", a[0].key, b[0].key)
+	}
+	kept := dedupeOne(a, b)
+	if len(kept) != 1 {
+		t.Fatalf("kept %d events, want 1 (same-timestamp collision bills once)", len(kept))
+	}
+}
+
+// TestPiSpawnWithoutIDCrossSessionBillsOnce pins 3C: a spawn batch without a
+// record id still dedupes across sessions — the content fallback plus the child
+// index is the identity — so a repeated transcript bills each child once.
+func TestPiSpawnWithoutIDCrossSessionBillsOnce(t *testing.T) {
+	line := `{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"toolResult","toolName":"spawn","details":{"mode":"spawn","results":[{"usage":{"model":"m-a","cost":0.1}},{"usage":{"model":"m-b","cost":0.2}}]}}}`
+	a := parsePi(t, line)
+	b := parsePi(t, line)
+	if len(a) != 2 || len(b) != 2 {
+		t.Fatalf("want two children each, got %d and %d", len(a), len(b))
+	}
+	kept := dedupeOne(a, b)
+	if len(kept) != 2 {
+		t.Fatalf("kept %d children, want 2 (each child bills once)", len(kept))
+	}
+	var u worktreeUsage
+	price := pairPricer(func(e usageEvent) money {
+		var m money
+		if e.cost != nil {
+			m.addKnown(*e.cost)
+		} else {
+			m.addUnknown()
+		}
+		return m
+	})
+	billed := dedupeKeyedEvents([][]usageEvent{a, b})
+	u.addBilledSession("pi", a, billed[0], price)
+	u.addBilledSession("pi", b, billed[1], price)
+	if got := u.cost().cell(); got != "$0.30" {
+		t.Fatalf("cost = %q, want $0.30 (cross-session spawn bills once)", got)
+	}
 }

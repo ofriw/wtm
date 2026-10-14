@@ -29,13 +29,26 @@ func parseClaudeFixture(t *testing.T) []usageEvent {
 	return events
 }
 
-// dedupeOne runs the worktree-level dedupe the way buildUsage does and returns
-// the surviving events, so the tests pin the dedupe contract, not its plumbing.
-func dedupeOne(sessions ...[]usageEvent) []usageEvent {
-	dedupeKeyedEvents(sessions)
+// keptBilled returns the events a billed mask marks, so a test can inspect the
+// dedupe outcome the way folding does.
+func keptBilled(events []usageEvent, billed []bool) []usageEvent {
 	var out []usageEvent
-	for _, s := range sessions {
-		out = append(out, s...)
+	for i, e := range events {
+		if billed[i] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// dedupeOne runs the worktree-level dedupe the way buildUsage does and returns
+// the surviving billed events, so the tests pin the dedupe contract, not its
+// plumbing.
+func dedupeOne(sessions ...[]usageEvent) []usageEvent {
+	billed := dedupeKeyedEvents(sessions)
+	var out []usageEvent
+	for i, s := range sessions {
+		out = append(out, keptBilled(s, billed[i])...)
 	}
 	return out
 }
@@ -80,8 +93,8 @@ func TestClaudeUsageDedupeAcrossSessions(t *testing.T) {
 		{event("m1", 100), event("m2", 10)},
 		{event("m1", 400)},
 	}
-	dedupeKeyedEvents(sessions)
-	a, b := sessions[0], sessions[1]
+	billed := dedupeKeyedEvents(sessions)
+	a, b := keptBilled(sessions[0], billed[0]), keptBilled(sessions[1], billed[1])
 	if len(a) != 1 {
 		t.Fatalf("session a kept %d events, want 1 (m2 only): %+v", len(a), a)
 	}
@@ -90,6 +103,44 @@ func TestClaudeUsageDedupeAcrossSessions(t *testing.T) {
 	}
 	if len(b) != 1 || b[0].tokens.output != 400 {
 		t.Errorf("session b = %+v, want the largest m1 record alone", b)
+	}
+}
+
+// TestClaudeDedupeWebSearchBreaksTokenTie pins D3: two streaming records of one
+// turn that tie on tokens must keep the larger web-search count, whose catalog
+// price is real money.
+func TestClaudeDedupeWebSearchBreaksTokenTie(t *testing.T) {
+	mk := func(web int64) usageEvent {
+		return usageEvent{at: at(0), key: "m1:r1", model: "m", tokens: claudeTokens{output: 10}, webSearch: web}
+	}
+	sessions := [][]usageEvent{{mk(1)}, {mk(3)}}
+	billed := dedupeKeyedEvents(sessions)
+	kept := keptBilled(sessions[0], billed[0])
+	kept = append(kept, keptBilled(sessions[1], billed[1])...)
+	if len(kept) != 1 || kept[0].webSearch != 3 {
+		t.Fatalf("kept = %+v, want the webSearch=3 record alone", kept)
+	}
+}
+
+// TestClaudeKeylessRecordsSurviveDedupe pins D2: an assistant record with
+// neither a message id nor a request id gets an empty key, so unrelated id-less
+// records both bill instead of collapsing to one winner.
+func TestClaudeKeylessRecordsSurviveDedupe(t *testing.T) {
+	line := `{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"model":"m","usage":{"input_tokens":1}}}`
+	events, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(line + "\n" + line + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+	for i, e := range events {
+		if e.key != "" {
+			t.Errorf("events[%d].key = %q, want empty", i, e.key)
+		}
+	}
+	if kept := dedupeOne(events); len(kept) != 2 {
+		t.Fatalf("id-less records deduped to %d, want 2", len(kept))
 	}
 }
 
