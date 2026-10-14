@@ -43,8 +43,9 @@ func testRates(t *testing.T) catalog {
 	return c
 }
 
-func assertCost(t *testing.T, m money, want float64, known bool) {
+func assertCost(t *testing.T, p pricedEvent, want float64, known bool) {
 	t.Helper()
+	m := p.total.list
 	if m.known() != known {
 		t.Fatalf("known = %v, want %v (money %+v)", m.known(), known, m)
 	}
@@ -126,8 +127,8 @@ func TestPriceUnknown(t *testing.T) {
 	}
 	for name, e := range cases {
 		t.Run(name, func(t *testing.T) {
-			if m := c.price(e); m.known() {
-				t.Fatalf("price = %+v, want unknown", m)
+			if p := c.price(e); p.total.list.known() {
+				t.Fatalf("price = %+v, want unknown", p)
 			}
 		})
 	}
@@ -140,7 +141,7 @@ func TestPriceUnclassifiedCacheWriteIsEstimated(t *testing.T) {
 	c := testRates(t)
 	m := c.price(usageEvent{model: "m1", tier: "standard", tokens: promptTokens{unclassifiedCacheWrite: 100}})
 	assertCost(t, m, 100*0.00000125, true)
-	if !m.isEstimated() {
+	if !m.total.list.isEstimated() {
 		t.Fatalf("price = %+v, want estimated", m)
 	}
 }
@@ -167,8 +168,8 @@ func TestParseCatalogMissingVsZero(t *testing.T) {
 	assertCost(t, c.price(usageEvent{model: "z", tier: "standard", tokens: promptTokens{input: 500}}), 0, true)
 	// An absent output rate with nonzero output tokens is unknown.
 	c2, _ := parseCatalog(strings.NewReader(`{"z": {"input_cost_per_token": 0.001}}`))
-	if m := c2.price(usageEvent{model: "z", tier: "standard", tokens: promptTokens{output: 5}}); m.known() {
-		t.Fatalf("absent rate must be unknown, got %+v", m)
+	if p := c2.price(usageEvent{model: "z", tier: "standard", tokens: promptTokens{output: 5}}); p.total.list.known() {
+		t.Fatalf("absent rate must be unknown, got %+v", p)
 	}
 }
 
@@ -359,6 +360,34 @@ func TestModelCandidatesRejectsVersionFragments(t *testing.T) {
 	}
 	if _, ok := resolveModel(c, "anthropic.claude-opus-4-6-v1"); !ok {
 		t.Error("provider-qualified dot must still split")
+	}
+}
+
+// TestFixtureRatesParity pins the shipped catalog against the loader: the
+// fixture parses, its model resolves, and a Claude token event plus a Pi
+// self-priced event both price known, so catalog drift fails here instead of
+// surfacing as unknown costs.
+func TestFixtureRatesParity(t *testing.T) {
+	f, err := os.Open("test/fixtures/rates.json")
+	if err != nil {
+		t.Fatalf("open fixture: %v", err)
+	}
+	defer f.Close()
+	c, err := parseCatalog(f)
+	if err != nil {
+		t.Fatalf("parseCatalog fixture: %v", err)
+	}
+	if _, ok := resolveModel(c, "claude-sonnet-4-6"); !ok {
+		t.Fatal("claude-sonnet-4-6 must resolve from the fixture")
+	}
+	// 100k input at 3e-6 plus 10k output at 1.5e-5.
+	claude := usageEvent{model: "claude-sonnet-4-6", tier: "standard",
+		tokens: promptTokens{input: 100_000, output: 10_000}}
+	assertCost(t, c.price(claude), 0.45, true)
+	pi := usageEvent{at: at(0), model: "m", cost: fptr(1.5)}
+	p := usagePricer(agent{name: "pi"}, c, subscriptions{})(pi)
+	if !p.total.list.known() || !p.total.billed.known() {
+		t.Fatalf("pi self-priced event must stay known: %+v", p.total)
 	}
 }
 

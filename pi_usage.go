@@ -28,11 +28,21 @@ type piUsageRecord struct {
 }
 
 type piUsage struct {
-	Cost *piCost `json:"cost"`
+	Input      *int64  `json:"input"`
+	Output     *int64  `json:"output"`
+	CacheRead  *int64  `json:"cacheRead"`
+	CacheWrite *int64  `json:"cacheWrite"`
+	Cost       *piCost `json:"cost"`
 }
 
+// piCost is Pi's own price breakdown. Total is authoritative; the class fields
+// are the per-tier split, present in modern sessions but absent in older ones.
 type piCost struct {
-	Total *float64 `json:"total"`
+	Input      *float64 `json:"input"`
+	Output     *float64 `json:"output"`
+	CacheRead  *float64 `json:"cacheRead"`
+	CacheWrite *float64 `json:"cacheWrite"`
+	Total      *float64 `json:"total"`
 }
 
 type piMessage struct {
@@ -331,9 +341,30 @@ func addPiEvent(events *[]usageEvent, at time.Time, id string, model, provider s
 	if u.Cost != nil {
 		cost = u.Cost.Total
 	}
-	e := usageEvent{at: at, model: model, provider: provider, cost: cost}
+	e := usageEvent{at: at, model: model, provider: provider, cost: cost, tokens: piTokens(u), tierCost: piTierCost(u.Cost)}
 	e.key = piEventKey(e, id)
 	*events = append(*events, e)
+}
+
+// piTokens reads Pi's token counts into the shared class layout. Pi keeps one
+// cache-write class, so it fills the 5-minute field; the display collapses the
+// two write classes anyway.
+func piTokens(u *piUsage) promptTokens {
+	return promptTokens{
+		input:        derefInt(u.Input),
+		output:       derefInt(u.Output),
+		cacheRead:    derefInt(u.CacheRead),
+		cacheWrite5m: derefInt(u.CacheWrite),
+	}
+}
+
+// piTierCost reads Pi's per-class price when present. Older records price only
+// the total, so they yield nil and leave every tier absent.
+func piTierCost(c *piCost) *tokenCosts {
+	if c == nil || (c.Input == nil && c.Output == nil && c.CacheRead == nil && c.CacheWrite == nil) {
+		return nil
+	}
+	return &tokenCosts{input: c.Input, output: c.Output, cacheRead: c.CacheRead, cacheWrite: c.CacheWrite}
 }
 
 // piEventKey is the identity of a Pi event: the entry id bound to the record

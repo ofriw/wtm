@@ -1,15 +1,19 @@
-PATH       BRANCH  UPSTREAM   LAST USED  AGE  ACTIVE   COST  STATUS  INTEGRATIONS
-/SBX/repo  main    -         2020-01-01   6y       -      -  ACTIVE  -
-/SBX/wt    wt      -         2020-01-01   6y  1h 00m  $3.48  ACTIVE  -
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST  STATUS  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -      -  ACTIVE  -
+/SBX/wt    wt      -         2020-01-01  6y 2d      1h  $3.48  ACTIVE  -
 
 current worktree  /SBX/wt
-age               6y
-active time       1h 00m
+age               6y 2d
+active time       1h
 cost              $3.48
 
-HARNESS  MODEL                TIME   COST
-pi       deepseek-flash     1h 00m  $3.00
-claude   claude-sonnet-4-6  1h 00m  $0.48
+MODEL              TIME   COST    ↑ in  ↓ out  🎯 hit  ✍️ write  ✗ miss  ◉ hit%
+deepseek-flash       1h  $3.00  190.0k  30.0k   50.0k     20.0k  140.0k   26.3%
+claude-sonnet-4-6    1h  $0.48   10.0k  30.0k       -         -   10.0k    0.0%
+
+tokens: in = uncached input + cache read + cache write (total input)
+miss = uncached input + cache write
+hit% = hit / in
 [
   {
     "path": "/SBX/repo",
@@ -46,7 +50,27 @@ claude   claude-sonnet-4-6  1h 00m  $0.48
         "models": {
           "claude-sonnet-4-6": {
             "cost": 0.48,
-            "activeSeconds": 3600
+            "activeSeconds": 3600,
+            "tiers": {
+              "cacheRead": {
+                "tokens": 0,
+                "cost": null
+              },
+              "cacheWrite": {
+                "tokens": 0,
+                "cost": null
+              },
+              "input": {
+                "tokens": 10000,
+                "cost": 0.03
+              },
+              "output": {
+                "tokens": 30000,
+                "cost": 0.45
+              }
+            },
+            "cacheMissTokens": 10000,
+            "cacheHitRate": 0
           }
         }
       },
@@ -56,7 +80,27 @@ claude   claude-sonnet-4-6  1h 00m  $0.48
         "models": {
           "deepseek-flash": {
             "cost": 3,
-            "activeSeconds": 3600
+            "activeSeconds": 3600,
+            "tiers": {
+              "cacheRead": {
+                "tokens": 50000,
+                "cost": 0.05
+              },
+              "cacheWrite": {
+                "tokens": 20000,
+                "cost": 0.2
+              },
+              "input": {
+                "tokens": 120000,
+                "cost": 0.6
+              },
+              "output": {
+                "tokens": 30000,
+                "cost": 2.15
+              }
+            },
+            "cacheMissTokens": 140000,
+            "cacheHitRate": 0.263158
           }
         }
       }

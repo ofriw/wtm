@@ -107,41 +107,53 @@ type catalog map[string]modelRate
 // reason can never drift from the estimate it explains.
 const estimateCacheWriteLifetime = "a usage record omitted the cache-write lifetime (5m vs 1h), so wtm priced those tokens at the 5-minute rate; a 1-hour write costs more, so the value is a lower bound, not exact data"
 
-// price turns one Claude event into money. A resolved model with zero tokens is
-// a known $0.00; a missing model, tier, or needed class is unknown. A record
-// that omits the cache-write lifetime is priced at the 5-minute rate and marked
-// estimated, because the true 5m/1h split is unknowable.
-func (c catalog) price(e usageEvent) money {
+// price turns one Claude event into its price pair and per-tier breakdown. A
+// resolved model with zero tokens is a known $0.00; a missing model, tier, or
+// needed class is unknown. A record that omits the cache-write lifetime is
+// priced at the 5-minute rate and marked estimated, because the true 5m/1h
+// split is unknowable. The billed side mirrors the list here; the subscription
+// substitution (usagePricer) replaces billed per tier.
+func (c catalog) price(e usageEvent) pricedEvent {
 	r, ok := resolveModel(c, e.model)
 	if !ok {
-		return unknownMoney()
+		return unpriced()
 	}
 	rates := r.ratesFor(e.tier, e.tokens.context())
 	if rates == nil {
-		return unknownMoney()
+		return unpriced()
 	}
-	var m money
-	m.addKnown(0) // resolved: a zero is a real zero
-	priceClasses(&m, *rates, e.tokens)
-	addEstimatedClass(&m, rates.cacheWrite5m, e.tokens.unclassifiedCacheWrite)
-	priceWebSearch(&m, r, e.webSearch)
-	return m
+	p := pricedEvent{tiers: priceTiers(*rates, e.tokens)}
+	p.total.list.addKnown(0) // resolved: a zero is a real zero
+	p.total.list.add(p.tiers.totals())
+	priceWebSearch(&p.total.list, r, e.webSearch)
+	p.total.billed = p.total.list
+	return p
 }
 
-func unknownMoney() money {
-	var m money
-	m.addUnknown()
-	return m
+// unpriced is an event with no resolvable rate: both sides unknown and no tiers.
+func unpriced() pricedEvent {
+	var p pricedEvent
+	p.total.list.addUnknown()
+	p.total.billed.addUnknown()
+	return p
 }
 
-// priceClasses sums each priced token class in a fixed order so floating-point
-// addition stays deterministic.
-func priceClasses(m *money, r tokenRates, t promptTokens) {
-	addClass(m, r.input, t.input)
-	addClass(m, r.output, t.output)
-	addClass(m, r.cacheRead, t.cacheRead)
-	addClass(m, r.cacheWrite5m, t.cacheWrite5m)
-	addClass(m, r.cacheWrite1h, t.cacheWrite1h)
+// priceTiers prices each token class into its displayed tier. The cache-write
+// classes (5m, 1h) collapse into the single write tier, while an unclassified
+// write is priced at the 5-minute rate and marked estimated. The billed side
+// starts equal to the list; the subscription substitution replaces it later.
+func priceTiers(r tokenRates, t promptTokens) tokenTiers {
+	var tiers tokenTiers
+	addClass(&tiers[tierInput].list, r.input, t.input)
+	addClass(&tiers[tierOutput].list, r.output, t.output)
+	addClass(&tiers[tierCacheRead].list, r.cacheRead, t.cacheRead)
+	addClass(&tiers[tierCacheWrite].list, r.cacheWrite5m, t.cacheWrite5m)
+	addClass(&tiers[tierCacheWrite].list, r.cacheWrite1h, t.cacheWrite1h)
+	addEstimatedClass(&tiers[tierCacheWrite].list, r.cacheWrite5m, t.unclassifiedCacheWrite)
+	for i := range tiers {
+		tiers[i].billed = tiers[i].list
+	}
+	return tiers
 }
 
 func priceWebSearch(m *money, r modelRate, requests int64) {

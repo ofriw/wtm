@@ -1,5 +1,5 @@
-PATH       BRANCH  UPSTREAM   LAST USED  AGE  ACTIVE  COST  STATUS  INTEGRATIONS
-/SBX/repo  main    -         2020-01-01   6y       -     -  ACTIVE  chunk~ mcp pi
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE  COST  STATUS  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -     -  ACTIVE  chunk~ mcp pi
 [
   {
     "path": "/SBX/repo",

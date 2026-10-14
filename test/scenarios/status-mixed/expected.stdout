@@ -1,5 +1,5 @@
-PATH              BRANCH      UPSTREAM   LAST USED  AGE  ACTIVE  COST  STATUS  INTEGRATIONS
-/SBX/repo         main        -         <DATE>       0s       -     -  ACTIVE  chunk mcp
-/SBX/wt-detached  (detached)  -         2020-01-01   6y       -     -  UNUSED  chunk~
-/SBX/wt-linked    linked      -         2020-01-01   6y       -     -  UNUSED  chunk
-/SBX/wt-locked    locked      -         2020-01-01   6y       -     -  UNUSED  -
+PATH              BRANCH      UPSTREAM   LAST USED    AGE  ACTIVE  COST  STATUS  INTEGRATIONS
+/SBX/repo         main        -         <DATE>         0s       -     -  ACTIVE  chunk mcp
+/SBX/wt-detached  (detached)  -         2020-01-01  6y 2d       -     -  UNUSED  chunk~
+/SBX/wt-linked    linked      -         2020-01-01  6y 2d       -     -  UNUSED  chunk
+/SBX/wt-locked    locked      -         2020-01-01  6y 2d       -     -  UNUSED  -

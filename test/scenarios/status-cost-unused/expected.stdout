@@ -1,9 +1,9 @@
-PATH       BRANCH  UPSTREAM   LAST USED  AGE  ACTIVE   COST  STATUS  INTEGRATIONS
-/SBX/repo  main    -         2020-01-01   6y       -      -  UNUSED  -
-/SBX/wt    wt      -         2020-01-01   6y  1h 30m  $4.85  UNUSED  -
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST  STATUS  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -      -  UNUSED  -
+/SBX/wt    wt      -         2020-01-01  6y 2d  1h 30m  $4.85  UNUSED  -
 
 current worktree  /SBX/repo
-age               6y
+age               6y 2d
 active time       -
 cost              -
 no agent usage recorded

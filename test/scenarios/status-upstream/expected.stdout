@@ -1,6 +1,6 @@
-PATH       BRANCH  UPSTREAM     LAST USED  AGE  ACTIVE  COST  STATUS  INTEGRATIONS
-/SBX/repo  main    -           2020-01-01   6y       -     -  UNUSED  -
-/SBX/wt1   wt1     origin/wt1  2020-01-01   6y       -     -  UNUSED  -
+PATH       BRANCH  UPSTREAM     LAST USED    AGE  ACTIVE  COST  STATUS  INTEGRATIONS
+/SBX/repo  main    -           2020-01-01  6y 2d       -     -  UNUSED  -
+/SBX/wt1   wt1     origin/wt1  2020-01-01  6y 2d       -     -  UNUSED  -
 [
   {
     "path": "/SBX/repo",

@@ -296,6 +296,20 @@ func TestStatusCellStyle(t *testing.T) {
 	}
 }
 
+// TestLegendStyleFollowsProfile pins the shared legend treatment: the legend is
+// dim on a color terminal and byte-plain when color is off, so a legend never
+// pollutes pipes or goldens.
+func TestLegendStyleFollowsProfile(t *testing.T) {
+	const line = "tokens: a = b"
+	colored := captureStdout(t, func() { printLegend([]string{line}, colorAlways) })
+	if !strings.Contains(colored, "\x1b[2m") {
+		t.Fatalf("legend is not dim with --color=always: %q", colored)
+	}
+	if plain := captureStdout(t, func() { printLegend([]string{line}, colorNever) }); plain != line+"\n" {
+		t.Fatalf("legend must be byte-plain with --color=never: %q", plain)
+	}
+}
+
 // TestGroupedCellColors pins the grouped cell's semantic palette per token:
 // present green, partial yellow, absent faint. The plain goldens pin the
 // tokens; this pins the color branch that no golden exercises.
@@ -551,4 +565,24 @@ func TestDropZeroColumnsDisclosesHiddenColumns(t *testing.T) {
 			t.Fatalf("hidden core column must warn: %q", errOut)
 		}
 	})
+}
+
+// TestStatusCellStyleTrimsPaddedNonValue pins that a COST cell aligned with
+// surrounding numbers — which pads an absent or unpriced value with spaces —
+// still recedes as a non-value instead of reading as a number.
+func TestStatusCellStyleTrimsPaddedNonValue(t *testing.T) {
+	for _, v := range []string{"    -", "  unknown"} {
+		if s := statusCellStyle("COST", v); !s.GetFaint() {
+			t.Errorf("statusCellStyle(COST, %q) faint=false, want true", v)
+		}
+		if got := statusCell("COST", v); !strings.Contains(got, "\x1b[2m") {
+			t.Errorf("statusCell(COST, %q) = %q, want faint ANSI", v, got)
+		}
+	}
+	if s := statusCellStyle("COST", "$1.00"); s.GetFaint() {
+		t.Errorf("statusCellStyle(COST, \"$1.00\") faint=true, want false")
+	}
+	if got := statusCell("COST", "$1.00"); strings.Contains(got, "\x1b[2m") {
+		t.Errorf("statusCell(COST, \"$1.00\") = %q, want no faint ANSI", got)
+	}
 }

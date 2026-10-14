@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -118,25 +119,25 @@ func TestStatusJSONEstimatedFlag(t *testing.T) {
 // its SSOT line, an unset reason stays silent, and no reason prints nothing.
 // The asserts reference the constants, so prose edits move both sides together.
 func TestStatusEstimateLegend(t *testing.T) {
-	cacheOnly := captureStdout(t, func() { printEstimateLegend(estimateReasons{cache: true}) })
+	cacheOnly := captureStdout(t, func() { printEstimateLegend(estimateReasons{cache: true}, colorNever) })
 	if !strings.Contains(cacheOnly, "~ estimated: "+estimateCacheWriteLifetime) {
 		t.Fatalf("cache-only legend missing its line:\n%s", cacheOnly)
 	}
 	if strings.Contains(cacheOnly, estimateSubscriptionOverage) {
 		t.Fatalf("cache-only legend must not explain overage:\n%s", cacheOnly)
 	}
-	overageOnly := captureStdout(t, func() { printEstimateLegend(estimateReasons{overage: true}) })
+	overageOnly := captureStdout(t, func() { printEstimateLegend(estimateReasons{overage: true}, colorNever) })
 	if !strings.Contains(overageOnly, "~ estimated: "+estimateSubscriptionOverage) {
 		t.Fatalf("overage-only legend missing its line:\n%s", overageOnly)
 	}
 	if strings.Contains(overageOnly, estimateCacheWriteLifetime) {
 		t.Fatalf("overage-only legend must not explain the cache split:\n%s", overageOnly)
 	}
-	both := captureStdout(t, func() { printEstimateLegend(estimateReasons{cache: true, overage: true}) })
+	both := captureStdout(t, func() { printEstimateLegend(estimateReasons{cache: true, overage: true}, colorNever) })
 	if strings.Count(both, "~ estimated: ") != 2 {
 		t.Fatalf("both-reasons legend must print 2 lines, got:\n%s", both)
 	}
-	if got := captureStdout(t, func() { printEstimateLegend(estimateReasons{}) }); got != "" {
+	if got := captureStdout(t, func() { printEstimateLegend(estimateReasons{}, colorNever) }); got != "" {
 		t.Fatalf("no-estimate legend must be empty, got:\n%q", got)
 	}
 }
@@ -193,7 +194,7 @@ func TestEstimateLegendSelectivity(t *testing.T) {
 			if r.cache != tc.wantCache || r.overage != tc.wantOver {
 				t.Fatalf("reasons = %+v, want cache=%v overage=%v", r, tc.wantCache, tc.wantOver)
 			}
-			out := captureStdout(t, func() { printEstimateLegend(r) })
+			out := captureStdout(t, func() { printEstimateLegend(r, colorNever) })
 			wantLines := 0
 			if tc.wantCache {
 				wantLines++
@@ -214,7 +215,7 @@ func TestEstimateLegendSelectivity(t *testing.T) {
 		if !r.cache || !r.overage {
 			t.Fatalf("reasons = %+v, want both", r)
 		}
-		if out := captureStdout(t, func() { printEstimateLegend(r) }); strings.Count(out, "~ estimated: ") != 2 {
+		if out := captureStdout(t, func() { printEstimateLegend(r, colorNever) }); strings.Count(out, "~ estimated: ") != 2 {
 			t.Fatalf("both-reasons legend must print 2 lines:\n%s", out)
 		}
 	})
@@ -270,14 +271,14 @@ func TestStatusDetailBlock(t *testing.T) {
 	if !strings.HasPrefix(out, "\ncurrent worktree") {
 		t.Errorf("block must open with a blank line, then the identity row:\n%q", out)
 	}
-	for _, want := range []string{"current worktree", "active time", "HARNESS", "deepseek-flash", "grok-4.3", "$4.00"} {
+	for _, want := range []string{"current worktree", "active time", "MODEL", "↑ in", "↓ out", "🎯 hit", "✍️ write", "✗ miss", "◉ hit%", "deepseek-flash", "grok-4.3", "$4.00"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("detail block missing %q:\n%s", want, out)
 		}
 	}
 	// The summary labels keep their order above the breakdown grid.
 	prev := 0
-	for _, label := range []string{"\ncurrent worktree", "\nage", "\nactive time", "\ncost", "\nHARNESS"} {
+	for _, label := range []string{"\ncurrent worktree", "\nage", "\nactive time", "\ncost", "\nMODEL"} {
 		i := strings.Index(out, label)
 		if i < prev {
 			t.Errorf("detail label %q out of order:\n%s", label, out)
@@ -293,8 +294,54 @@ func TestStatusDetailBlock(t *testing.T) {
 	if !strings.Contains(out, "no agent usage recorded") {
 		t.Errorf("empty current worktree must say so:\n%s", out)
 	}
-	if strings.Contains(out, "HARNESS") {
+	if strings.Contains(out, "MODEL") {
 		t.Errorf("empty current worktree must not print rows:\n%s", out)
+	}
+}
+
+// TestStatusDetailTokenColumns pins the breakdown contract: one column per token
+// metric, each headed by its glyph and label from detailTokenMeta, with every
+// row's value in the matching column.
+func TestStatusDetailTokenColumns(t *testing.T) {
+	headers := columnHeaders(detailColumns())
+	for i, d := range detailTokenMeta {
+		if got, want := headers[3+i], d.glyph+" "+d.label; got != want {
+			t.Errorf("token column %d header = %q, want %q", i, got, want)
+		}
+	}
+	var u worktreeUsage
+	u.addSession("pi", []usageEvent{
+		{at: at(0), model: "m", tokens: promptTokens{input: 5_300_000, output: 732, cacheWrite5m: 714_800}, cost: fptr(1)},
+	}, pairPricer(func(e usageEvent) money {
+		var m money
+		m.addKnown(*e.cost)
+		return m
+	}))
+	// in is the total prompt size (5.3M + 714.8k = 6.0M), not the uncached slice.
+	if got, want := detailRows(&u)[0], []string{"m", "0s", "$1.00", "6.0M", "732", "-", "714.8k", "6.0M", "0.0%"}; !slices.Equal(got, want) {
+		t.Errorf("detail row = %q, want %q", got, want)
+	}
+}
+
+// TestStatusDetailHitRateGuard pins the cache-hit invariant: a cache read always
+// follows a cache build (uncached input or a write), so a model whose window
+// records hits but no build is refused instead of read as a false 100%. The
+// guard also keeps rounding from reaching 100%.
+func TestStatusDetailHitRateGuard(t *testing.T) {
+	cases := []struct {
+		name   string
+		tokens promptTokens
+		want   string
+	}{
+		{"hits without a build", promptTokens{cacheRead: 3_800_000}, "unknown"},
+		{"hits with a build", promptTokens{input: 1, cacheRead: 10_000_000}, "99.9%"},
+		{"only output", promptTokens{output: 732}, "-"},
+		{"no hits", promptTokens{input: 1000}, "0.0%"},
+	}
+	for _, c := range cases {
+		if got := hitRateCell(&modelUsage{tokens: c.tokens}); got != c.want {
+			t.Errorf("%s: hitRateCell = %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 
@@ -543,5 +590,247 @@ func TestPartialProvenHarnessCell(t *testing.T) {
 	wt := worktree{Path: "/test", Usage: &u}
 	if got := cellCost(wt, columnContext{}); got != "unknown" {
 		t.Errorf("cost = %q, want unknown", got)
+	}
+}
+
+// TestStatusJSONTiers pins the machine contract for the per-tier breakdown: a
+// model with recorded tokens carries a tiers map with the exact counts and the
+// billed/list cost keys the table shows, so a consumer can read the same
+// breakdown without parsing the table.
+func TestStatusJSONTiers(t *testing.T) {
+	var u worktreeUsage
+	price := usagePricer(agent{name: "pi"}, nil, subscriptions{})
+	u.addSession("pi", []usageEvent{{
+		at: at(0), model: "m", cost: fptr(0.30),
+		tokens:   promptTokens{input: 1000, output: 500, cacheRead: 2000, cacheWrite5m: 100},
+		tierCost: &tokenCosts{input: fptr(0.10), output: fptr(0.15), cacheRead: fptr(0.04), cacheWrite: fptr(0.01)},
+	}}, price)
+	w := worktree{Path: "/w", Usage: &u}
+	out := captureStdout(t, func() {
+		if err := printStatusJSON([]worktree{w}, at(0), 10*time.Hour, "/w"); err != nil {
+			t.Errorf("printStatusJSON: %v", err)
+		}
+	})
+	var got []jsonWorktree
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	tiers := got[0].Usage["pi"].Models["m"].Tiers
+	if len(tiers) != int(numTiers) {
+		t.Fatalf("tiers = %d keys, want %d\n%s", len(tiers), numTiers, out)
+	}
+	if in := tiers["input"]; in.Tokens != 1000 || in.Cost == nil || *in.Cost != 0.10 {
+		t.Errorf("input tier = %+v, want 1000 tokens @ 0.10", in)
+	}
+	if cw := tiers["cacheWrite"]; cw.Tokens != 100 {
+		t.Errorf("cacheWrite tier = %+v, want 100 tokens", cw)
+	}
+	if got := tiers["cacheRead"].Tokens; got != 2000 {
+		t.Errorf("cacheRead tokens = %d, want 2000", got)
+	}
+	m := got[0].Usage["pi"].Models["m"]
+	if m.CacheMissTokens == nil || *m.CacheMissTokens != 1100 {
+		t.Errorf("cacheMissTokens = %v, want 1100", m.CacheMissTokens)
+	}
+	if m.CacheHitRate == nil || *m.CacheHitRate != 0.645161 {
+		t.Errorf("cacheHitRate = %v, want 0.645161", m.CacheHitRate)
+	}
+}
+
+// TestStatusJSONCacheMetricsOmitted pins when the derived cache keys are absent:
+// a model with no prompt tokens omits both, and a model whose hits have no
+// recorded build omits only the rate, so the contract never carries a 100%.
+func TestStatusJSONCacheMetricsOmitted(t *testing.T) {
+	var u worktreeUsage
+	price := usagePricer(agent{name: "pi"}, nil, subscriptions{})
+	u.addSession("pi", []usageEvent{
+		{at: at(0), model: "notokens", cost: fptr(0.10)},
+		{at: at(0), model: "outputonly", cost: fptr(0.10), tokens: promptTokens{output: 500}},
+		{at: at(0), model: "nobuild", cost: fptr(0.10), tokens: promptTokens{cacheRead: 5000}},
+	}, price)
+	w := worktree{Path: "/w", Usage: &u}
+	out := captureStdout(t, func() {
+		if err := printStatusJSON([]worktree{w}, at(0), 10*time.Hour, "/w"); err != nil {
+			t.Errorf("printStatusJSON: %v", err)
+		}
+	})
+	var got []jsonWorktree
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	models := got[0].Usage["pi"].Models
+	for _, name := range []string{"notokens", "outputonly"} {
+		if m := models[name]; m.CacheMissTokens != nil || m.CacheHitRate != nil {
+			t.Errorf("%s: cache metrics present without prompt tokens: %+v", name, m)
+		}
+	}
+	if m := models["nobuild"]; m.CacheMissTokens == nil || *m.CacheMissTokens != 0 || m.CacheHitRate != nil {
+		t.Errorf("nobuild = %+v, want miss 0 and no rate", m)
+	}
+}
+
+// TestStatusJSONCacheKeysConsumer pins the raw machine keys a consumer reads:
+// a token-bearing model carries tiers/cacheMissTokens/cacheHitRate, a model
+// with no tokens omits all three, and hits without a build keep the miss
+// count but omit the rate, so no consumer ever reads a false 100%.
+func TestStatusJSONCacheKeysConsumer(t *testing.T) {
+	var u worktreeUsage
+	price := usagePricer(agent{name: "pi"}, nil, subscriptions{})
+	u.addSession("pi", []usageEvent{
+		{at: at(0), model: "withtokens", cost: fptr(0.30), tokens: promptTokens{input: 1000, cacheRead: 2000}},
+		{at: at(0), model: "notokens", cost: fptr(0.10)},
+		{at: at(0), model: "nobuild", cost: fptr(0.10), tokens: promptTokens{cacheRead: 5000}},
+	}, price)
+	w := worktree{Path: "/w", Usage: &u}
+	out := captureStdout(t, func() {
+		if err := printStatusJSON([]worktree{w}, at(0), 10*time.Hour, "/w"); err != nil {
+			t.Errorf("printStatusJSON: %v", err)
+		}
+	})
+	var raw []map[string]any
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	models := raw[0]["usage"].(map[string]any)["pi"].(map[string]any)["models"].(map[string]any)
+	// Tier keys are the SSOT names, so a rename moves both sides together.
+	wantTiers := map[string]bool{}
+	for _, k := range tierMeta {
+		wantTiers[k] = true
+	}
+	with := models["withtokens"].(map[string]any)
+	if tiers, ok := with["tiers"].(map[string]any); !ok {
+		t.Errorf("withtokens tiers missing:\n%s", out)
+	} else {
+		for k := range tiers {
+			if !wantTiers[k] {
+				t.Errorf("tiers key %q not in tierMeta", k)
+			}
+		}
+		for k := range wantTiers {
+			if _, ok := tiers[k]; !ok {
+				t.Errorf("tiers key %q missing", k)
+			}
+		}
+	}
+	for _, k := range []string{"cacheMissTokens", "cacheHitRate"} {
+		if _, ok := with[k]; !ok {
+			t.Errorf("withtokens %s missing", k)
+		}
+	}
+	bare := models["notokens"].(map[string]any)
+	for _, k := range []string{"tiers", "cacheMissTokens", "cacheHitRate"} {
+		if _, ok := bare[k]; ok {
+			t.Errorf("notokens must omit %s", k)
+		}
+	}
+	nobuild := models["nobuild"].(map[string]any)
+	if _, ok := nobuild["cacheMissTokens"]; !ok {
+		t.Error("nobuild must keep cacheMissTokens")
+	}
+	if _, ok := nobuild["cacheHitRate"]; ok {
+		t.Error("nobuild must omit cacheHitRate (hits with no build)")
+	}
+}
+
+// TestAlignCostSubFieldsEstimateUnknown pins that alignment never mid-cuts
+// pairs: estimated and unknown cells align with exact ones in one column.
+func TestAlignCostSubFieldsEstimateUnknown(t *testing.T) {
+	headers := []string{"MODEL", colCost.header}
+	rows := [][]string{
+		{"pair", "$0.00/$41.20"},
+		{"est", "~$0.00/$41.20"},
+		{"solo", "$12.34"},
+		{"unk", "unknown"},
+	}
+	out := alignCostSubFields(headers, rows)
+	if len(out) != 4 {
+		t.Fatalf("aligned rows = %d, want 4", len(out))
+	}
+	if out[3][1] == "" {
+		t.Error("unknown cell must survive alignment")
+	}
+	if out[1][1] == "" || !strings.Contains(out[1][1], "~$0.00") {
+		t.Errorf("estimated cell lost its mark: %q", out[1][1])
+	}
+	if !strings.Contains(out[0][1], "/") || !strings.Contains(out[1][1], "/") {
+		t.Errorf("pairs must keep separator: %q %q", out[0][1], out[1][1])
+	}
+}
+
+// TestTiersJSONSubscriptionListCost pins the tier-level list contract: a proven
+// subscription tier carries both its priced $0 billed cost and its list price,
+// while an unproven tier omits listCost even when its list side is priced.
+func TestTiersJSONSubscriptionListCost(t *testing.T) {
+	var m modelUsage
+	m.tokens = promptTokens{input: 100}
+	m.tiers[tierInput].billed = knownZero()
+	m.tiers[tierInput].list.addKnown(0.30)
+	m.tiers[tierInput].subscription = true
+	m.tiers[tierOutput].list.addKnown(0.50)
+
+	out := tiersJSON(m.tokens, m.tiers)
+	in, ok := out["input"]
+	if !ok {
+		t.Fatalf("input tier missing: %+v", out)
+	}
+	if in.Cost == nil || *in.Cost != 0 {
+		t.Errorf("input cost = %v, want the proven 0", in.Cost)
+	}
+	if in.ListCost == nil || in.ListCost.v == nil || *in.ListCost.v != 0.30 {
+		t.Errorf("input listCost = %+v, want 0.30", in.ListCost)
+	}
+	if o, ok := out["output"]; !ok {
+		t.Fatalf("output tier missing: %+v", out)
+	} else if o.ListCost != nil {
+		t.Errorf("unproven output listCost = %+v, want nil", o.ListCost)
+	}
+}
+
+// TestHitRateCappedBelowOne pins the no-false-100% cap: a window that rounds to
+// a full cache share is clipped at maxHitRate, so its percent and its machine
+// rate stay below 1.
+func TestHitRateCappedBelowOne(t *testing.T) {
+	tokens := promptTokens{cacheRead: 2_000_000, input: 1}
+	rate, ok := tokens.hitRate()
+	if !ok {
+		t.Fatal("hitRate undefined for a window with a build")
+	}
+	if rate > maxHitRate {
+		t.Errorf("hitRate = %v, want <= %v", rate, maxHitRate)
+	}
+	if got := formatPercent(rate); got != "99.9%" {
+		t.Errorf("formatPercent(%v) = %q, want 99.9%%", rate, got)
+	}
+	_, ratePtr := cacheJSON(tokens)
+	if ratePtr == nil {
+		t.Fatal("cacheJSON rate missing")
+	}
+	if *ratePtr >= 1 {
+		t.Errorf("cacheJSON rate = %v, want < 1", *ratePtr)
+	}
+}
+
+// TestStatusDetailTokenLegendOnlyWithTokens pins the anti-dangle rule at the
+// detail block: the token legend prints only when a model actually recorded
+// tokens, never beside a breakdown whose token cells are all dashes.
+func TestStatusDetailTokenLegendOnlyWithTokens(t *testing.T) {
+	t.Setenv("COLUMNS", "0")
+	costOnly := worktreeUsage{harnesses: map[string]*harnessUsage{
+		"pi": {models: map[string]*modelUsage{"m": {cost: costPair{billed: knownZero()}}}},
+	}}
+	withTokens := worktreeUsage{harnesses: map[string]*harnessUsage{
+		"pi": {models: map[string]*modelUsage{"m": {cost: costPair{billed: knownZero()}, tokens: promptTokens{input: 100}}}},
+	}}
+	costOut := captureStdout(t, func() {
+		printStatusDetail([]worktree{{Path: "/w", Usage: &costOnly}}, "/w", at(0), colorNever)
+	})
+	if strings.Contains(costOut, "tokens: in") {
+		t.Errorf("cost-only detail must not print the token legend:\n%s", costOut)
+	}
+	tokOut := captureStdout(t, func() {
+		printStatusDetail([]worktree{{Path: "/w", Usage: &withTokens}}, "/w", at(0), colorNever)
+	})
+	if !strings.Contains(tokOut, "tokens: in") {
+		t.Errorf("token-bearing detail must print the token legend:\n%s", tokOut)
 	}
 }

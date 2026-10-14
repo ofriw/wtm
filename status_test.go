@@ -417,7 +417,7 @@ func TestStatusHeadersSSOT(t *testing.T) {
 	for _, c := range allColumns() {
 		registered[c.header] = true
 	}
-	for _, cols := range [][]worktreeColumn{statusColumns, gcPickerColumns, detailColumns} {
+	for _, cols := range [][]worktreeColumn{statusColumns, gcPickerColumns, detailColumns()} {
 		for _, c := range cols {
 			if !registered[c.header] {
 				t.Errorf("column %q is used by a grid but missing from allColumns", c.header)
@@ -580,11 +580,11 @@ func narrowProvenPairWorktree(t *testing.T, now time.Time, estimated bool) ([]wo
 	var u worktreeUsage
 	if estimated {
 		full = "$0.00/~$41.20"
-		u.addSession("pi", []usageEvent{{at: now, model: "m"}}, func(usageEvent) costPair {
+		u.addSession("pi", []usageEvent{{at: now, model: "m"}}, func(usageEvent) pricedEvent {
 			var list, billed money
 			list.addEstimated(41.20)
 			billed.addKnown(0)
-			return costPair{list: list, billed: billed, subscription: true}
+			return pricedEvent{total: costPair{list: list, billed: billed, subscription: true}}
 		})
 	} else {
 		u = piUsageOne(t, piProviderLine("openai-codex", 41.20))
@@ -685,7 +685,7 @@ func TestStatusDetailProvenPairNarrow(t *testing.T) {
 					t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
 				}
 			}
-			headers := columnHeaders(detailColumns)
+			headers := columnHeaders(detailColumns())
 			rows := detailRows(cur.Usage)
 			widths := columnWidths(headers, rows, width)
 			idx := headerIndex(headers)
@@ -704,6 +704,47 @@ func TestStatusDetailProvenPairNarrow(t *testing.T) {
 				t.Errorf("detail COST kept but pair %q not rendered whole:\n%s", full, out)
 			}
 		})
+	}
+}
+
+// TestStatusDetailAlignsCostSubColumns pins option B: the COST cell carries two
+// aligned sub-fields, so a single-price row's billed value lines up under the
+// billed half of a subscription pair, and the separator lines up too. The pair
+// stays one column with one header, so it still renders whole or drops whole.
+func TestStatusDetailAlignsCostSubColumns(t *testing.T) {
+	now := at(0)
+	env := sandbox(t)
+	var u worktreeUsage
+	u.addSession("pi", []usageEvent{{at: now, model: "pair"}}, func(usageEvent) pricedEvent {
+		var list, billed money
+		list.addKnown(41.20)
+		billed.addKnown(0)
+		return pricedEvent{total: costPair{list: list, billed: billed, subscription: true}}
+	})
+	u.addSession("pi", []usageEvent{{at: now, model: "solo"}}, func(usageEvent) pricedEvent {
+		var list, billed money
+		list.addKnown(12.34)
+		billed.addKnown(12.34)
+		return pricedEvent{total: costPair{list: list, billed: billed}}
+	})
+	cur := worktree{Path: filepath.Join(env.Home, "wt"), Usage: &u}
+	out := captureStdout(t, func() { printStatusDetail([]worktree{cur}, cur.Path, now, colorNever) })
+	line := func(sub string) string {
+		for _, l := range strings.Split(out, "\n") {
+			if strings.Contains(l, sub) {
+				return l
+			}
+		}
+		t.Fatalf("no line carries %q:\n%s", sub, out)
+		return ""
+	}
+	// Match the model rows, not the summary block, which repeats the totals.
+	pair, solo := line("pair"), line("solo")
+	// Each sub-field right-aligns, so the billed values' right edges line up.
+	soloEnd := strings.Index(solo, "$12.34") + len("$12.34")
+	pairEnd := strings.Index(pair, "$0.00") + len("$0.00")
+	if soloEnd != pairEnd {
+		t.Fatalf("billed sub-fields misaligned: solo ends %d, pair ends %d\n%s", soloEnd, pairEnd, out)
 	}
 }
 

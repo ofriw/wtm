@@ -470,7 +470,7 @@ func lastUsed(wtPath string, idx sessionIndex) time.Time {
 type parsedSession struct {
 	harness string
 	events  []usageEvent
-	price   func(usageEvent) costPair
+	price   func(usageEvent) pricedEvent
 }
 
 // buildUsage parses a worktree's owned sessions once and aggregates cost/time.
@@ -542,48 +542,90 @@ func readUsage(a agent, path string) ([]usageEvent, error) {
 	return a.parseUsage(bufio.NewReader(f))
 }
 
-// usagePricer resolves one event to its price pair. The list side is the
-// pay-as-you-go price today's code reports; a proven subscription replaces the
-// billed side with the $0 marginal cost while the list side stays visible. A
-// Claude proof that still permits overage yields an estimated zero only when
-// the event priced something (a known nonzero list, real tokens, or a
-// self-priced cost); a zero-token event keeps the exact zero, so an empty turn
-// never reads estimated. API-key and otherwise metered usage still bills, so a
-// proven $0 never claims the whole invoice.
-func usagePricer(a agent, cat catalog, subs subscriptions) func(usageEvent) costPair {
-	return func(e usageEvent) costPair {
-		list := listPrice(a, cat, e)
-		p := costPair{list: list, billed: list}
+// usagePricer resolves one event to its price pair and per-tier breakdown. The
+// list side is the pay-as-you-go price today's code reports; a proven
+// subscription replaces the billed side with the $0 marginal cost while the
+// list side stays visible. A Claude proof that still permits overage yields an
+// estimated zero only when the event priced something (a known nonzero list,
+// real tokens, or a self-priced cost); a zero-token event keeps the exact zero,
+// so an empty turn never reads estimated. The substitution reaches every tier,
+// so a covered event never shows a bare $0.00 beside a metered list per tier.
+// API-key and otherwise metered usage still bills, so a proven $0 never claims
+// the whole invoice.
+func usagePricer(a agent, cat catalog, subs subscriptions) func(usageEvent) pricedEvent {
+	return func(e usageEvent) pricedEvent {
+		p := listPrice(a, cat, e)
 		switch subs.coverage(a.name, e.provider, e.at) {
 		case coverageAllowance:
-			p.billed = knownZero()
-			p.subscription = true
+			coverTiers(&p, knownZero)
 		case coverageOveragePossible:
-			if (list.known() && list.amount != 0) || e.tokens.total() > 0 || e.cost != nil {
-				p.billed = estimatedZero()
+			if (p.total.list.known() && p.total.list.amount != 0) || e.tokens.total() > 0 || e.cost != nil {
+				coverTiers(&p, estimatedZero)
 			} else {
-				p.billed = knownZero()
+				coverTiers(&p, knownZero)
 			}
-			p.subscription = true
 		}
 		return p
 	}
 }
 
-// listPrice resolves one event's pay-as-you-go price: a harness-supplied cost
-// wins, a catalog-rated token record is priced from the catalog, and everything
-// else (including a catalog-rated record with no catalog) is unknown.
-func listPrice(a agent, cat catalog, e usageEvent) money {
-	var m money
+// coverTiers replaces the billed side of the total and every priced tier with
+// the coverage zero, keeping the list side intact. The invariant: every cost
+// figure carries the billed/list pair, so a proven subscription discounts each
+// tier exactly as it discounts the total. A tier the event never priced stays
+// absent rather than becoming a spurious $0.00.
+func coverTiers(p *pricedEvent, zero func() money) {
+	p.total.billed = zero()
+	p.total.subscription = true
+	for i := range p.tiers {
+		if !p.tiers[i].list.any {
+			continue
+		}
+		p.tiers[i].billed = zero()
+		p.tiers[i].subscription = true
+	}
+}
+
+// listPrice resolves one event's pay-as-you-go price and per-tier breakdown: a
+// harness-supplied cost wins, a catalog-rated token record is priced from the
+// catalog, and everything else (including a catalog-rated record with no
+// catalog) is unknown.
+func listPrice(a agent, cat catalog, e usageEvent) pricedEvent {
 	switch {
 	case e.cost != nil:
-		m.addKnown(*e.cost)
+		return piPrice(e)
 	case a.catalogRated && cat != nil:
-		m = cat.price(e)
+		return cat.price(e)
 	default:
-		m.addUnknown()
+		return unpriced()
 	}
-	return m
+}
+
+// piPrice prices a self-reported Pi event: the record carries the total and,
+// in modern sessions, the per-class split. An older record with only the total
+// leaves every tier absent rather than inventing a breakdown.
+func piPrice(e usageEvent) pricedEvent {
+	var p pricedEvent
+	p.total.list.addKnown(*e.cost)
+	if c := e.tierCost; c != nil {
+		addKnownClass(&p.tiers[tierInput].list, c.input)
+		addKnownClass(&p.tiers[tierOutput].list, c.output)
+		addKnownClass(&p.tiers[tierCacheRead].list, c.cacheRead)
+		addKnownClass(&p.tiers[tierCacheWrite].list, c.cacheWrite)
+	}
+	for i := range p.tiers {
+		p.tiers[i].billed = p.tiers[i].list
+	}
+	p.total.billed = p.total.list
+	return p
+}
+
+// addKnownClass records a harness-reported class price. A nil field leaves the
+// tier untouched, which reads as absent, never as a real zero.
+func addKnownClass(m *money, v *float64) {
+	if v != nil {
+		m.addKnown(*v)
+	}
 }
 
 // agentByName resolves a session owner to its descriptor.

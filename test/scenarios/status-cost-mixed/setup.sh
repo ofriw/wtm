@@ -10,8 +10,8 @@ commit "$SBX/repo" "seed" README.md
 worktree_add "$SBX/repo" "$SBX/wt" wt
 
 mk_pi_usage_session "$SBX/wt" pi-mixed "$OLD_STAMP" \
-  '{"type":"message","timestamp":"2020-01-01T00:00:00Z","message":{"role":"assistant","model":"deepseek-flash","usage":{"cost":{"total":1.00}}}}' \
-  '{"type":"message","timestamp":"2020-01-01T01:00:00Z","message":{"role":"assistant","model":"deepseek-flash","usage":{"cost":{"total":2.00}}}}'
+  '{"type":"message","timestamp":"2020-01-01T00:00:00Z","message":{"role":"assistant","model":"deepseek-flash","usage":{"input":100000,"output":10000,"cacheRead":50000,"cacheWrite":20000,"cost":{"input":0.50,"output":0.25,"cacheRead":0.05,"cacheWrite":0.20,"total":1.00}}}}' \
+  '{"type":"message","timestamp":"2020-01-01T01:00:00Z","message":{"role":"assistant","model":"deepseek-flash","usage":{"input":20000,"output":20000,"cacheRead":0,"cacheWrite":0,"cost":{"input":0.10,"output":1.90,"cacheRead":0,"cacheWrite":0,"total":2.00}}}}'
 
 mk_claude_usage_session "$SBX/wt" claude-mixed "$OLD_STAMP" \
   '{"type":"assistant","timestamp":"2020-01-01T00:00:00Z","requestId":"r1","message":{"id":"m1","model":"claude-sonnet-4-6","usage":{"input_tokens":10000,"output_tokens":10000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"service_tier":"standard"}}}' \

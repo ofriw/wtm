@@ -9,7 +9,7 @@ f	644	820ec63155313c45eeae3e25656dccce9c7ccbb350bff0f3e5e0c4aa862a8135	/SBX/home
 d	755	-	/SBX/home/pi-agent
 d	755	-	/SBX/home/pi-agent/sessions
 d	755	-	/SBX/home/pi-agent/sessions/pi-mixed
-f	644	633dd8728389119fd55f588530760c380b5bdb16f3073c2953e9311433c03d32	/SBX/home/pi-agent/sessions/pi-mixed/pi-mixed.jsonl
+f	644	ef347ef949ddbc62c7b133343830845bff55856fc090a0f42a8310bd0fdde4f7	/SBX/home/pi-agent/sessions/pi-mixed/pi-mixed.jsonl
 d	755	-	/SBX/repo
 d	755	-	/SBX/repo/.git
 f	644	4a6689419b00b11700c9b6246bcfa8936c8f5e1e824db3a7e57030e2d1c1a684	/SBX/repo/.git/COMMIT_EDITMSG

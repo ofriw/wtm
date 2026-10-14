@@ -253,7 +253,7 @@ func cmdStatus(g *globals, args []string) error {
 	}
 	cols := statusColumnsFor(wide)
 	printStatusTable(cols, ws.wts, now, ws.ttl, g.color)
-	printEstimateLegend(estimateLegendNeeded(cols, ws.wts, current, now, ws.ttl))
+	printEstimateLegend(estimateLegendNeeded(cols, ws.wts, current, now, ws.ttl), g.color)
 	printStatusDetail(ws.wts, current, now, g.color)
 	return nil
 }
@@ -429,7 +429,7 @@ func cellAge(w worktree, c columnContext) string {
 	if w.Created.IsZero() {
 		return "-"
 	}
-	return humanAge(c.now.Sub(w.Created))
+	return humanDuration(c.now.Sub(w.Created))
 }
 
 // cellActive is the union of the worktree's session spans; "-" only when the
@@ -439,7 +439,7 @@ func cellActive(w worktree, _ columnContext) string {
 	if w.Usage == nil {
 		return "-"
 	}
-	return humanActive(w.Usage.active())
+	return humanDuration(w.Usage.active())
 }
 
 // cellCost is the sum of every harness cost; "-" when there are no events and
@@ -488,14 +488,26 @@ var (
 	colIntegrations = worktreeColumn{header: "INTEGRATIONS", cell: cellIntegrations, shrinkRank: 9, floor: 6}
 	colUncommitted  = worktreeColumn{header: "UNCOMMITTED", cell: cellUncommitted}
 
-	// Detail-block headers carry no cell: the block renders pre-formatted
-	// (harness, model) rows, and these entries exist only so the detail grid
-	// obeys the same shrink policy as the status table. MODEL and HARNESS are
-	// identity (give up width first), TIME follows, and COST reuses colCost.
-	colModel   = worktreeColumn{header: "MODEL", shrinkRank: 2}
-	colHarness = worktreeColumn{header: "HARNESS", shrinkRank: 3}
-	colTime    = worktreeColumn{header: "TIME", rightAlign: true, shrinkRank: 7, floor: 6}
+	// Detail-block headers carry no cell: the block renders pre-formatted model
+	// rows, and these entries exist only so the detail grid obeys the same shrink
+	// policy as the status table. The token group (see tokenColumns) is the pure
+	// data and gives up width first, dropping whole (rank 1); MODEL is identity
+	// and follows; TIME next; COST reuses colCost.
+	colModel = worktreeColumn{header: "MODEL", shrinkRank: 2}
+	colTime  = worktreeColumn{header: "TIME", rightAlign: true, shrinkRank: 7, floor: 6}
 )
+
+// tokenColumns builds the token group's grid columns from detailTokenMeta, so a
+// header cannot drift from the cell under it. The group stands or falls together
+// in the width fit, because a hit rate alone — without the counts it comes from —
+// says nothing.
+func tokenColumns() []worktreeColumn {
+	cols := make([]worktreeColumn, len(detailTokenMeta))
+	for i, d := range detailTokenMeta {
+		cols[i] = worktreeColumn{header: d.glyph + " " + d.label, rightAlign: true, shrinkRank: 1}
+	}
+	return cols
+}
 
 // coreColumns is the shared prefix of every status schema: identity, tracking,
 // activity and cost. statusColumns appends the grouped INTEGRATIONS cell;
@@ -512,7 +524,7 @@ var statusColumns = append(slices.Clone(coreColumns), colIntegrations)
 // derived from columnRegistry(), which adds the capability columns.
 func allColumns() []worktreeColumn {
 	cols := append(slices.Clone(statusColumns), colUncommitted)
-	return append(cols, detailColumns...)
+	return append(cols, detailColumns()...)
 }
 
 // columnRegistry maps header names to their column definition. It includes
@@ -605,7 +617,9 @@ func statusColumnsFor(wide bool) []worktreeColumn {
 
 func printStatusTable(cols []worktreeColumn, wts []worktree, now time.Time, ttl time.Duration, colorMode string) {
 	ctx := columnContext{now: now, ttl: ttl}
-	printTable(columnHeaders(cols), gridRows(cols, wts, ctx), colorMode, statusCell, columnRightAligns(cols))
+	headers := columnHeaders(cols)
+	rows := alignCostSubFields(headers, gridRows(cols, wts, ctx))
+	printTable(headers, rows, colorMode, statusCell, columnRightAligns(cols))
 }
 
 type jsonWorktree struct {
@@ -641,11 +655,25 @@ type jsonHarnessUsage struct {
 }
 
 type jsonModelUsage struct {
+	Cost            *float64                 `json:"cost"`
+	CostEstimated   bool                     `json:"costEstimated,omitempty"`
+	ListCost        *optCost                 `json:"listCost,omitempty"`
+	ListCostEst     bool                     `json:"listCostEstimated,omitempty"`
+	ActiveSeconds   int64                    `json:"activeSeconds"`
+	Tiers           map[string]jsonTierUsage `json:"tiers,omitempty"`
+	CacheMissTokens *int64                   `json:"cacheMissTokens,omitempty"`
+	CacheHitRate    *float64                 `json:"cacheHitRate,omitempty"`
+}
+
+// jsonTierUsage is one token tier's machine contract: the token count plus the
+// billed cost and optional list price, mirroring the model-level cost shape so
+// the billed/list invariant holds identically at every level.
+type jsonTierUsage struct {
+	Tokens        int64    `json:"tokens"`
 	Cost          *float64 `json:"cost"`
 	CostEstimated bool     `json:"costEstimated,omitempty"`
 	ListCost      *optCost `json:"listCost,omitempty"`
 	ListCostEst   bool     `json:"listCostEstimated,omitempty"`
-	ActiveSeconds int64    `json:"activeSeconds"`
 }
 
 // optCost is the optional list price beside a machine cost. A nil pointer omits
@@ -742,7 +770,8 @@ func usageJSON(u *worktreeUsage) map[string]jsonHarnessUsage {
 	for name, h := range u.harnesses {
 		models := make(map[string]jsonModelUsage, len(h.models))
 		for model, m := range h.models {
-			mu := jsonModelUsage{Cost: m.cost.billed.jsonValue(), CostEstimated: m.cost.billed.isEstimated(), ActiveSeconds: seconds(m.active())}
+			mu := jsonModelUsage{Cost: m.cost.billed.jsonValue(), CostEstimated: m.cost.billed.isEstimated(), ActiveSeconds: seconds(m.active()), Tiers: tiersJSON(m.tokens, m.tiers)}
+			mu.CacheMissTokens, mu.CacheHitRate = cacheJSON(m.tokens)
 			if lc := listCostJSON(m.cost); lc != nil {
 				mu.ListCost = lc
 				mu.ListCostEst = m.cost.list.isEstimated()
@@ -757,6 +786,41 @@ func usageJSON(u *worktreeUsage) map[string]jsonHarnessUsage {
 		out[name] = hu
 	}
 	return out
+}
+
+// tiersJSON projects a model's token tiers into the machine contract. It returns
+// nil when no tier recorded tokens, so a cost-only record (a spawn child, an
+// older Pi session) omits the breakdown instead of reporting four empty tiers.
+func tiersJSON(tokens promptTokens, tiers tokenTiers) map[string]jsonTierUsage {
+	if tokens.total() == 0 {
+		return nil
+	}
+	out := make(map[string]jsonTierUsage, numTiers)
+	for t := tier(0); t < numTiers; t++ {
+		tu := jsonTierUsage{Tokens: tokens.tier(t), Cost: tiers[t].billed.jsonValue(), CostEstimated: tiers[t].billed.isEstimated()}
+		if lc := listCostJSON(tiers[t]); lc != nil {
+			tu.ListCost = lc
+			tu.ListCostEst = tiers[t].list.isEstimated()
+		}
+		out[tierMeta[t]] = tu
+	}
+	return out
+}
+
+// cacheJSON projects a model's derived cache metrics into the machine contract.
+// Both keys are omitted when the model recorded no prompt tokens. The hit rate
+// is also omitted when the guard trips — hits with no recorded build make the
+// ratio undefined — so the contract carries no false 100%.
+func cacheJSON(t promptTokens) (*int64, *float64) {
+	if t.context() == 0 {
+		return nil, nil
+	}
+	miss := t.miss()
+	if rate, ok := t.hitRate(); ok {
+		r := roundRate(rate)
+		return &miss, &r
+	}
+	return &miss, nil
 }
 
 // estimateLegendNeeded reports which legend reasons the table and the detail
@@ -777,7 +841,7 @@ func estimateLegendNeeded(cols []worktreeColumn, wts []worktree, current string,
 	if !summaryCostElided(detailSummaryRows(*cur, now)) {
 		r = r.merge(cur.cost().reasons())
 	}
-	if cur.Usage != nil && costColumnKept(detailColumns, detailRows(cur.Usage)) {
+	if cur.Usage != nil && costColumnKept(detailColumns(), detailRows(cur.Usage)) {
 		r = r.merge(modelsEstimated(cur.Usage))
 	}
 	return r
@@ -786,16 +850,74 @@ func estimateLegendNeeded(cols []worktreeColumn, wts []worktree, current string,
 // costColumnKept reports whether the COST column survives the width fit, so a
 // caller can know whether a cost cell will actually render.
 func costColumnKept(cols []worktreeColumn, rows [][]string) bool {
+	return columnKept(cols, alignCostSubFields(columnHeaders(cols), rows), colCost.header)
+}
+
+// alignCostSubFields pads the COST column's billed/list pair into two aligned
+// sub-fields, so every worktree or model row shows its billed value (and its
+// list value, when a proven subscription adds one) in the same columns. COST
+// stays one grid column with one header: the pair is aligned inside the cell,
+// so the whole-or-drop rule (colCost.unelidable) still holds and the column can
+// never be middle-cut. A row without a list keeps the billed position and
+// leaves the list region blank. No row with a list means nothing to align, so a
+// table of single prices renders exactly as before. Idempotent: already-padded
+// cells measure the same, because spaces carry no sub-field value.
+func alignCostSubFields(headers []string, rows [][]string) [][]string {
+	i := slices.Index(headers, colCost.header)
+	if i < 0 {
+		return rows
+	}
+	// Pass 1: measure. "/" is only ever the pair separator: formatCost emits
+	// only "$", digits, "." and "~", so Cut splits safely.
+	maxBilled, maxList, hasList := 0, 0, false
+	for _, row := range rows {
+		billed, list, ok := strings.Cut(row[i], "/")
+		maxBilled = max(maxBilled, dispWidth(strings.TrimSpace(billed)))
+		if ok {
+			hasList = true
+			maxList = max(maxList, dispWidth(strings.TrimSpace(list)))
+		}
+	}
+	if !hasList {
+		return rows
+	}
+	// Pass 2: right-align each sub-field, so billed values and the separator
+	// line up across rows.
+	out := make([][]string, len(rows))
+	for r, row := range rows {
+		billed, list, ok := strings.Cut(row[i], "/")
+		cell := padLeft(strings.TrimSpace(billed), maxBilled)
+		if ok {
+			cell += "/" + padLeft(strings.TrimSpace(list), maxList)
+		} else {
+			cell += strings.Repeat(" ", maxList+1)
+		}
+		out[r] = slices.Clone(row)
+		out[r][i] = cell
+	}
+	return out
+}
+
+// padLeft left-pads s with spaces to w display cells, so a right-aligned field
+// lines up in its sub-column.
+func padLeft(s string, w int) string { return strings.Repeat(" ", w-dispWidth(s)) + s }
+
+// columnKept reports whether a named column survives the width fit, so a caller
+// can know whether that column's cells (and any legend explaining them) render.
+func columnKept(cols []worktreeColumn, rows [][]string, header string) bool {
 	widths := columnWidths(columnHeaders(cols), rows, widthBudget())
 	for i, c := range cols {
-		if c.header == colCost.header {
+		if c.header == header {
 			return widths[i] != 0
 		}
 	}
 	return false
 }
 
-// modelsEstimated reports which legend reasons any (harness, model) row rests on.
+// modelsEstimated reports which legend reasons any model row rests on. Only the
+// model total counts: per-tier costs are no longer rendered, and a tier's
+// assumption propagates into the total, so the total's own reasons already
+// cover every estimate the visible rows rest on.
 func modelsEstimated(u *worktreeUsage) estimateReasons {
 	var r estimateReasons
 	if u == nil {
@@ -814,24 +936,33 @@ func modelsEstimated(u *worktreeUsage) estimateReasons {
 // explanation cannot drift from the estimate it explains. A table of reported
 // prices prints nothing here, and a table with one kind of estimate prints
 // only its line.
-func printEstimateLegend(r estimateReasons) {
+func printEstimateLegend(r estimateReasons, colorMode string) {
 	if !r.any() {
 		return
 	}
 	fmt.Println()
+	var lines []string
 	if r.cache {
-		fmt.Println("~ estimated: " + estimateCacheWriteLifetime)
+		lines = append(lines, "~ estimated: "+estimateCacheWriteLifetime)
 	}
 	if r.overage {
-		fmt.Println("~ estimated: " + estimateSubscriptionOverage)
+		lines = append(lines, "~ estimated: "+estimateSubscriptionOverage)
 	}
+	printLegend(lines, colorMode)
 }
 
-// detailColumns is the detail block's table schema. It shares the status column
-// registry (see allColumns) so the block obeys the same width policy as the
-// table above: MODEL and HARNESS give up width first, TIME next, and COST is
-// unelidable, so the cost column outlives the columns that name the rows.
-var detailColumns = []worktreeColumn{colHarness, colModel, colTime, colCost}
+// detailColumns is the detail block's table schema: one MODEL row per model,
+// TIME, COST, then the token group (total input, the token classes, then the
+// derived miss/hit% metrics). A function, like columnRegistry, so the headers
+// derive from the metadata lists with no package-init ordering dependency. It
+// shares the status column registry (see allColumns), so the block obeys the
+// same width policy as the table above: the token group gives up width first
+// (dropping whole), MODEL next, then TIME, and COST is unelidable, so the cost
+// column outlives the columns that name the rows.
+func detailColumns() []worktreeColumn {
+	cols := []worktreeColumn{colModel, colTime, colCost}
+	return append(cols, tokenColumns()...)
+}
 
 // printStatusDetail renders the current worktree's usage under the table. The
 // block is omitted when no harness in the repo has events; when the current
@@ -853,7 +984,62 @@ func printStatusDetail(wts []worktree, current string, now time.Time, colorMode 
 	fmt.Println()
 	// The breakdown reuses the table's cell grammar, so an unpriced cost
 	// recedes here exactly as it does in the status table above.
-	printTable(columnHeaders(detailColumns), detailRows(cur.Usage), colorMode, statusCell, columnRightAligns(detailColumns))
+	rows := alignCostSubFields(columnHeaders(detailColumns()), detailRows(cur.Usage))
+	cols, rows := fitTokenGroup(detailColumns(), rows)
+	printTable(columnHeaders(cols), rows, colorMode, statusCell, columnRightAligns(cols))
+	if tokenGroupKept(cols) && detailHasTokens(cur.Usage) {
+		printTokenLegend(colorMode)
+	}
+}
+
+// tokenHeaderSet is the set of detail headers owned by the token group.
+func tokenHeaderSet() map[string]bool {
+	set := make(map[string]bool, len(detailTokenMeta))
+	for _, c := range tokenColumns() {
+		set[c.header] = true
+	}
+	return set
+}
+
+// tokenColumnNames lists the token-group headers in display order, for
+// disclosure.
+func tokenColumnNames() []string {
+	cols := tokenColumns()
+	names := make([]string, len(cols))
+	for i, c := range cols {
+		names[i] = c.header
+	}
+	return names
+}
+
+// fitTokenGroup drops the whole token group when the width fit cannot keep every
+// column in it. A partial breakdown — some metrics shown, some hidden — reads as
+// arbitrary, so the group stands or falls together and is disclosed once. Their
+// cells leave the rows with them, so the grid stays index-aligned.
+func fitTokenGroup(cols []worktreeColumn, rows [][]string) ([]worktreeColumn, [][]string) {
+	widths := columnWidths(columnHeaders(cols), rows, widthBudget())
+	token := tokenHeaderSet()
+	drop := false
+	for i, c := range cols {
+		drop = drop || (token[c.header] && widths[i] == 0)
+	}
+	if !drop {
+		return cols, rows
+	}
+	warnf("terminal too narrow; hid %s; widen the terminal or use --json", strings.Join(tokenColumnNames(), ", "))
+	keep := make([]int, 0, len(cols))
+	kept := make([]worktreeColumn, 0, len(cols))
+	for i, c := range cols {
+		if !token[c.header] {
+			keep = append(keep, i)
+			kept = append(kept, c)
+		}
+	}
+	out := make([][]string, len(rows))
+	for r, row := range rows {
+		out[r] = selectStrings(row, keep)
+	}
+	return kept, out
 }
 
 // detailTitleRows is how many leading detail-block rows are section titles;
@@ -933,18 +1119,169 @@ func detailActive(w worktree) string { return cellActive(w, columnContext{}) }
 
 func detailCost(w worktree) string { return cellCost(w, columnContext{}) }
 
-// detailRows flattens the current worktree into (harness, model) rows, ordered
-// by harness registry order then by model cost.
-func detailRows(u *worktreeUsage) [][]string {
-	var rows [][]string
-	for _, name := range u.harnessNames() {
-		h := u.harnesses[name]
-		for _, model := range h.modelNames() {
-			m := h.models[model]
-			rows = append(rows, []string{name, model, humanClock(m.active()), m.cost.cell()})
+// detailMetric is one column of the token group: the glyph that tags it, the
+// label that names it, and the cell that renders one model's value. Tiers and
+// derived metrics share the shape, so the header and the values under it read
+// one list and cannot drift.
+type detailMetric struct {
+	glyph string
+	label string
+	cell  func(*modelUsage) string
+}
+
+// detailTokenMeta is the token group in display order. "in" is the TOTAL prompt
+// size (uncached input + cache read + cache write), not the uncached slice, so it
+// can never read smaller than "hit"; the derived miss and hit% close the group.
+// Arrows serve the directional classes: they are narrow and render consistently,
+// unlike the emoji pair they replace.
+var detailTokenMeta = []detailMetric{
+	{"↑", "in", totalInputCell},
+	{"↓", "out", tierCount(tierOutput)},
+	{"🎯", "hit", tierCount(tierCacheRead)},
+	{"✍️", "write", tierCount(tierCacheWrite)},
+	{"✗", "miss", missCount},
+	{"◉", "hit%", hitRateCell},
+}
+
+// tokenLegend spells out the token group's arithmetic, one clause per line so
+// each definition reads on its own. A legend, not just headers, because "in" is
+// a total while "hit" and "miss" are its parts: the header alone cannot say how
+// the total is counted. hit% caps at 99.9% (see maxHitRate); the legend keeps
+// the short arithmetic and the cap lives here so the row width stays stable.
+var tokenLegend = []string{
+	"tokens: in = uncached input + cache read + cache write (total input)",
+	"miss = uncached input + cache write",
+	"hit% = hit / in",
+}
+
+// detailHasTokens reports whether any model recorded tokens, so the token legend
+// prints only when it explains a visible number, never beside a column of dashes.
+func detailHasTokens(u *worktreeUsage) bool {
+	if u == nil {
+		return false
+	}
+	for _, h := range u.harnesses {
+		for _, m := range h.models {
+			if m.tokens.total() > 0 {
+				return true
+			}
 		}
 	}
+	return false
+}
+
+// tokenGroupKept reports whether the fitted grid still carries the token group,
+// so the legend prints only when its columns do.
+func tokenGroupKept(cols []worktreeColumn) bool {
+	token := tokenHeaderSet()
+	for _, c := range cols {
+		if token[c.header] {
+			return true
+		}
+	}
+	return false
+}
+
+// printTokenLegend prints the token legend below the breakdown, one clause per
+// line, each wrapped to the grid's width so the text that explains the block
+// never widens it. A blank line separates the legend from the data.
+// widthBudget()==0 means the terminal is unbounded (piped output), so every
+// clause prints whole.
+func printTokenLegend(colorMode string) {
+	fmt.Println()
+	var lines []string
+	for _, clause := range tokenLegend {
+		lines = append(lines, wrapWords(clause, widthBudget())...)
+	}
+	printLegend(lines, colorMode)
+}
+
+// wrapWords breaks text into lines of at most width display cells on word
+// boundaries. width<=0 or a line that already fits returns the text unchanged.
+func wrapWords(text string, width int) []string {
+	if width <= 0 || dispWidth(text) <= width {
+		return []string{text}
+	}
+	var lines []string
+	cur := ""
+	for _, w := range strings.Fields(text) {
+		switch {
+		case cur == "":
+			cur = w
+		case dispWidth(cur)+1+dispWidth(w) <= width:
+			cur += " " + w
+		default:
+			lines = append(lines, cur)
+			cur = w
+		}
+	}
+	return append(lines, cur)
+}
+
+// tierCount adapts one token tier to a detailMetric cell.
+func tierCount(t tier) func(*modelUsage) string {
+	return func(m *modelUsage) string { return tokenCount(m, t) }
+}
+
+// detailRows flattens the current worktree into one row per model, ordered by
+// billed cost. Each row carries the model's time, cost, and one cell per
+// token-group column, so the breakdown stays beside the model without harness
+// grouping or sub-rows.
+func detailRows(u *worktreeUsage) [][]string {
+	models := u.mergedModels()
+	var rows [][]string
+	for _, name := range u.sortedModelNames(models) {
+		m := models[name]
+		row := []string{name, humanDuration(m.active()), m.cost.cell()}
+		for _, d := range detailTokenMeta {
+			row = append(row, d.cell(m))
+		}
+		rows = append(rows, row)
+	}
 	return rows
+}
+
+// tokenCount renders one tier's count: the compact form when the tier recorded
+// tokens, "-" when it recorded none.
+func tokenCount(m *modelUsage, t tier) string {
+	if n := m.tokens.tier(t); n > 0 {
+		return formatTokens(n)
+	}
+	return "-"
+}
+
+// totalInputCell renders the model's total prompt tokens (uncached input, cache
+// reads and cache writes): the base every cache share is taken from. "-" when the
+// model recorded no prompt tokens.
+func totalInputCell(m *modelUsage) string {
+	if m.tokens.context() == 0 {
+		return "-"
+	}
+	return formatTokens(m.tokens.context())
+}
+
+// missCount renders the miss subtotal: "-" when the model recorded no prompt
+// tokens, else the compact count. A zero beside a nonzero hit is an honest sign
+// that the build left the recorded window (see hitRateCell).
+func missCount(m *modelUsage) string {
+	if m.tokens.context() == 0 {
+		return "-"
+	}
+	return formatTokens(m.tokens.miss())
+}
+
+// hitRateCell renders one model's cache-hit share: the percent, "unknown" when
+// hits have no recorded build (the ratio is undefined and would read a false
+// 100%), and "-" when the model recorded no prompt tokens at all.
+func hitRateCell(m *modelUsage) string {
+	rate, ok := m.tokens.hitRate()
+	if ok {
+		return formatPercent(rate)
+	}
+	if m.tokens.context() == 0 {
+		return "-"
+	}
+	return "unknown"
 }
 
 // integrationStates is the stable JSON contract: every capability id is always

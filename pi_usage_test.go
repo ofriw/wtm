@@ -565,3 +565,53 @@ func TestPiSpawnWithoutIDCrossSessionBillsOnce(t *testing.T) {
 		t.Fatalf("cost = %q, want $0.30 (cross-session spawn bills once)", got)
 	}
 }
+
+// TestPiUsageTokensAndTierCost pins the parser's token contract: a modern Pi
+// record fills the shared prompt-token classes and the per-class price split,
+// while a legacy total-only record leaves both token and tier data absent.
+func TestPiUsageTokensAndTierCost(t *testing.T) {
+	events := parsePi(t,
+		`{"type":"message","id":"a1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"input":100,"output":50,"cacheRead":200,"cacheWrite":30,"cost":{"input":0.1,"output":0.2,"cacheRead":0.03,"cacheWrite":0.01,"total":0.34}}}}`)
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1: %+v", len(events), events)
+	}
+	e := events[0]
+	if e.tokens.input != 100 || e.tokens.output != 50 || e.tokens.cacheRead != 200 || e.tokens.cacheWrite5m != 30 {
+		t.Errorf("tokens = %+v, want input=100 output=50 cacheRead=200 cacheWrite5m=30", e.tokens)
+	}
+	assertPiEvent(t, e, "m", fptr(0.34))
+	if e.tierCost == nil {
+		t.Fatal("tierCost = nil, want the record's per-class prices")
+	}
+	for _, tc := range []struct {
+		name string
+		got  *float64
+		want float64
+	}{
+		{"input", e.tierCost.input, 0.1},
+		{"output", e.tierCost.output, 0.2},
+		{"cacheRead", e.tierCost.cacheRead, 0.03},
+		{"cacheWrite", e.tierCost.cacheWrite, 0.01},
+	} {
+		if tc.got == nil {
+			t.Errorf("tierCost.%s = nil, want %v", tc.name, tc.want)
+			continue
+		}
+		if *tc.got != tc.want {
+			t.Errorf("tierCost.%s = %v, want %v", tc.name, *tc.got, tc.want)
+		}
+	}
+
+	// A legacy record prices only the total: no tokens, no per-class split.
+	legacy := parsePi(t,
+		`{"type":"message","id":"a2","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":0.5}}}}`)
+	if len(legacy) != 1 {
+		t.Fatalf("got %d legacy events, want 1", len(legacy))
+	}
+	if legacy[0].tierCost != nil {
+		t.Errorf("legacy tierCost = %+v, want nil (only total priced)", legacy[0].tierCost)
+	}
+	if legacy[0].tokens.total() != 0 {
+		t.Errorf("legacy tokens.total() = %d, want 0", legacy[0].tokens.total())
+	}
+}

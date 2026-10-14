@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -198,16 +200,82 @@ func (p costPair) cell() string {
 // below a cent and above the error of summing real token prices.
 func roundCost(v float64) float64 { return float64(int64(v*1e6+0.5)) / 1e6 }
 
+// roundRate gives a 0..1 share the same 1e-6 trim as a price, so a ratio in the
+// machine contract is as byte-stable as a cost.
+func roundRate(v float64) float64 { return roundCost(v) }
+
 func formatCost(v float64) string { return fmt.Sprintf("$%.2f", roundCost(v)) }
+
+// tier names one accumulator and JSON token class. The order is the index into
+// tokenTiers and the JSON key order; the table's display order is separate (see
+// status.go detailTokenMeta).
+type tier int
+
+const (
+	tierInput tier = iota
+	tierCacheRead
+	tierCacheWrite
+	tierOutput
+	numTiers
+)
+
+// tierMeta is each tier's JSON key, indexed by tier and kept in tier order, so
+// the machine contract and the accumulator can never disagree on which tier is
+// which.
+var tierMeta = [numTiers]string{
+	"input",
+	"cacheRead",
+	"cacheWrite",
+	"output",
+}
+
+// tokenTiers is a model's per-tier price breakdown, indexed by tier. Each tier
+// keeps the billed/list pair, so the subscription invariant holds per tier
+// exactly as it does for the total.
+type tokenTiers [numTiers]costPair
+
+func (t *tokenTiers) add(o tokenTiers) {
+	for i := range t {
+		t[i].add(o[i])
+	}
+}
+
+// totals sums the tier list prices; the caller adds the web search price and
+// the resolved baseline to reach the event total.
+func (t tokenTiers) totals() money {
+	var m money
+	for i := range t {
+		m.add(t[i].list)
+	}
+	return m
+}
+
+// tokenCosts is a harness-reported per-class price (Pi). A nil field means the
+// harness did not price that class, so its tier stays absent, never zero.
+type tokenCosts struct {
+	input      *float64
+	output     *float64
+	cacheRead  *float64
+	cacheWrite *float64
+}
+
+// pricedEvent is one event's price: the total (token classes plus web search)
+// and the per-tier breakdown. Both sides are filled together, so the billed/list
+// rule reaches every figure the display draws from one event.
+type pricedEvent struct {
+	total costPair
+	tiers tokenTiers
+}
 
 // usageKey is the cheap pre-filter shared by the parsers: a session line without
 // it cannot carry cost or tokens, so content-heavy user, progress and tool-result
 // lines are never unmarshalled.
 var usageKey = []byte("\"usage\"")
 
-// promptTokens are the four priced Claude Code token classes. The harness keeps
-// the 5-minute and 1-hour cache writes apart; unclassifiedCacheWrite is the
-// flat cache_creation count when the record omits the lifetime breakdown.
+// promptTokens are the priced prompt classes shared by every harness. Pi keeps
+// one cache-write class (filled into cacheWrite5m); Claude keeps the 5-minute
+// and 1-hour writes apart. unclassifiedCacheWrite is Claude's flat
+// cache_creation count when the record omits the lifetime breakdown.
 type promptTokens struct {
 	input                  int64
 	output                 int64
@@ -217,9 +285,61 @@ type promptTokens struct {
 	unclassifiedCacheWrite int64
 }
 
-// context is the request's input size, used for the long-context rate.
+// context is the request's input size (every prompt token: fresh, written and
+// cached), used for the long-context rate and as the hit-rate denominator.
 func (t promptTokens) context() int64 {
 	return t.input + t.cacheRead + t.cacheWrite5m + t.cacheWrite1h + t.unclassifiedCacheWrite
+}
+
+// miss is the prompt tokens not served from cache: fresh input plus every cache
+// write (the tokens a build spends). It is context() minus the cache reads, so
+// the miss subtotal and the hit-rate denominator share one value.
+func (t promptTokens) miss() int64 { return t.context() - t.cacheRead }
+
+// hitRate is the cache-read share of the prompt tokens, and ok=false when the
+// ratio is undefined. A cache read always follows a build (uncached input or a
+// cache write), so reads with no recorded miss mean the build predates the
+// recorded window: the share would read a false 100% and is refused here, as is
+// a model that recorded no prompt tokens at all. The share is also capped at
+// maxHitRate, so the 1e-6 machine rounding cannot lift a near-1 value to 1.0.
+func (t promptTokens) hitRate() (float64, bool) {
+	if t.miss() <= 0 {
+		return 0, false
+	}
+	return min(float64(t.cacheRead)/float64(t.context()), maxHitRate), true
+}
+
+// maxHitRate is the highest share any model may report: no window is ever fully
+// cache-served (a read always follows a build), and the cap stops the machine
+// rounding in cacheJSON from emitting a false 1.0.
+const maxHitRate = 0.999
+
+// tier returns the token count in one displayed tier. The cache-write classes
+// (5m, 1h, unclassified) collapse into the single displayed write tier; the
+// split stays internal so the rate catalog can price it exactly.
+func (t promptTokens) tier(id tier) int64 {
+	switch id {
+	case tierInput:
+		return t.input
+	case tierCacheRead:
+		return t.cacheRead
+	case tierCacheWrite:
+		return t.cacheWrite5m + t.cacheWrite1h + t.unclassifiedCacheWrite
+	case tierOutput:
+		return t.output
+	}
+	return 0
+}
+
+// plus folds another token count in field by field.
+func (t promptTokens) plus(o promptTokens) promptTokens {
+	return promptTokens{
+		input: t.input + o.input, output: t.output + o.output,
+		cacheRead:              t.cacheRead + o.cacheRead,
+		cacheWrite5m:           t.cacheWrite5m + o.cacheWrite5m,
+		cacheWrite1h:           t.cacheWrite1h + o.cacheWrite1h,
+		unclassifiedCacheWrite: t.unclassifiedCacheWrite + o.unclassifiedCacheWrite,
+	}
 }
 
 // usageEvent is one parsed cost/time record before catalog pricing. A harness
@@ -237,6 +357,7 @@ type usageEvent struct {
 	provider  string // Pi provider id; empty for Claude (never dual-mode)
 	cost      *float64
 	tokens    promptTokens
+	tierCost  *tokenCosts // harness-reported per-class price; nil for Claude
 	tier      string
 	webSearch int64
 }
@@ -278,8 +399,10 @@ func unionDuration(spans []span) time.Duration {
 // modelUsage is one model's totals inside a harness; spans are per-session
 // model spans, merged for the active time.
 type modelUsage struct {
-	cost  costPair
-	spans []span
+	cost   costPair
+	tiers  tokenTiers
+	tokens promptTokens
+	spans  []span
 }
 
 func (m *modelUsage) active() time.Duration { return unionDuration(m.spans) }
@@ -339,7 +462,7 @@ func (u *worktreeUsage) harness(name string) *harnessUsage {
 
 // addSession folds one session's events into the worktree: the session span for
 // the harness, each model's span inside the session, and every cost.
-func (u *worktreeUsage) addSession(harness string, events []usageEvent, price func(usageEvent) costPair) {
+func (u *worktreeUsage) addSession(harness string, events []usageEvent, price func(usageEvent) pricedEvent) {
 	u.addBilledSession(harness, events, nil, price)
 }
 
@@ -347,7 +470,7 @@ func (u *worktreeUsage) addSession(harness string, events []usageEvent, price fu
 // contribute cost. Every event still folds into the spans, so dedupe never
 // changes activity time; only the billed subset contributes money. A nil mask
 // bills every event, which is the no-dedupe case.
-func (u *worktreeUsage) addBilledSession(harness string, events []usageEvent, billed []bool, price func(usageEvent) costPair) {
+func (u *worktreeUsage) addBilledSession(harness string, events []usageEvent, billed []bool, price func(usageEvent) pricedEvent) {
 	if len(events) == 0 {
 		return
 	}
@@ -361,7 +484,7 @@ func (u *worktreeUsage) addBilledSession(harness string, events []usageEvent, bi
 
 // foldSession accumulates one session's harness cost and returns the session
 // span plus each model's per-session spans and cost.
-func foldSession(events []usageEvent, h *harnessUsage, billed []bool, price func(usageEvent) costPair) (span, map[string]*modelUsage) {
+func foldSession(events []usageEvent, h *harnessUsage, billed []bool, price func(usageEvent) pricedEvent) (span, map[string]*modelUsage) {
 	session := span{start: events[0].at, end: events[0].at}
 	perModel := map[string]*modelUsage{}
 	prev := ""
@@ -378,7 +501,7 @@ func foldSession(events []usageEvent, h *harnessUsage, billed []bool, price func
 // (first→last event), a different model closes the run, so an interleaved
 // model never inherits another model's idle time. An isolated event is a point.
 // A non-billed event still chains spans; only its money is skipped.
-func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, bill bool, prev string, price func(usageEvent) costPair) string {
+func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, bill bool, prev string, price func(usageEvent) pricedEvent) string {
 	m := perModel[e.model]
 	if m == nil {
 		m = &modelUsage{}
@@ -392,9 +515,11 @@ func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, b
 		m.spans = append(m.spans, span{start: e.at, end: e.endAt()})
 	}
 	if bill {
-		c := price(e)
-		m.cost.add(c)
-		h.cost.add(c)
+		p := price(e)
+		m.cost.add(p.total)
+		m.tiers.add(p.tiers)
+		m.tokens = m.tokens.plus(e.tokens)
+		h.cost.add(p.total)
 	}
 	return e.model
 }
@@ -493,6 +618,8 @@ func (h *harnessUsage) model(name string) *modelUsage {
 func (m *modelUsage) absorb(o *modelUsage) {
 	m.spans = append(m.spans, o.spans...)
 	m.cost.add(o.cost)
+	m.tiers.add(o.tiers)
+	m.tokens = m.tokens.plus(o.tokens)
 }
 
 func minTime(a, b time.Time) time.Time {
@@ -509,35 +636,41 @@ func maxTime(a, b time.Time) time.Time {
 	return a
 }
 
-// harnessNames returns the worktree's harnesses in registry order (pi, claude),
-// then any unknown harness sorted by name, so table rows are deterministic.
-func (u *worktreeUsage) harnessNames() []string {
-	var names []string
-	for _, a := range agents() {
-		if _, ok := u.harnesses[a.name]; ok {
-			names = append(names, a.name)
+// mergedModels folds every harness's models into one accumulator per name,
+// summing cost, tokens, and spans. The detail block lists models, not harnesses, so a name
+// two harnesses share reads as a single row.
+func (u *worktreeUsage) mergedModels() map[string]*modelUsage {
+	out := make(map[string]*modelUsage, len(u.harnesses))
+	for _, h := range u.harnesses {
+		for name, m := range h.models {
+			dst := out[name]
+			if dst == nil {
+				dst = &modelUsage{}
+				out[name] = dst
+			}
+			dst.absorb(m)
 		}
 	}
-	known := len(names)
-	for name := range u.harnesses {
-		if !slices.Contains(names, name) {
-			names = append(names, name)
-		}
+	return out
+}
+
+// sortedModelNames returns the merged models ordered most expensive first,
+// then unknown costs, then by name.
+func (u *worktreeUsage) sortedModelNames(models map[string]*modelUsage) []string {
+	names := make([]string, 0, len(models))
+	for name := range models {
+		names = append(names, name)
 	}
-	sort.Strings(names[known:])
+	sortModels(names, func(n string) costPair { return models[n].cost })
 	return names
 }
 
-// modelNames returns a harness's models, most expensive first, then unknown
-// costs, then by name, so the detail table is deterministic.
-func (h *harnessUsage) modelNames() []string {
-	names := make([]string, 0, len(h.models))
-	for name := range h.models {
-		names = append(names, name)
-	}
+// sortModels orders model names by billed cost: known before unknown, then
+// descending amount, then name. Billed is the reader-facing amount, so its
+// order decides the rows; one comparator serves every model listing.
+func sortModels(names []string, cost func(string) costPair) {
 	sort.Slice(names, func(i, j int) bool {
-		// Billed is the reader-facing amount, so its order decides the rows.
-		a, b := h.models[names[i]].cost.billed, h.models[names[j]].cost.billed
+		a, b := cost(names[i]).billed, cost(names[j]).billed
 		if ak, bk := a.known(), b.known(); ak != bk {
 			return ak
 		}
@@ -546,50 +679,69 @@ func (h *harnessUsage) modelNames() []string {
 		}
 		return names[i] < names[j]
 	})
-	return names
 }
 
 // known reports a priced total (a real zero included).
 func (m money) known() bool { return m.any && !m.unknown }
 
-// humanAge is the AGE grammar: one unit, largest first. A future creation mark
-// (clock skew, a future .git mtime) reads as zero, never as a negative age.
-func humanAge(d time.Duration) string {
+// durationUnits is the mixed-radix basis for humanDuration, largest first.
+// Months use 30 days and years 365, matching the previous single-unit grammar.
+var durationUnits = []struct {
+	size time.Duration
+	name string
+}{
+	{365 * 24 * time.Hour, "y"},
+	{30 * 24 * time.Hour, "M"},
+	{24 * time.Hour, "d"},
+	{time.Hour, "h"},
+	{time.Minute, "m"},
+}
+
+// humanDuration is the single grammar for every time figure (age, active time,
+// per-model time): the non-zero units from years down to minutes, with seconds
+// only below a minute, so a span reads as one breakdown ("2d 5h 11m") and a
+// future mark never reads negative.
+func humanDuration(d time.Duration) string {
 	if d < 0 {
 		d = 0
 	}
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int64(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int64(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int64(d.Hours()))
-	case d < 30*24*time.Hour:
-		return fmt.Sprintf("%dd", int64(d.Hours()/24))
-	case d < 365*24*time.Hour:
-		return fmt.Sprintf("%dM", int64(d.Hours()/(24*30)))
-	default:
-		return fmt.Sprintf("%dy", int64(d.Hours()/(24*365)))
-	}
-}
-
-// humanActive is the compact ACTIVE grammar: "Yh ZZ m" at or above an hour,
-// minutes below it.
-func humanActive(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", int64(d.Seconds()))
 	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm", int64(d.Minutes()))
+	var parts []string
+	for _, u := range durationUnits {
+		if n := int64(d / u.size); n > 0 {
+			parts = append(parts, fmt.Sprintf("%d%s", n, u.name))
+			d -= time.Duration(n) * u.size
+		}
 	}
-	return humanClock(d)
+	if len(parts) == 0 {
+		return "0s"
+	}
+	return strings.Join(parts, " ")
 }
 
-// humanClock is the detail TIME grammar; it always names the hour so a column
-// of rows reads as one unit ("0h 45m"), matching the design examples.
-func humanClock(d time.Duration) string {
-	return fmt.Sprintf("%dh %02dm", int64(d.Hours()), int64(d.Minutes())%60)
+// formatPercent renders a 0..1 share as a one-decimal percent. The ceiling
+// lives in hitRate (maxHitRate), so the caller never passes a value that could
+// round to a false 100%.
+func formatPercent(v float64) string {
+	return fmt.Sprintf("%.1f%%", v*100)
+}
+
+// formatTokens renders a token count in a compact unit: exact below 1000, then
+// k/M/B with one decimal, rounded down so a value never crosses into the next
+// unit (999999 reads 999.9k, not 1000.0k). The exact count stays in JSON.
+func formatTokens(n int64) string {
+	switch {
+	case n < 1_000:
+		return fmt.Sprintf("%d", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%.1fk", math.Floor(float64(n)/100)/10)
+	case n < 1_000_000_000:
+		return fmt.Sprintf("%.1fM", math.Floor(float64(n)/100_000)/10)
+	default:
+		return fmt.Sprintf("%.1fB", math.Floor(float64(n)/100_000_000)/10)
+	}
 }
 
 // seconds is the JSON unit for every active-time value.

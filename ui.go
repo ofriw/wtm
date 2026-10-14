@@ -80,7 +80,9 @@ func statusCellStyle(header, value string) lipgloss.Style {
 		return booleanStyle(value != "-")
 	case "COST":
 		// A number is the signal; "unknown" and "-" are non-values and recede.
-		if secondaryValue(value) {
+		// TrimSpace: alignCostSubFields pads the cell before styling, so an
+		// absent value arrives space-padded and must still read as a non-value.
+		if secondaryValue(strings.TrimSpace(value)) {
 			return lipgloss.NewStyle().Faint(true)
 		}
 	case "BRANCH", "LAST USED":
@@ -128,6 +130,26 @@ func statusCell(header, value string) string {
 		return groupedCellStyle(value)
 	}
 	return statusCellStyle(header, value).Render(value)
+}
+
+// legendStyle is the one treatment for the explanatory lines under a table:
+// dim, because a legend is secondary to the data it explains. Basic dim
+// degrades cleanly across every profile.
+func legendStyle() lipgloss.Style { return lipgloss.NewStyle().Faint(true) }
+
+// printLegend writes explanatory lines below a table through the resolved
+// profile, so a legend dims on a color terminal and stays byte-clean when the
+// output is piped. Styling is skipped on NoTTY, matching printTable, so pipes,
+// --json and goldens remain byte-stable.
+func printLegend(lines []string, colorMode string) {
+	profile := resolveColorProfile(colorMode)
+	w := &colorprofile.Writer{Forward: os.Stdout, Profile: profile}
+	for _, line := range lines {
+		if profile > colorprofile.NoTTY {
+			line = legendStyle().Render(line)
+		}
+		_, _ = fmt.Fprintln(w, line)
+	}
 }
 
 // groupedCellStyle colors a grouped INTEGRATIONS cell token by token: present

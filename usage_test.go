@@ -14,10 +14,10 @@ func at(sec int) time.Time { return time.Date(2026, 1, 1, 0, 0, sec, 0, time.UTC
 
 // pairPricer adapts a list-only pricer to the costPair fold contract: unit
 // tests care about the pay-as-you-go value, so billed mirrors list.
-func pairPricer(f func(usageEvent) money) func(usageEvent) costPair {
-	return func(e usageEvent) costPair {
+func pairPricer(f func(usageEvent) money) func(usageEvent) pricedEvent {
+	return func(e usageEvent) pricedEvent {
 		m := f(e)
-		return costPair{list: m, billed: m}
+		return pricedEvent{total: costPair{list: m, billed: m}}
 	}
 }
 
@@ -258,7 +258,7 @@ func TestSpawnSpanExtendsActiveTime(t *testing.T) {
 	}
 }
 
-func TestHarnessAndModelOrder(t *testing.T) {
+func TestMergedModelOrder(t *testing.T) {
 	var u worktreeUsage
 	price := pairPricer(func(e usageEvent) money {
 		var m money
@@ -267,47 +267,34 @@ func TestHarnessAndModelOrder(t *testing.T) {
 	})
 	u.addSession("claude", []usageEvent{{at: at(0), model: "cheap"}}, price)
 	u.addSession("pi", []usageEvent{{at: at(0), model: "cheap"}, {at: at(0), model: "pricey"}}, price)
-	if names := u.harnessNames(); len(names) != 2 || names[0] != "pi" || names[1] != "claude" {
-		t.Fatalf("harnessNames = %v, want [pi claude]", names)
-	}
-	if names := u.harnesses["pi"].modelNames(); names[0] != "pricey" || names[1] != "cheap" {
-		t.Fatalf("modelNames = %v, want cost-descending [pricey cheap]", names)
+	models := u.mergedModels()
+	if names := u.sortedModelNames(models); len(names) != 2 || names[0] != "pricey" || names[1] != "cheap" {
+		t.Fatalf("sortedModelNames = %v, want cost-descending [pricey cheap]", names)
 	}
 }
 
+// TestTimeGrammar pins the one duration grammar every time cell uses: the
+// non-zero units from years to minutes, seconds only below a minute.
 func TestTimeGrammar(t *testing.T) {
-	age := []struct {
-		d    time.Duration
-		want string
-	}{
-		{30 * time.Second, "30s"},
-		{5 * time.Minute, "5m"},
-		{6 * time.Hour, "6h"},
-		{12 * 24 * time.Hour, "12d"},
-		{8 * 30 * 24 * time.Hour, "8M"},
-		{3 * 365 * 24 * time.Hour, "3y"},
-	}
-	for _, tc := range age {
-		if got := humanAge(tc.d); got != tc.want {
-			t.Errorf("humanAge(%v) = %q, want %q", tc.d, got, tc.want)
-		}
-	}
-	active := []struct {
+	cases := []struct {
 		d    time.Duration
 		want string
 	}{
 		{0, "0s"},
+		{30 * time.Second, "30s"},
+		{5 * time.Minute, "5m"},
 		{45 * time.Minute, "45m"},
 		{2*time.Hour + 14*time.Minute, "2h 14m"},
+		{6 * time.Hour, "6h"},
+		{55*time.Hour + time.Minute, "2d 7h 1m"},
+		{12 * 24 * time.Hour, "12d"},
+		{8 * 30 * 24 * time.Hour, "8M"},
+		{3 * 365 * 24 * time.Hour, "3y"},
 	}
-	for _, tc := range active {
-		if got := humanActive(tc.d); got != tc.want {
-			t.Errorf("humanActive(%v) = %q, want %q", tc.d, got, tc.want)
+	for _, tc := range cases {
+		if got := humanDuration(tc.d); got != tc.want {
+			t.Errorf("humanDuration(%v) = %q, want %q", tc.d, got, tc.want)
 		}
-	}
-	// The detail TIME column always names the hour.
-	if got := humanClock(45 * time.Minute); got != "0h 45m" {
-		t.Errorf("humanClock(45m) = %q, want 0h 45m", got)
 	}
 }
 
@@ -352,11 +339,11 @@ func TestEstimatedZeroRendersTildeZero(t *testing.T) {
 func TestFoldEventUnbilledKeepsSpanNotCost(t *testing.T) {
 	per := map[string]*modelUsage{}
 	var h harnessUsage
-	price := func(usageEvent) costPair {
+	price := func(usageEvent) pricedEvent {
 		var c costPair
 		c.billed.addKnown(1)
 		c.list.addKnown(1)
-		return c
+		return pricedEvent{total: c}
 	}
 	prev := foldEvent(per, &h, usageEvent{at: at(0), model: "m"}, false, "", price)
 	foldEvent(per, &h, usageEvent{at: at(10), model: "m"}, false, prev, price)
@@ -459,6 +446,190 @@ func TestCostPairReasons(t *testing.T) {
 	}
 }
 
+// TestPiTierBreakdownFolds pins the per-tier accumulator for a self-priced
+// harness: the record's token counts and class costs land in the model's
+// displayed tiers, so the sub-rows a reader sees are the record's own numbers.
+func TestPiTierBreakdownFolds(t *testing.T) {
+	var u worktreeUsage
+	price := usagePricer(agent{name: "pi"}, nil, subscriptions{})
+	u.addSession("pi", []usageEvent{{
+		at: at(0), model: "m", cost: fptr(0.30),
+		tokens:   promptTokens{input: 1000, output: 500, cacheRead: 2000, cacheWrite5m: 100},
+		tierCost: &tokenCosts{input: fptr(0.10), output: fptr(0.15), cacheRead: fptr(0.04), cacheWrite: fptr(0.01)},
+	}}, price)
+	m := u.harnesses["pi"].models["m"]
+	for _, tc := range []struct {
+		tier tier
+		cell string
+	}{{tierInput, "$0.10"}, {tierCacheRead, "$0.04"}, {tierCacheWrite, "$0.01"}, {tierOutput, "$0.15"}} {
+		if got := m.tiers[tc.tier].cell(); got != tc.cell {
+			t.Errorf("%s tier cell = %q, want %q", tierMeta[tc.tier], got, tc.cell)
+		}
+	}
+	if got := m.tokens.tier(tierCacheWrite); got != 100 {
+		t.Errorf("cache write tokens = %d, want 100", got)
+	}
+	if got := m.tokens.total(); got != 3600 {
+		t.Errorf("total tokens = %d, want 3600", got)
+	}
+}
+
+// TestCoverTiersDiscountsEveryTier pins the invariant: a proven subscription
+// replaces the billed side of the total AND of every priced tier, while the
+// list side stays visible and an unpriced tier stays absent (never a fake $0).
+func TestCoverTiersDiscountsEveryTier(t *testing.T) {
+	var p pricedEvent
+	p.total.list.addKnown(3)
+	p.total.billed = p.total.list
+	p.tiers[tierInput].list.addKnown(1)
+	p.tiers[tierInput].billed = p.tiers[tierInput].list
+	p.tiers[tierOutput].list.addKnown(2)
+	p.tiers[tierOutput].billed = p.tiers[tierOutput].list
+
+	coverTiers(&p, knownZero)
+	if got := p.total.cell(); got != "$0.00/$3.00" {
+		t.Errorf("total cell = %q, want $0.00/$3.00", got)
+	}
+	if got := p.tiers[tierInput].cell(); got != "$0.00/$1.00" {
+		t.Errorf("input cell = %q, want $0.00/$1.00", got)
+	}
+	if got := p.tiers[tierOutput].cell(); got != "$0.00/$2.00" {
+		t.Errorf("output cell = %q, want $0.00/$2.00", got)
+	}
+	if p.tiers[tierCacheRead].list.any || p.tiers[tierCacheRead].billed.any {
+		t.Error("an unpriced tier must stay absent, not become a fake $0.00")
+	}
+	if p.tiers[tierInput].billed.isEstimated() {
+		t.Error("an allowance-covered tier is an exact zero, not an estimate")
+	}
+
+	// Overage possible: every priced tier reads as the estimated zero.
+	var e pricedEvent
+	e.total.list.addKnown(1)
+	e.tiers[tierInput].list.addKnown(1)
+	coverTiers(&e, estimatedZero)
+	if got := e.tiers[tierInput].cell(); got != "~$0.00/$1.00" {
+		t.Errorf("overage tier cell = %q, want ~$0.00/$1.00", got)
+	}
+}
+
+// TestFormatTokensBoundary pins the unit floor: values round down so none
+// cross into the next unit (999999 reads 999.9k, not 1000.0k).
+func TestFormatTokensBoundary(t *testing.T) {
+	cases := []struct {
+		n    int64
+		want string
+	}{
+		{999, "999"},
+		{1000, "1.0k"},
+		{999999, "999.9k"},
+		{1000000, "1.0M"},
+	}
+	for _, tc := range cases {
+		if got := formatTokens(tc.n); got != tc.want {
+			t.Errorf("formatTokens(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestMergedModelsCollision pins the merged-row rule: one model name in two
+// harnesses reads as one detail row with summed cost and tokens.
+func TestMergedModelsCollision(t *testing.T) {
+	var u worktreeUsage
+	price := pairPricer(func(e usageEvent) money {
+		var m money
+		m.addKnown(*e.cost)
+		return m
+	})
+	u.addSession("pi", []usageEvent{{at: at(0), model: "m", cost: fptr(1)}}, price)
+	u.addSession("claude", []usageEvent{{at: at(0), model: "m", cost: fptr(2)}}, price)
+	models := u.mergedModels()
+	if len(models) != 1 {
+		t.Fatalf("merged models = %d, want 1", len(models))
+	}
+	if got := models["m"].cost.cell(); got != "$3.00" {
+		t.Errorf("merged cost = %q, want $3.00", got)
+	}
+	if names := u.sortedModelNames(models); len(names) != 1 || names[0] != "m" {
+		t.Errorf("sorted names = %q, want [m]", names)
+	}
+}
+
+// FuzzUnionDuration pins the union invariants over random spans: the cover
+// stays within the summed lengths, and neither input order nor duplication
+// changes it.
+func FuzzUnionDuration(f *testing.F) {
+	f.Add([]byte{0, 10, 5, 15, 20, 5})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var spans []span
+		var sum time.Duration
+		for i := 0; i+3 < len(data); i += 4 {
+			start := int(data[i])<<8 | int(data[i+1])
+			length := int(data[i+2])<<8 | int(data[i+3])
+			spans = append(spans, span{start: at(start % 3600), end: at(start%3600 + length%3600)})
+			sum += time.Duration(length%3600) * time.Second
+		}
+		got := unionDuration(spans)
+		if got < 0 || got > sum {
+			t.Fatalf("unionDuration = %v outside [0, %v]", got, sum)
+		}
+		rev := slices.Clone(spans)
+		slices.Reverse(rev)
+		if unionDuration(rev) != got {
+			t.Fatalf("order changed the union: %v vs %v", unionDuration(rev), got)
+		}
+		if unionDuration(slices.Concat(spans, spans)) != got {
+			t.Fatal("duplication changed the union")
+		}
+	})
+}
+
+// FuzzMoneyFold pins the fold invariants over random accumulations: the total
+// is order-independent, unknown dominates, and the amount sums every priced part.
+func FuzzMoneyFold(f *testing.F) {
+	f.Add([]byte{0, 1, 2, 100})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var parts []money
+		var want float64
+		var anyUnknown, anyEstimated bool
+		for _, b := range data {
+			var p money
+			switch b % 3 {
+			case 0:
+				p.addKnown(float64(b))
+				want += float64(b)
+			case 1:
+				p.addEstimated(float64(b))
+				want += float64(b)
+				anyEstimated = true
+			default:
+				p.addUnknown()
+				anyUnknown = true
+			}
+			parts = append(parts, p)
+		}
+		var fwd, rev money
+		for _, p := range parts {
+			fwd.add(p)
+		}
+		for i := len(parts) - 1; i >= 0; i-- {
+			rev.add(parts[i])
+		}
+		if fwd.cell() != rev.cell() {
+			t.Fatalf("fold order changed the cell: %q vs %q", fwd.cell(), rev.cell())
+		}
+		if anyUnknown != fwd.unknown || anyUnknown != rev.unknown {
+			t.Fatal("unknown must be sticky regardless of order")
+		}
+		if anyEstimated && !anyUnknown && (!fwd.isEstimated() || !rev.isEstimated()) {
+			t.Fatal("estimated must survive the fold")
+		}
+		if !anyUnknown && (fwd.amount != want || rev.amount != want) {
+			t.Fatalf("amount = %v/%v, want %v", fwd.amount, rev.amount, want)
+		}
+	})
+}
+
 // TestDedupeRandomOrder pins the order invariant: shuffling sessions bills
 // each key exactly once and the max-score copy wins, so resume/fork repeats
 // never double-bill and the richest record always prices the turn.
@@ -515,6 +686,44 @@ func TestDedupeRandomOrder(t *testing.T) {
 			if billed[k] != 1 {
 				t.Fatalf("trial %d: key %q billed %d times, want once", trial, k, billed[k])
 			}
+		}
+	}
+}
+
+// TestTokensAccrueOnlyForBilled pins that dedupe masks prune tokens with
+// cost: unbilled events keep spans but add no tokens.
+func TestTokensAccrueOnlyForBilled(t *testing.T) {
+	var u worktreeUsage
+	price := pairPricer(func(e usageEvent) money {
+		var m money
+		m.addKnown(*e.cost)
+		return m
+	})
+	events := []usageEvent{
+		{at: at(0), model: "m", cost: fptr(1), tokens: promptTokens{input: 100}},
+		{at: at(10), model: "m", cost: fptr(1), tokens: promptTokens{input: 100}},
+	}
+	u.addBilledSession("pi", events, []bool{true, false}, price)
+	m := u.harnesses["pi"].models["m"]
+	if got := m.tokens.input; got != 100 {
+		t.Errorf("billed tokens = %d, want 100", got)
+	}
+	if got := m.cost.cell(); got != "$1.00" {
+		t.Errorf("billed cost = %q, want $1.00", got)
+	}
+}
+
+// TestWebSearchJoinsTotalNotTiers pins the tier gap: web search prices the
+// total, never a tier, so tiers can sum below the model total.
+func TestWebSearchJoinsTotalNotTiers(t *testing.T) {
+	c := testRates(t)
+	p := c.price(usageEvent{model: "m1", tier: "standard", webSearch: 2})
+	if !p.total.list.known() || p.total.list.amount == 0 {
+		t.Fatalf("web-search total must be known nonzero, got %+v", p.total.list)
+	}
+	for i := range p.tiers {
+		if p.tiers[i].list.any {
+			t.Errorf("tier %d must stay absent for web-search-only event", i)
 		}
 	}
 }

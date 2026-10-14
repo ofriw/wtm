@@ -1,9 +1,9 @@
-PATH       BRANCH  UPSTREAM   LAST USED  AGE  ACTIVE   COST  STATUS  INTEGRATIONS
-/SBX/repo  main    -         2020-01-01   6y       -      -  ACTIVE  -
-/SBX/wt    wt      -         2020-01-01   6y     30m  $2.59  ACTIVE  -
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST  STATUS  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -      -  ACTIVE  -
+/SBX/wt    wt      -         2020-01-01  6y 2d     30m  $2.59  ACTIVE  -
 
 current worktree  /SBX/repo
-age               6y
+age               6y 2d
 active time       -
 cost              -
 no agent usage recorded
@@ -43,7 +43,27 @@ no agent usage recorded
         "models": {
           "claude-sonnet-4-6": {
             "cost": 2.5875,
-            "activeSeconds": 1800
+            "activeSeconds": 1800,
+            "tiers": {
+              "cacheRead": {
+                "tokens": 0,
+                "cost": null
+              },
+              "cacheWrite": {
+                "tokens": 10000,
+                "cost": 0.0375
+              },
+              "input": {
+                "tokens": 100000,
+                "cost": 0.3
+              },
+              "output": {
+                "tokens": 150000,
+                "cost": 2.25
+              }
+            },
+            "cacheMissTokens": 110000,
+            "cacheHitRate": 0
           }
         }
       }
