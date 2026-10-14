@@ -339,11 +339,11 @@ func addPiEvent(events *[]usageEvent, at time.Time, id string, model, provider s
 // piEventKey is the identity of a Pi event: the entry id bound to the record
 // time when the id is present, since a resumed or forked transcript repeats the
 // same ids and times and must bill once. Cost is not part of an id key: a revised
-// copy of one record (partial vs complete stream) shares the id and the larger
-// cost wins at dedupe. A record with no id
+// copy of one record (partial vs complete stream) shares the id and the copy
+// that carries its cost wins at dedupe (see dedupeScore). A record with no id
 // falls back to its content plus cost presence, which still dedupes an exact
-// copy and a revised copy (the larger cost wins) while keeping a known zero
-// distinct from a missing cost. Provider is not part of either identity: the
+// copy and a revised copy (the copy that carries its cost wins) while keeping a
+// known zero distinct from a missing cost. Provider is not part of either identity: the
 // same record can attribute a different running provider when re-parsed, and
 // that must still dedupe.
 func piEventKey(e usageEvent, id string) string { return piEventKeyN(e, id, "") }
@@ -354,7 +354,8 @@ func piEventKey(e usageEvent, id string) string { return piEventKeyN(e, id, "") 
 // timestamp verbatim (Pi createBranchedSession), so a fork still dedupes, while
 // two unrelated sessions that collide on the short random id almost never share
 // the exact nanosecond timestamp. Cost stays out of the id key because a revised
-// copy of one record shares the id and time and the larger cost wins at dedupe.
+// copy of one record shares the id and time and the copy that carries its cost
+// wins at dedupe (see dedupeScore).
 // LIMIT: id-less records with equal (time, model, cost presence) share one
 // fallback key; the spawn index is the only discriminator for equal children.
 // TestPiIdlessSameTimestampCollisionBillsOnce pins the id-less collision;
@@ -373,8 +374,8 @@ func piEventKeyN(e usageEvent, id, tag string) string {
 }
 
 // piCostTag encodes cost presence, not value, so the fallback matches the id
-// key: a revised copy shares the identity and the larger cost wins at dedupe.
-// Presence still separates a known zero from a missing cost: nil is unknown,
+// key: a revised copy shares the identity and the copy that carries its cost
+// wins at dedupe (see dedupeScore). Presence still separates a known zero from a missing cost: nil is unknown,
 // not $0.
 func piCostTag(e usageEvent) string {
 	if e.cost == nil {

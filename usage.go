@@ -399,11 +399,12 @@ func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, b
 	return e.model
 }
 
-// dedupeScore orders two copies of one billed turn. The larger token total wins
-// because a partial stream undercounts; a token tie breaks on the web-search
-// count, which the catalog prices as real money, then on the self-priced Pi
-// cost, where a known cost beats an unknown one and the larger wins. Either
-// field alone can carry cost the other copy lacks.
+// dedupeScore orders two copies of one billed turn. A copy that carries its own
+// price first beats one that lost it, so a self-priced Pi copy is never dropped
+// for a larger token-only copy (see piEventKeyN). Then the larger token total
+// wins, because a partial stream undercounts; a token tie breaks on the
+// web-search count, which the catalog prices as real money, then on the larger
+// self-priced cost. Either field alone can carry cost the other copy lacks.
 type dedupeScore struct {
 	tokens  int64
 	web     int64
@@ -412,14 +413,14 @@ type dedupeScore struct {
 }
 
 func (s dedupeScore) beats(o dedupeScore) bool {
+	if s.hasCost != o.hasCost {
+		return s.hasCost
+	}
 	if s.tokens != o.tokens {
 		return s.tokens > o.tokens
 	}
 	if s.web != o.web {
 		return s.web > o.web
-	}
-	if s.hasCost != o.hasCost {
-		return s.hasCost
 	}
 	return s.cost > o.cost
 }

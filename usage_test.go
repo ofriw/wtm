@@ -1,6 +1,8 @@
 package main
 
 import (
+	"math/rand"
+	"slices"
 	"testing"
 	"time"
 )
@@ -454,5 +456,78 @@ func TestCostPairReasons(t *testing.T) {
 	}
 	if got := (estimateReasons{cache: true}.merge(estimateReasons{overage: true})); !got.cache || !got.overage {
 		t.Errorf("merge = %+v, want both", got)
+	}
+}
+
+// TestDedupeRandomOrder pins the order invariant: shuffling sessions bills
+// each key exactly once and the max-score copy wins, so resume/fork repeats
+// never double-bill and the richest record always prices the turn.
+func TestDedupeRandomOrder(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	copies := map[string][]usageEvent{
+		// Cost presence beats token size (see TestDedupeCostPresenceBeatsTokenSize).
+		"cost": {{at: at(1), model: "m", key: "cost", cost: fptr(2), tokens: promptTokens{input: 100}},
+			{at: at(2), model: "m", key: "cost", tokens: promptTokens{input: 5000}}},
+		"tokens": {{at: at(1), model: "m", key: "tokens", tokens: promptTokens{input: 100}},
+			{at: at(2), model: "m", key: "tokens", tokens: promptTokens{input: 900}}},
+		"web": {{at: at(1), model: "m", key: "web", tokens: promptTokens{input: 100}, webSearch: 1},
+			{at: at(2), model: "m", key: "web", tokens: promptTokens{input: 100}, webSearch: 4}},
+		"price": {{at: at(1), model: "m", key: "price", cost: fptr(1), tokens: promptTokens{input: 100}},
+			{at: at(2), model: "m", key: "price", cost: fptr(7), tokens: promptTokens{input: 100}}},
+	}
+	best := map[string]dedupeScore{}
+	for k, evs := range copies {
+		for _, e := range evs {
+			if s := scoreOf(e); best[k] == (dedupeScore{}) || s.beats(best[k]) {
+				best[k] = s
+			}
+		}
+	}
+	base := [][]usageEvent{
+		{copies["cost"][0], copies["tokens"][0], {at: at(3), model: "m"}},
+		{copies["web"][0], copies["price"][0]},
+		{copies["cost"][1], copies["tokens"][1], copies["web"][1], copies["price"][1]},
+	}
+	for trial := 0; trial < 20; trial++ {
+		sessions := slices.Clone(base)
+		rng.Shuffle(len(sessions), func(i, j int) { sessions[i], sessions[j] = sessions[j], sessions[i] })
+		for si := range sessions {
+			sessions[si] = slices.Clone(sessions[si])
+			rng.Shuffle(len(sessions[si]), func(i, j int) { sessions[si][i], sessions[si][j] = sessions[si][j], sessions[si][i] })
+		}
+		masks := dedupeKeyedEvents(sessions)
+		billed := map[string]int{}
+		for si, events := range sessions {
+			for ei, e := range events {
+				if !masks[si][ei] {
+					continue
+				}
+				if e.key == "" {
+					continue // keyless events always bill; not part of the invariant
+				}
+				billed[e.key]++
+				if s := scoreOf(e); s != best[e.key] {
+					t.Fatalf("trial %d: key %q billed %+v, want best %+v", trial, e.key, s, best[e.key])
+				}
+			}
+		}
+		for k := range copies {
+			if billed[k] != 1 {
+				t.Fatalf("trial %d: key %q billed %d times, want once", trial, k, billed[k])
+			}
+		}
+	}
+}
+
+// TestDedupeCostPresenceBeatsTokenSize pins the cost-presence precedence: a
+// self-priced copy that carries its own cost must win over a larger token-only
+// copy of the same turn, so a reverse-diffed Pi price is never dropped for a
+// cost-less duplicate.
+func TestDedupeCostPresenceBeatsTokenSize(t *testing.T) {
+	a := usageEvent{at: at(1), model: "m", key: "k", cost: fptr(2), tokens: promptTokens{input: 100}}
+	b := usageEvent{at: at(2), model: "m", key: "k", tokens: promptTokens{input: 5000}}
+	masks := dedupeKeyedEvents([][]usageEvent{{a}, {b}})
+	if !masks[0][0] || masks[1][0] {
+		t.Fatalf("masks = %v, want the cost-bearing copy billed only", masks)
 	}
 }
