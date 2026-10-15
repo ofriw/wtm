@@ -883,6 +883,28 @@ func TestSubscriptionOverageUnknownListShape(t *testing.T) {
 	}
 }
 
+// TestSubscriptionOverageWebSearchOnlyIsEstimated pins that a covered event
+// whose only spend is a web search reads estimated, not an exact zero: the
+// search can overflow the allowance and bill at list price.
+func TestSubscriptionOverageWebSearchOnlyIsEstimated(t *testing.T) {
+	sandbox(t)
+	writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"),
+		claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "true"))
+	dir := t.TempDir()
+	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name,
+		claudeUsageLine(`{"server_tool_use":{"web_search_requests":2}}`))
+	u, err := buildUsage(dir, idx, nil, loadSubscriptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.cost().cell(); got != "~$0.00/unknown" {
+		t.Fatalf("cost = %q, want ~$0.00/unknown (a covered web-search-only turn is an estimate)", got)
+	}
+	if j := worktreeJSON(t, &u); j["costEstimated"] != true {
+		t.Errorf("json costEstimated = %v, want true", j["costEstimated"])
+	}
+}
+
 // parentScopeSeed seeds a clean child worktree under a metered parent, so the
 // ancestor walk is the only thing voiding the proof.
 func parentScopeSeed(t *testing.T) (string, sessionIndex) {

@@ -559,7 +559,7 @@ func usagePricer(a agent, cat catalog, subs subscriptions) func(usageEvent) pric
 		case coverageAllowance:
 			coverTiers(&p, knownZero)
 		case coverageOveragePossible:
-			if (p.total.list.known() && p.total.list.amount != 0) || e.tokens.total() > 0 || e.cost != nil {
+			if (p.total.list.known() && p.total.list.amount != 0) || e.tokens.total() > 0 || e.webSearch > 0 || e.cost != nil {
 				coverTiers(&p, estimatedZero)
 			} else {
 				coverTiers(&p, knownZero)
