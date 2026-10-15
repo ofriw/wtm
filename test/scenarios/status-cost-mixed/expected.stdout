@@ -6,6 +6,9 @@ current worktree  /SBX/wt
 age               6y 2d
 active time       1h
 cost              $3.48
+total in:out      3.3:1
+cached in:out     0.8:1
+uncached in:out   2.5:1
 
 MODEL              TIME   COST    ↑ in  ↓ out  🎯 hit  ✍️ write  ✗ miss  ◉ hit%
 deepseek-flash       1h  $3.00  190.0k  30.0k   50.0k     20.0k  140.0k   26.3%
@@ -104,6 +107,11 @@ hit% = hit / in
           }
         }
       }
+    },
+    "inputOutputRatio": {
+      "total": 3.333333,
+      "cached": 0.833333,
+      "uncached": 2.5
     },
     "integrations": {
       "chunkhound": "n/a",

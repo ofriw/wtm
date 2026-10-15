@@ -68,6 +68,11 @@ no agent usage recorded
         }
       }
     },
+    "inputOutputRatio": {
+      "total": 0.733333,
+      "cached": 0,
+      "uncached": 0.733333
+    },
     "integrations": {
       "chunkhound": "n/a",
       "claude": "n/a",
