@@ -1,3 +1,3 @@
 terminal too narrow; hid PATH, BRANCH, UPSTREAM, LAST USED, AGE, ACTIVE, COST; widen the terminal or use --json
-terminal too narrow; hid ↑ in, ↓ out, 🎯 hit, ✍️ write, ✗ miss, ◉ hit%; widen the terminal or use --json
+terminal too narrow; hid ↑ in, ↓ out, ↩ hit, ↪ write, × miss, ● hit%; widen the terminal or use --json
 terminal too narrow; hid MODEL; widen the terminal or use --json

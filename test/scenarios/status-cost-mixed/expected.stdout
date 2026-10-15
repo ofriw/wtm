@@ -10,13 +10,14 @@ total in:out      3.3:1
 cached in:out     0.8:1
 uncached in:out   2.5:1
 
-MODEL              TIME   COST    ↑ in  ↓ out  🎯 hit  ✍️ write  ✗ miss  ◉ hit%
-deepseek-flash       1h  $3.00  190.0k  30.0k   50.0k     20.0k  140.0k   26.3%
-claude-sonnet-4-6    1h  $0.48   10.0k  30.0k       -         -   10.0k    0.0%
+MODEL              TIME   COST    ↑ in  ↓ out  ↩ hit  ↪ write  × miss  ● hit%
+deepseek-flash       1h  $3.00  190.0k  30.0k  50.0k    20.0k  140.0k   26.3%
+claude-sonnet-4-6    1h  $0.48   10.0k  30.0k      -        -   10.0k    0.0%
 
-tokens: in = uncached input + cache read + cache write (total input)
-miss = uncached input + cache write
-hit% = hit / in
+tokens:
+  in   = uncached input + cache read + cache write (total input)
+  miss = uncached input + cache write
+  hit% = hit / in
 [
   {
     "path": "/SBX/repo",

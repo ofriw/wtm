@@ -7,8 +7,8 @@ age               6y 2d
 active time       45m
 cost              $4.00
 
-MODEL           TIME   COST  ↑ in  ↓ out  🎯 hit  ✍️ write  ✗ miss  ◉ hit%
-deepseek-flash   45m  $4.00     -      -       -         -       -       -
+MODEL           TIME   COST  ↑ in  ↓ out  ↩ hit  ↪ write  × miss  ● hit%
+deepseek-flash   45m  $4.00     -      -      -        -       -       -
 [
   {
     "path": "/SBX/repo",
