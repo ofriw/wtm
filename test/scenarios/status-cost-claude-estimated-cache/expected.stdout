@@ -2,7 +2,7 @@ PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE    COST  STATUS  INTEGRAT
 /SBX/repo  main    -         2020-01-01  6y 2d       -       -  ACTIVE  -
 /SBX/wt    wt      -         2020-01-01  6y 2d      0s  ~$0.12  ACTIVE  -
 
-~ estimated: a usage record omitted the cache-write lifetime (5m vs 1h), so wtm priced those tokens at the 5-minute rate; a 1-hour write costs more, so the value is a lower bound, not exact data
+~ estimated = a usage record omitted the cache-write lifetime (5m vs 1h), so wtm priced those tokens at the 5-minute rate; a 1-hour write costs more, so the value is a lower bound, not exact data
 
 current worktree  /SBX/repo
 age               6y 2d

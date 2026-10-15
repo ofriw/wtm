@@ -1,8 +1,9 @@
-PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE          COST  STATUS  INTEGRATIONS
-/SBX/repo  main    -         2020-01-01  6y 2d       -       -        ACTIVE  -
-/SBX/wt    wt      -         2020-01-01  6y 2d      0s  ~$0.00/$0.30  ACTIVE  -
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE    COST   LIST  STATUS  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -       -      -  ACTIVE  -
+/SBX/wt    wt      -         2020-01-01  6y 2d      0s  ~$0.00  $0.30  ACTIVE  -
 
-~ estimated: a subscription covers the request inside its allowance, but extra usage may bill at list price, so the $0 billed cost is an estimate
+list        = pay-as-you-go price of the same tokens
+~ estimated = a subscription covers the request inside its allowance, but extra usage may bill at list price, so the $0 billed cost is an estimate
 
 current worktree  /SBX/repo
 age               6y 2d
