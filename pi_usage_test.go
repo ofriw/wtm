@@ -23,7 +23,7 @@ const piFixture = `{"type":"session","version":3,"id":"s","timestamp":"2026-01-0
 
 func parsePi(t *testing.T, lines ...string) []usageEvent {
 	t.Helper()
-	events, err := piUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n")))
+	events, _, err := piUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n")))
 	if err != nil {
 		t.Fatalf("piUsageEvents: %v", err)
 	}
@@ -387,10 +387,17 @@ func TestPiUsageTimestamps(t *testing.T) {
 	if !events[0].at.Equal(want) {
 		t.Errorf("first event at = %v, want %v", events[0].at, want)
 	}
-	// A record without a usable timestamp contributes nothing.
-	if got := parsePi(t,
-		`{"type":"message","timestamp":"nope","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}`); len(got) != 0 {
-		t.Fatalf("bad timestamp produced %d events, want 0", len(got))
+	// A record without a usable timestamp contributes nothing and is counted.
+	events, dropped, err := piUsageEvents(bufio.NewReader(strings.NewReader(
+		`{"type":"message","timestamp":"nope","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}` + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("bad timestamp produced %d events, want 0", len(events))
+	}
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1: a bad timestamp must be disclosed", dropped)
 	}
 }
 
@@ -409,9 +416,15 @@ func TestPiUsageSkipsCorruptLines(t *testing.T) {
 		`{"type":"message","timestamp":"2026-01-01T00:00:0`,
 		good[5], good[6], good[7],
 	}
-	events := parsePi(t, lines...)
+	events, dropped, err := piUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(events) != 5 {
 		t.Fatalf("got %d events, want 5: %+v", len(events), events)
+	}
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1: only the truncated usage line is unreadable", dropped)
 	}
 	assertPiEvent(t, events[0], "m-a", fptr(0.5))
 	assertPiEvent(t, events[1], "m-a", fptr(0.25))

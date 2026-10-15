@@ -33,11 +33,12 @@ type agent struct {
 	configDirRel  []string // under home
 	sessionSubdir string
 	sessionOwner  func(*bufio.Reader) (string, error)
-	// parseUsage reads one session file into cost/time events. catalogRated
-	// marks a harness whose records carry tokens but no cost, so the public
-	// catalog must price them (Claude Code); a self-pricing harness (Pi) adds
-	// cost to each event.
-	parseUsage   func(*bufio.Reader) ([]usageEvent, error)
+	// parseUsage reads one session file into cost/time events, plus the count of
+	// records it could not read (bad JSON or timestamp). A nonzero count lets the
+	// caller warn and taint the total partial. catalogRated marks a harness whose
+	// records carry tokens but no cost, so the public catalog must price them
+	// (Claude Code); a self-pricing harness (Pi) adds cost to each event.
+	parseUsage   func(*bufio.Reader) ([]usageEvent, int, error)
 	catalogRated bool
 }
 
@@ -481,24 +482,31 @@ type parsedSession struct {
 func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
 	subs = subs.forWorktree(wtPath)
 	var u worktreeUsage
-	unreadable := map[string]bool{}
+	lost := map[string]bool{}
 	var firstErr error
+	dropped := 0
 	var sessions []parsedSession
 	for _, ref := range idx[canonical(wtPath)] {
 		a, ok := agentByName(ref.harness)
 		if !ok || a.parseUsage == nil {
 			continue
 		}
-		events, err := readUsage(a, ref.path)
+		events, n, err := readUsage(a, ref.path)
 		if err != nil {
 			// A bad file sorts anywhere, so record the loss now and taint the
 			// total after folding, when even a good session listed later in the
 			// walk has folded.
-			unreadable[ref.harness] = true
+			lost[ref.harness] = true
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
+		}
+		if n > 0 {
+			// The readable records still fold; the dropped ones only taint the
+			// total, so a partial sum never reads as exact.
+			lost[ref.harness] = true
+			dropped += n
 		}
 		sessions = append(sessions, parsedSession{harness: ref.harness, events: events, price: usagePricer(a, cat, subs)})
 	}
@@ -513,30 +521,46 @@ func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions
 	for i, s := range sessions {
 		u.addBilledSession(s.harness, s.events, billed[i], s.price)
 	}
-	markPartial(&u, unreadable)
-	return u, firstErr
+	markPartial(&u, lost)
+	return u, usageLossErr(firstErr, dropped)
+}
+
+// usageLossErr reports the session loss that makes a total partial: an
+// unreadable session, unreadable records, or both. One worktree-level warning
+// keeps a read-only run alive while still disclosing the loss.
+func usageLossErr(first error, dropped int) error {
+	switch {
+	case first != nil && dropped > 0:
+		return fmt.Errorf("%w; %d session record(s) with bad JSON or timestamp dropped", first, dropped)
+	case first != nil:
+		return first
+	case dropped > 0:
+		return fmt.Errorf("%d session record(s) with bad JSON or timestamp dropped; totals are partial", dropped)
+	default:
+		return nil
+	}
 }
 
 // markPartial taints the total and each harness that kept some spans but also
-// lost a session, so a partial sum never looks exact. A harness with no
-// readable spans keeps no entry: a zero-span unknown would read as 0s active
+// lost a session or records, so a partial sum never looks exact. A harness with
+// no readable spans keeps no entry: a zero-span unknown would read as 0s active
 // instead of none, so the worktree-level flag carries that loss instead.
-func markPartial(u *worktreeUsage, unreadable map[string]bool) {
-	if len(unreadable) == 0 {
+func markPartial(u *worktreeUsage, lost map[string]bool) {
+	if len(lost) == 0 {
 		return
 	}
 	u.partial = true
-	for name := range unreadable {
+	for name := range lost {
 		if h, ok := u.harnesses[name]; ok {
 			h.cost.addUnknown()
 		}
 	}
 }
 
-func readUsage(a agent, path string) ([]usageEvent, error) {
+func readUsage(a agent, path string) ([]usageEvent, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer func() { _ = f.Close() }()
 	return a.parseUsage(bufio.NewReader(f))

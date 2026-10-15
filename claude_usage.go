@@ -50,40 +50,45 @@ type claudeServerToolUse struct {
 
 // claudeUsageEvents parses one Claude session into candidate events, one per
 // assistant record, sorted by time. Turn dedupe happens at the worktree level.
-func claudeUsageEvents(r *bufio.Reader) ([]usageEvent, error) {
+// It reports how many records it could not read, so the caller can warn instead
+// of silently shrinking the total.
+func claudeUsageEvents(r *bufio.Reader) ([]usageEvent, int, error) {
 	var events []usageEvent
+	dropped := 0
 	for {
 		line, err := sessionRecord(r)
 		if len(line) > 0 && bytes.Contains(line, usageKey) {
 			var rec claudeUsageRecord
-			if json.Unmarshal(line, &rec) == nil {
-				if e, ok := claudeEvent(&rec); ok {
-					events = append(events, e)
-				}
+			if json.Unmarshal(line, &rec) != nil {
+				dropped++
+			} else if e, ok := claudeEvent(&rec, &dropped); ok {
+				events = append(events, e)
 			}
 		}
 		if err != nil {
 			if err == io.EOF {
 				sort.Slice(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
-				return events, nil
+				return events, dropped, nil
 			}
-			return nil, err
+			return nil, dropped, err
 		}
 	}
 }
 
 // claudeEvent turns one assistant record into a candidate event. Only an
 // assistant record carries billed usage, and the synthetic error model is
-// skipped. The key pairs message id and request id so the
-// worktree-level dedupe can collapse streaming repeats and cross-file repeats
-// to one billed turn.
-func claudeEvent(rec *claudeUsageRecord) (usageEvent, bool) {
+// skipped. A record with no usable timestamp drops and increments dropped: it
+// belongs to the billed timeline but cannot be placed on it. The key pairs
+// message id and request id so the worktree-level dedupe can collapse streaming
+// repeats and cross-file repeats to one billed turn.
+func claudeEvent(rec *claudeUsageRecord, dropped *int) (usageEvent, bool) {
 	msg := rec.Message
 	if rec.Type != "assistant" || msg == nil || msg.Usage == nil || msg.Model == "<synthetic>" {
 		return usageEvent{}, false
 	}
 	at, ok := parseUsageTime(rec.Timestamp)
 	if !ok {
+		*dropped++
 		return usageEvent{}, false
 	}
 	tokens, tier, web := claudeTokensFrom(msg.Usage)

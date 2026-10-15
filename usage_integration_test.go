@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -297,5 +298,47 @@ func TestBuildUsageActiveTimeSurvivesDedupe(t *testing.T) {
 	}
 	if got := deduped.cost().cell(); got != "$1.00" {
 		t.Fatalf("deduped cost = %q, want $1.00", got)
+	}
+}
+
+// TestBuildUsageBadTimestampWarnsAndPartials pins the never-silent contract: a
+// billed record with a bad timestamp still drops, but the run warns once and
+// the total reads partial instead of a smaller exact number.
+func TestBuildUsageBadTimestampWarnsAndPartials(t *testing.T) {
+	dir := t.TempDir()
+	session := filepath.Join(dir, "s.jsonl")
+	bad := `{"type":"message","timestamp":"nope","message":{"role":"assistant","model":"m","usage":{"cost":{"total":9}}}}`
+	writeFile(t, session, piUsageLine(1.5)+"\n"+bad+"\n", 0o644)
+	ws := workspace{
+		wts: []worktree{{Path: dir}},
+		idx: sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}},
+	}
+	errOut := captureStderr(t, func() { ws.loadUsage() })
+	if got := strings.Count(errOut, warnPrefix); got != 1 {
+		t.Fatalf("warnings = %d, want 1:\n%s", got, errOut)
+	}
+	u := ws.wts[0].Usage
+	if u == nil || !u.partial {
+		t.Fatalf("dropped records must taint the total: %+v", u)
+	}
+	if got := cellCost(ws.wts[0], columnContext{}); got != "unknown" {
+		t.Errorf("cost = %q, want unknown", got)
+	}
+}
+
+// TestBuildUsageGoodSessionStaysExact pins the other half: a fully readable
+// session stays exact, with no warning and no partial flag.
+func TestBuildUsageGoodSessionStaysExact(t *testing.T) {
+	dir := t.TempDir()
+	idx := usageIndex(t, dir, "s.jsonl", piAgent.name, piUsageLine(1.5))
+	u, err := buildUsage(dir, idx, nil, subscriptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.partial {
+		t.Error("a fully readable session must not be partial")
+	}
+	if got := u.cost().cell(); got != "$1.50" {
+		t.Errorf("cost = %q, want $1.50", got)
 	}
 }

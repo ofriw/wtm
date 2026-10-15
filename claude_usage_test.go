@@ -22,7 +22,7 @@ const claudeFixture = `{"type":"queue-operation","operation":"dequeue","cwd":nul
 
 func parseClaudeFixture(t *testing.T) []usageEvent {
 	t.Helper()
-	events, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(claudeFixture)))
+	events, _, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(claudeFixture)))
 	if err != nil {
 		t.Fatalf("claudeUsageEvents: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestClaudeDedupeWebSearchBreaksTokenTie(t *testing.T) {
 // records both bill instead of collapsing to one winner.
 func TestClaudeKeylessRecordsSurviveDedupe(t *testing.T) {
 	line := `{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"model":"m","usage":{"input_tokens":1}}}`
-	events, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(line + "\n" + line + "\n")))
+	events, _, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(line + "\n" + line + "\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestClaudeUsageUnclassifiedCacheWrite(t *testing.T) {
 }
 
 func TestClaudeUsageSkipsUntimestamped(t *testing.T) {
-	events, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(
+	events, dropped, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(
 		`{"type":"assistant","message":{"id":"x","model":"m","usage":{"input_tokens":1}}}`,
 	)))
 	if err != nil {
@@ -162,13 +162,16 @@ func TestClaudeUsageSkipsUntimestamped(t *testing.T) {
 	if len(events) != 0 {
 		t.Fatalf("untimestamped record produced %d events, want 0", len(events))
 	}
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1: an untimestamped billed record must be disclosed", dropped)
+	}
 }
 
 // TestClaudeUsageSkipsNonAssistant pins the type filter: only an assistant
 // record carries billed usage, so a user record with a usage object is not an
 // event.
 func TestClaudeUsageSkipsNonAssistant(t *testing.T) {
-	events, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(
+	events, dropped, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(
 		`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"id":"x","model":"m","usage":{"input_tokens":1}}}`,
 	)))
 	if err != nil {
@@ -176,6 +179,9 @@ func TestClaudeUsageSkipsNonAssistant(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Fatalf("non-assistant record produced %d events, want 0", len(events))
+	}
+	if dropped != 0 {
+		t.Errorf("dropped = %d, want 0: a non-assistant record is skipped, not dropped", dropped)
 	}
 }
 
@@ -195,12 +201,15 @@ func TestClaudeUsageSkipsCorruptLines(t *testing.T) {
 		good[3], good[4],
 		`{"type":"assistant","timestamp":"2026-01-01T00:00:0`,
 	}
-	events, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(mixed, "\n") + "\n")))
+	events, dropped, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(mixed, "\n") + "\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 3 {
 		t.Fatalf("got %d candidate events, want 3: %+v", len(events), events)
+	}
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1: only the truncated usage line is unreadable", dropped)
 	}
 	deduped := dedupeOne(events)
 	first := deduped[0]

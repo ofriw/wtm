@@ -125,7 +125,7 @@ func TestPiProviderCapture(t *testing.T) {
 {"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","provider":"anthropic","model":"claude","usage":{"cost":{"total":2}}}}
 {"type":"message","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","model":"claude","usage":{"cost":{"total":3}}}}
 `
-	events, err := piUsageEvents(bufio.NewReader(strings.NewReader(session)))
+	events, _, err := piUsageEvents(bufio.NewReader(strings.NewReader(session)))
 	if err != nil {
 		t.Fatalf("piUsageEvents: %v", err)
 	}

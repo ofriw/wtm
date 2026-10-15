@@ -101,27 +101,42 @@ type piSpawnUsage struct {
 	Cost  *float64 `json:"cost"`
 }
 
-// piUsageEvents parses one Pi session into cost/time events. Malformed lines are
-// skipped, matching the session index's tolerant owner scan.
-func piUsageEvents(r *bufio.Reader) ([]usageEvent, error) {
+// piUsageEvents parses one Pi session into cost/time events, reporting how many
+// records it could not read. Malformed lines are skipped, matching the session
+// index's tolerant owner scan, but the count lets the caller warn instead of
+// silently shrinking the total.
+func piUsageEvents(r *bufio.Reader) ([]usageEvent, int, error) {
 	var events []usageEvent
+	dropped := 0
 	spawnAt := map[string]time.Time{}
 	current, provider := "", ""
 	for {
 		line, err := sessionRecord(r)
 		if len(line) > 0 && piInteresting(line) {
 			var rec piUsageRecord
-			if json.Unmarshal(line, &rec) == nil {
-				current, provider = appendPiRecord(&events, &rec, current, provider, spawnAt)
+			if json.Unmarshal(line, &rec) != nil {
+				dropped++
+			} else {
+				current, provider = appendPiRecord(&events, &rec, current, provider, spawnAt, &dropped)
 			}
 		}
 		if err != nil {
 			if err == io.EOF {
-				return events, nil
+				return events, dropped, nil
 			}
-			return events, err
+			return events, dropped, err
 		}
 	}
+}
+
+// piBillsTime reports whether a record type carries billed cost/time, so it
+// needs a usable timestamp; any other type is read for attribution only.
+func piBillsTime(t string) bool {
+	switch t {
+	case "message", "usage", "compaction", "branch_summary":
+		return true
+	}
+	return false
 }
 
 // appendPiRecord folds one record in and returns the session's current model and
@@ -129,7 +144,7 @@ func piUsageEvents(r *bufio.Reader) ([]usageEvent, error) {
 // a top-level `usage` record (cache warming), and a compaction or branch_summary
 // summary call. Only a model change moves the running attribution without
 // billing.
-func appendPiRecord(events *[]usageEvent, rec *piUsageRecord, current, provider string, spawnAt map[string]time.Time) (string, string) {
+func appendPiRecord(events *[]usageEvent, rec *piUsageRecord, current, provider string, spawnAt map[string]time.Time, dropped *int) (string, string) {
 	if rec.Type == "model_change" {
 		if rec.ModelID != "" {
 			current = rec.ModelID
@@ -139,8 +154,14 @@ func appendPiRecord(events *[]usageEvent, rec *piUsageRecord, current, provider 
 		}
 		return current, provider
 	}
+	if !piBillsTime(rec.Type) {
+		return current, provider
+	}
 	at, ok := parseUsageTime(rec.Timestamp)
 	if !ok {
+		// A billed record with no usable timestamp cannot be placed on the
+		// activity or cost timeline, so it drops; the count discloses that loss.
+		*dropped++
 		return current, provider
 	}
 	switch rec.Type {
