@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -31,6 +32,18 @@ func fixtureUsage() *worktreeUsage {
 		} else {
 			m.addKnown(0)
 		}
+		return m
+	}))
+	return &u
+}
+
+// pricedTokens is a one-model Pi worktree that recorded tk and $1, so a token
+// aggregate test needs no session file.
+func pricedTokens(tk promptTokens) *worktreeUsage {
+	var u worktreeUsage
+	u.addSession("pi", []usageEvent{{at: at(0), model: "m", tokens: tk, cost: fptr(1)}}, pairPricer(func(e usageEvent) money {
+		var m money
+		m.addKnown(*e.cost)
 		return m
 	}))
 	return &u
@@ -115,30 +128,51 @@ func TestStatusJSONEstimatedFlag(t *testing.T) {
 	}
 }
 
-// TestStatusEstimateLegend pins the reason-aware legend: each set reason prints
-// its SSOT line, an unset reason stays silent, and no reason prints nothing.
-// The asserts reference the constants, so prose edits move both sides together.
-func TestStatusEstimateLegend(t *testing.T) {
-	cacheOnly := captureStdout(t, func() { printEstimateLegend(estimateReasons{cache: true}, colorNever) })
-	if !strings.Contains(cacheOnly, "~ estimated: "+estimateCacheWriteLifetime) {
+// TestStatusCostLegend pins the cost legend: each set reason prints its SSOT
+// line, the LIST column prints its own line, and an unset one stays silent. The
+// asserts reference the constants, so prose edits move both sides together.
+func TestStatusCostLegend(t *testing.T) {
+	cacheOnly := captureStdout(t, func() { printCostLegend(costLegend{tableReasons: estimateReasons{cache: true}}, colorNever, 0) })
+	if !strings.Contains(cacheOnly, estimateLabel+" = "+estimateCacheWriteLifetime) {
 		t.Fatalf("cache-only legend missing its line:\n%s", cacheOnly)
 	}
 	if strings.Contains(cacheOnly, estimateSubscriptionOverage) {
 		t.Fatalf("cache-only legend must not explain overage:\n%s", cacheOnly)
 	}
-	overageOnly := captureStdout(t, func() { printEstimateLegend(estimateReasons{overage: true}, colorNever) })
-	if !strings.Contains(overageOnly, "~ estimated: "+estimateSubscriptionOverage) {
+	overageOnly := captureStdout(t, func() { printCostLegend(costLegend{tableReasons: estimateReasons{overage: true}}, colorNever, 0) })
+	if !strings.Contains(overageOnly, estimateLabel+" = "+estimateSubscriptionOverage) {
 		t.Fatalf("overage-only legend missing its line:\n%s", overageOnly)
 	}
 	if strings.Contains(overageOnly, estimateCacheWriteLifetime) {
 		t.Fatalf("overage-only legend must not explain the cache split:\n%s", overageOnly)
 	}
-	both := captureStdout(t, func() { printEstimateLegend(estimateReasons{cache: true, overage: true}, colorNever) })
-	if strings.Count(both, "~ estimated: ") != 2 {
-		t.Fatalf("both-reasons legend must print 2 lines, got:\n%s", both)
+	both := captureStdout(t, func() {
+		printCostLegend(costLegend{tableReasons: estimateReasons{cache: true, overage: true}, list: true}, colorNever, 0)
+	})
+	if strings.Count(both, estimateLabel+" = ") != 2 || !strings.Contains(both, listLegend.text) {
+		t.Fatalf("full legend must print 2 estimate lines and the list line, got:\n%s", both)
 	}
-	if got := captureStdout(t, func() { printEstimateLegend(estimateReasons{}, colorNever) }); got != "" {
-		t.Fatalf("no-estimate legend must be empty, got:\n%q", got)
+	if got := captureStdout(t, func() { printCostLegend(costLegend{}, colorNever, 0) }); got != "" {
+		t.Fatalf("no-caveat legend must be empty, got:\n%q", got)
+	}
+	// The LIST line prints under the table even when the breakdown renders the
+	// column too, so the table scanner never meets an unexplained second price.
+	if got := captureStdout(t, func() { printCostLegend(costLegend{list: true}, colorNever, 0) }); !strings.Contains(got, listLegend.text) {
+		t.Fatalf("a table-kept list line must print under the table, got:\n%q", got)
+	}
+	detail := captureStdout(t, func() { printDetailLegend(estimateReasons{}, true, true, colorNever, 0) })
+	// The token group is a titled block: the heading prints alone, its clauses
+	// indent under it, and every "=" still shares one column with the LIST line.
+	wantDetail := "\nlist   = " + listLegend.text + "\n" +
+		"tokens:\n" +
+		"  in   = " + tokenLegend[0].text + "\n" +
+		"  miss = " + tokenLegend[1].text + "\n" +
+		"  hit% = " + tokenLegend[2].text + "\n"
+	if detail != wantDetail {
+		t.Fatalf("breakdown legend = \n%s\nwant:\n%s", detail, wantDetail)
+	}
+	if got := captureStdout(t, func() { printDetailLegend(estimateReasons{}, false, false, colorNever, 0) }); got != "" {
+		t.Fatalf("an empty breakdown legend must print nothing, got:\n%q", got)
 	}
 }
 
@@ -146,22 +180,21 @@ func TestStatusEstimateLegend(t *testing.T) {
 // legend is needed only when a "~" cell actually renders, so a dropped COST
 // column suppresses it. The estimated worktree is not the current one, so only
 // the table can show the mark.
-func TestEstimateLegendNeededFollowsRenderedCells(t *testing.T) {
+func TestCostLegendNeededFollowsRenderedCells(t *testing.T) {
 	with := worktree{Path: "/with", Usage: estimatedUsage()}
-	cols := statusColumnsFor(false)
-	if r := estimateLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour); !r.any() {
+	cols := statusSchema(false, []worktree{with})
+	if r := costLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour, 0); !r.tableReasons.any() {
 		t.Fatal("an estimated table total must ask for the legend")
 	}
-	t.Setenv("COLUMNS", "5")
-	if r := estimateLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour); r.any() {
+	if r := costLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour, 5); r.tableReasons.any() {
 		t.Fatal("a dropped COST column must not ask for the legend")
 	}
 }
 
-// TestEstimateLegendSelectivity pins the reason-aware legend: a cache-only
+// TestCostLegendSelectivity pins the reason-aware legend: a cache-only
 // total prints one line, an overage-only total prints the other, both print
 // two, and an exact total prints none.
-func TestEstimateLegendSelectivity(t *testing.T) {
+func TestCostLegendSelectivity(t *testing.T) {
 	cacheEst := func() money { var m money; m.addEstimated(1); return m }()
 	overageEst := func() costPair {
 		var p costPair
@@ -190,11 +223,11 @@ func TestEstimateLegendSelectivity(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := worktree{Path: "/with", Usage: pairUsage(tc.pair)}
-			r := estimateLegendNeeded(cols, []worktree{w}, "/elsewhere", at(0), 10*time.Hour)
+			r := costLegendNeeded(cols, []worktree{w}, "/elsewhere", at(0), 10*time.Hour, 0).tableReasons
 			if r.cache != tc.wantCache || r.overage != tc.wantOver {
 				t.Fatalf("reasons = %+v, want cache=%v overage=%v", r, tc.wantCache, tc.wantOver)
 			}
-			out := captureStdout(t, func() { printEstimateLegend(r, colorNever) })
+			out := captureStdout(t, func() { printCostLegend(costLegend{tableReasons: r}, colorNever, 0) })
 			wantLines := 0
 			if tc.wantCache {
 				wantLines++
@@ -202,7 +235,7 @@ func TestEstimateLegendSelectivity(t *testing.T) {
 			if tc.wantOver {
 				wantLines++
 			}
-			if got := strings.Count(out, "~ estimated: "); got != wantLines {
+			if got := strings.Count(out, estimateLabel+" = "); got != wantLines {
 				t.Fatalf("legend lines = %d, want %d:\n%s", got, wantLines, out)
 			}
 		})
@@ -211,11 +244,11 @@ func TestEstimateLegendSelectivity(t *testing.T) {
 		both := overageEst
 		both.list = cacheEst
 		w := worktree{Path: "/with", Usage: pairUsage(both)}
-		r := estimateLegendNeeded(cols, []worktree{w}, "/elsewhere", at(0), 10*time.Hour)
+		r := costLegendNeeded(cols, []worktree{w}, "/elsewhere", at(0), 10*time.Hour, 0).tableReasons
 		if !r.cache || !r.overage {
 			t.Fatalf("reasons = %+v, want both", r)
 		}
-		if out := captureStdout(t, func() { printEstimateLegend(r, colorNever) }); strings.Count(out, "~ estimated: ") != 2 {
+		if out := captureStdout(t, func() { printCostLegend(costLegend{tableReasons: r}, colorNever, 0) }); strings.Count(out, estimateLabel+" = ") != 2 {
 			t.Fatalf("both-reasons legend must print 2 lines:\n%s", out)
 		}
 	})
@@ -256,22 +289,21 @@ func TestListCostJSONOmitsProvenUnknown(t *testing.T) {
 }
 
 func TestStatusDetailBlock(t *testing.T) {
-	t.Setenv("COLUMNS", "0")
 	with := worktree{Path: "/with", Usage: fixtureUsage()}
 	empty := worktree{Path: "/empty"}
 	other := worktree{Path: "/other", Usage: fixtureUsage()}
 
 	// No harness anywhere has events: the block is omitted.
-	if out := captureStdout(t, func() { printStatusDetail([]worktree{empty}, "/empty", at(0), colorNever) }); out != "" {
+	if out := captureStdout(t, func() { printStatusDetail([]worktree{empty}, "/empty", at(0), colorNever, 0) }); out != "" {
 		t.Fatalf("block must be omitted when the repo has no usage:\n%s", out)
 	}
 
 	// The current worktree has events: a separated, titled block, then rows.
-	out := captureStdout(t, func() { printStatusDetail([]worktree{with, other}, "/with", at(0), colorNever) })
+	out := captureStdout(t, func() { printStatusDetail([]worktree{with, other}, "/with", at(0), colorNever, 0) })
 	if !strings.HasPrefix(out, "\ncurrent worktree") {
 		t.Errorf("block must open with a blank line, then the identity row:\n%q", out)
 	}
-	for _, want := range []string{"current worktree", "active time", "MODEL", "↑ in", "↓ out", "🎯 hit", "✍️ write", "✗ miss", "◉ hit%", "deepseek-flash", "grok-4.3", "$4.00"} {
+	for _, want := range []string{"current worktree", "active time", "MODEL", "↑ in", "↓ out", "↩ hit", "↪ write", "× miss", "● hit%", "deepseek-flash", "grok-4.3", "$4.00"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("detail block missing %q:\n%s", want, out)
 		}
@@ -290,7 +322,7 @@ func TestStatusDetailBlock(t *testing.T) {
 	}
 
 	// The repo has usage, but not in the current worktree: the note replaces rows.
-	out = captureStdout(t, func() { printStatusDetail([]worktree{empty, other}, "/empty", at(0), colorNever) })
+	out = captureStdout(t, func() { printStatusDetail([]worktree{empty, other}, "/empty", at(0), colorNever, 0) })
 	if !strings.Contains(out, "no agent usage recorded") {
 		t.Errorf("empty current worktree must say so:\n%s", out)
 	}
@@ -318,8 +350,24 @@ func TestStatusDetailTokenColumns(t *testing.T) {
 		return m
 	}))
 	// in is the total prompt size (5.3M + 714.8k = 6.0M), not the uncached slice.
-	if got, want := detailRows(&u)[0], []string{"m", "0s", "$1.00", "6.0M", "732", "-", "714.8k", "6.0M", "0.0%"}; !slices.Equal(got, want) {
+	if got, want := detailRows(&u, false)[0], []string{"m", "0s", "$1.00", "6.0M", "732", "-", "714.8k", "6.0M", "0.0%"}; !slices.Equal(got, want) {
 		t.Errorf("detail row = %q, want %q", got, want)
+	}
+}
+
+// TestStatusDetailTokenGlyphs pins the token group's glyph invariant: one
+// display cell, text presentation (no U+FE0F). A 2-cell or color emoji overflows
+// its box and clips the neighbouring label, and a fallback-font dingbat renders
+// thin beside the bold header, so both classes are refused here, not at the
+// terminal.
+func TestStatusDetailTokenGlyphs(t *testing.T) {
+	for _, d := range detailTokenMeta {
+		if got := dispWidth(d.glyph); got != 1 {
+			t.Errorf("%q glyph %q = %d cells, want 1", d.label, d.glyph, got)
+		}
+		if strings.ContainsRune(d.glyph, '\uFE0F') {
+			t.Errorf("%q glyph %q carries U+FE0F; emoji presentation is not allowed", d.label, d.glyph)
+		}
 	}
 }
 
@@ -342,6 +390,140 @@ func TestStatusDetailHitRateGuard(t *testing.T) {
 		if got := hitRateCell(&modelUsage{tokens: c.tokens}); got != c.want {
 			t.Errorf("%s: hitRateCell = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// TestStatusDetailTokenRatios pins the summary's input:output ratios: every
+// share divides the recorded output, so the group is additive (total = cached +
+// uncached), and a worktree with no output shows no ratio rows at all — a ratio
+// without a denominator is undefined.
+func TestStatusDetailTokenRatios(t *testing.T) {
+	// context = 5.3M + 4.0M + 0.7M = 10.0M; output = 0.5M.
+	u := pricedTokens(promptTokens{input: 5_300_000, cacheRead: 4_000_000, cacheWrite5m: 700_000, output: 500_000})
+	rows := detailSummaryRows(worktree{Path: "/wt", Usage: u}, at(0))
+	want := [][]string{
+		{"total in:out", "20.0:1"},
+		{"cached in:out", "8.0:1"},
+		{"uncached in:out", "12.0:1"},
+	}
+	got := rows[len(rows)-len(want):]
+	for i := range want {
+		if !slices.Equal(got[i], want[i]) {
+			t.Errorf("ratio row %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if rows := detailSummaryRows(worktree{Path: "/wt", Usage: pricedTokens(promptTokens{input: 1000})}, at(0)); len(rows) != 4 {
+		t.Errorf("rows without output = %d, want 4 (ratio group hidden):\n%q", len(rows), rows)
+	}
+	if rows := tokenRatioRows(promptTokens{output: 100}); len(rows) != 0 {
+		t.Errorf("output-only rows = %q, want hidden (no input context)", rows)
+	}
+}
+
+// TestStatusInputOutputRatioJSON pins the machine contract: the key carries all
+// three shares, and a worktree that recorded no output omits the key entirely.
+func TestStatusInputOutputRatioJSON(t *testing.T) {
+	tokens := promptTokens{input: 5_300_000, cacheRead: 4_000_000, cacheWrite5m: 700_000, output: 500_000}
+	out := captureStdout(t, func() {
+		if err := printStatusJSON([]worktree{
+			{Path: "/ratio", Usage: pricedTokens(tokens)},
+			{Path: "/no-output", Usage: pricedTokens(promptTokens{input: 1000})},
+		}, at(0), 10*time.Hour, "/ratio"); err != nil {
+			t.Errorf("printStatusJSON: %v", err)
+		}
+	})
+	var got []jsonWorktree
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	r := got[0].InputOutputRatio
+	if r == nil || r.Total != 20 || r.Cached != 8 || r.Uncached != 12 {
+		t.Errorf("inputOutputRatio = %+v, want total=20 cached=8 uncached=12", r)
+	}
+	if got[1].InputOutputRatio != nil {
+		t.Errorf("no-output worktree must omit inputOutputRatio, got %+v", got[1].InputOutputRatio)
+	}
+	if inputOutputRatioJSON(pricedTokens(promptTokens{output: 100})) != nil {
+		t.Errorf("output-only worktree must omit inputOutputRatio")
+	}
+	if !strings.Contains(out, `"inputOutputRatio"`) {
+		t.Errorf("JSON must name the key:\n%s", out)
+	}
+}
+
+// TestInputOutputRatioRoundingDrift pins the documented bound (see
+// jsonInputOutputRatio): the three shares divide one output, so
+// total = cached + uncached holds before rounding, and after each field's
+// independent 1e-6 trim the rounded values can differ by at most 1e-6.
+// Repeating decimals are the adversarial mixes: they maximize trim error.
+func TestInputOutputRatioRoundingDrift(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tk   promptTokens
+	}{
+		{"thirds", promptTokens{input: 2, cacheRead: 1, output: 3}},
+		{"sevenths", promptTokens{input: 5, cacheRead: 2, cacheWrite5m: 3, output: 7}},
+		{"large", promptTokens{input: 1_000_003, cacheRead: 1_000_001, output: 3_000_007}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := captureStdout(t, func() {
+				if err := printStatusJSON([]worktree{
+					{Path: "/ratio", Usage: pricedTokens(tc.tk)},
+				}, at(0), 10*time.Hour, "/ratio"); err != nil {
+					t.Errorf("printStatusJSON: %v", err)
+				}
+			})
+			var got []jsonWorktree
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("invalid JSON: %v\n%s", err, out)
+			}
+			r := got[0].InputOutputRatio
+			if r == nil {
+				t.Fatal("ratios undefined, want defined")
+			}
+			// Compare in integer micro-units: the bound is exact in decimals,
+			// and float64 representation would blur it by ~1e-16 relative.
+			mu := func(v float64) int64 { return int64(math.Round(v * 1e6)) }
+			drift := mu(r.Total) - (mu(r.Cached) + mu(r.Uncached))
+			if drift < 0 {
+				drift = -drift
+			}
+			if drift > 1 {
+				t.Errorf("rounded drift %d micro-units exceeds 1e-6: %+v", drift, r)
+			}
+		})
+	}
+}
+
+// TestSummaryFittedWidthEmpty pins the empty-rows guard: no rows means no
+// value width, never a panic.
+func TestSummaryFittedWidthEmpty(t *testing.T) {
+	if got := summaryFittedWidth(nil, 80); got != 0 {
+		t.Errorf("summaryFittedWidth(nil) = %d, want 0", got)
+	}
+	if got := summaryHiddenGroups(nil, 80); len(got) != 0 {
+		t.Errorf("summaryHiddenGroups(nil) = %q, want empty", got)
+	}
+}
+
+// TestCostLegendSplitsTableAndDetail pins the per-block ownership: table marks
+// print under the table, detail marks under the breakdown, never crossed.
+// TestCostLegendSplitsTableAndDetail pins the per-block ownership: table
+// marks print under the table, detail marks under the breakdown, never crossed.
+// When the current worktree is absent ("/elsewhere"), printStatusDetail is a
+// no-op, so no detail legend is produced — the table legend stands alone.
+func TestCostLegendSplitsTableAndDetail(t *testing.T) {
+	now := at(0)
+	env := sandbox(t)
+	tableWT := worktree{Path: filepath.Join(env.Home, "wt-table"), Usage: estimatedUsage()}
+	cols := statusSchema(false, []worktree{tableWT})
+	l := costLegendNeeded(cols, []worktree{tableWT}, "/elsewhere", now, 10*time.Hour, 0)
+	if !l.tableReasons.any() {
+		t.Fatal("estimated table total must set tableReasons")
+	}
+	// The current worktree is not in the list, so printStatusDetail is a no-op.
+	if out := captureStdout(t, func() { printStatusDetail([]worktree{tableWT}, "/elsewhere", now, colorNever, 0) }); out != "" {
+		t.Fatalf("absent current worktree must print no detail block, got:\n%q", out)
 	}
 }
 
@@ -492,7 +674,7 @@ func TestDetailBlockUnknownCost(t *testing.T) {
 		return m
 	}))
 	w := worktree{Path: "/w", Usage: &u}
-	out := captureStdout(t, func() { printStatusDetail([]worktree{w}, "/w", at(0), colorNever) })
+	out := captureStdout(t, func() { printStatusDetail([]worktree{w}, "/w", at(0), colorNever, 0) })
 	if !strings.Contains(out, "unknown") {
 		t.Errorf("unpriced detail row must read unknown:\n%s", out)
 	}
@@ -732,29 +914,44 @@ func TestStatusJSONCacheKeysConsumer(t *testing.T) {
 	}
 }
 
-// TestAlignCostSubFieldsEstimateUnknown pins that alignment never mid-cuts
-// pairs: estimated and unknown cells align with exact ones in one column.
-func TestAlignCostSubFieldsEstimateUnknown(t *testing.T) {
-	headers := []string{"MODEL", colCost.header}
-	rows := [][]string{
-		{"pair", "$0.00/$41.20"},
-		{"est", "~$0.00/$41.20"},
-		{"solo", "$12.34"},
-		{"unk", "unknown"},
+// TestListColumnFollowsTheData pins the data-dependent schema: the LIST column
+// exists only when a row carries a list price, each row's cell is that row's own
+// list price or a dash, and the billed COST cell never packs the pair.
+func TestListColumnFollowsTheData(t *testing.T) {
+	proven := worktree{Path: "/sub", Usage: subscriptionUsage(at(0), 41.20)}
+	metered := worktree{Path: "/pay", Usage: fixtureUsage()}
+	with, without := statusSchema(false, []worktree{proven, metered}), statusSchema(false, []worktree{metered})
+	if !slices.Contains(columnHeaders(with), colList.header) {
+		t.Errorf("a proven subscription must add the LIST column: %v", columnHeaders(with))
 	}
-	out := alignCostSubFields(headers, rows)
-	if len(out) != 4 {
-		t.Fatalf("aligned rows = %d, want 4", len(out))
+	if slices.Contains(columnHeaders(without), colList.header) {
+		t.Errorf("a table of single prices must not carry a LIST column: %v", columnHeaders(without))
 	}
-	if out[3][1] == "" {
-		t.Error("unknown cell must survive alignment")
+	if cols, _ := detailSchema(proven.Usage); !slices.Contains(columnHeaders(cols), colList.header) {
+		t.Errorf("a model list price must add the breakdown's LIST column: %v", columnHeaders(cols))
 	}
-	if out[1][1] == "" || !strings.Contains(out[1][1], "~$0.00") {
-		t.Errorf("estimated cell lost its mark: %q", out[1][1])
+	if got := cellCost(proven, columnContext{}); got != "$0.00" {
+		t.Errorf("proven billed cell = %q, want $0.00", got)
 	}
-	if !strings.Contains(out[0][1], "/") || !strings.Contains(out[1][1], "/") {
-		t.Errorf("pairs must keep separator: %q %q", out[0][1], out[1][1])
+	if got := cellList(proven, columnContext{}); got != "$41.20" {
+		t.Errorf("proven list cell = %q, want $41.20", got)
 	}
+	if got := cellList(metered, columnContext{}); got != "-" {
+		t.Errorf("metered list cell = %q, want -", got)
+	}
+}
+
+// subscriptionUsage is one priced worktree whose pair proves a subscription:
+// billed $0 metered $list, so the LIST column has a value to carry.
+func subscriptionUsage(now time.Time, list float64) *worktreeUsage {
+	var u worktreeUsage
+	u.addSession("pi", []usageEvent{{at: now, model: "m"}}, func(usageEvent) pricedEvent {
+		var l, billed money
+		l.addKnown(list)
+		billed.addKnown(0)
+		return pricedEvent{total: costPair{list: l, billed: billed, subscription: true}}
+	})
+	return &u
 }
 
 // TestTiersJSONSubscriptionListCost pins the tier-level list contract: a proven
@@ -814,7 +1011,6 @@ func TestHitRateCappedBelowOne(t *testing.T) {
 // detail block: the token legend prints only when a model actually recorded
 // tokens, never beside a breakdown whose token cells are all dashes.
 func TestStatusDetailTokenLegendOnlyWithTokens(t *testing.T) {
-	t.Setenv("COLUMNS", "0")
 	costOnly := worktreeUsage{harnesses: map[string]*harnessUsage{
 		"pi": {models: map[string]*modelUsage{"m": {cost: costPair{billed: knownZero()}}}},
 	}}
@@ -822,15 +1018,15 @@ func TestStatusDetailTokenLegendOnlyWithTokens(t *testing.T) {
 		"pi": {models: map[string]*modelUsage{"m": {cost: costPair{billed: knownZero()}, tokens: promptTokens{input: 100}}}},
 	}}
 	costOut := captureStdout(t, func() {
-		printStatusDetail([]worktree{{Path: "/w", Usage: &costOnly}}, "/w", at(0), colorNever)
+		printStatusDetail([]worktree{{Path: "/w", Usage: &costOnly}}, "/w", at(0), colorNever, 0)
 	})
-	if strings.Contains(costOut, "tokens: in") {
+	if strings.Contains(costOut, tokenLegendTitle) {
 		t.Errorf("cost-only detail must not print the token legend:\n%s", costOut)
 	}
 	tokOut := captureStdout(t, func() {
-		printStatusDetail([]worktree{{Path: "/w", Usage: &withTokens}}, "/w", at(0), colorNever)
+		printStatusDetail([]worktree{{Path: "/w", Usage: &withTokens}}, "/w", at(0), colorNever, 0)
 	})
-	if !strings.Contains(tokOut, "tokens: in") {
+	if !strings.Contains(tokOut, tokenLegendTitle) {
 		t.Errorf("token-bearing detail must print the token legend:\n%s", tokOut)
 	}
 }

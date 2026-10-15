@@ -78,11 +78,9 @@ func statusCellStyle(header, value string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
 	case "UPSTREAM":
 		return booleanStyle(value != "-")
-	case "COST":
+	case "COST", "LIST":
 		// A number is the signal; "unknown" and "-" are non-values and recede.
-		// TrimSpace: alignCostSubFields pads the cell before styling, so an
-		// absent value arrives space-padded and must still read as a non-value.
-		if secondaryValue(strings.TrimSpace(value)) {
+		if secondaryValue(value) {
 			return lipgloss.NewStyle().Faint(true)
 		}
 	case "BRANCH", "LAST USED":
@@ -173,13 +171,13 @@ func groupedCellStyle(value string) string {
 }
 
 // printTable renders a width-fitted table. Deterministic output is a test
-// contract: the budget comes from COLUMNS or a TTY only, and cells are sized
+// contract: the caller supplies the budget, and cells are sized
 // and middle-elided here — never by the table resizer, whose end-elision and
 // shrink-column choice we cannot observe or pin. Styles are applied only when
 // the resolved profile supports them; NoTTY output stays pure ASCII so pipes,
 // --json and goldens remain byte-stable.
-func printTable(headers []string, rows [][]string, colorMode string, render cellRenderer, rightAlign []string) {
-	headers, rows, widths, aligns := sizedGrid(headers, rows, widthBudget(), rightAlign)
+func printTable(headers []string, rows [][]string, colorMode string, render cellRenderer, rightAlign []string, budget int) {
+	headers, rows, widths, aligns := sizedGrid(headers, rows, budget, rightAlign)
 	profile := resolveColorProfile(colorMode)
 	// A nil renderer renders plain text: the guard keeps that a no-op instead of
 	// relying on the profile to skip the call.
@@ -197,8 +195,8 @@ func printTable(headers []string, rows [][]string, colorMode string, render cell
 // style; the rest are faint; values stay plain except a non-value ("-"/
 // "unknown"), which recedes with faint. Styles apply after sizing and elision,
 // and NoTTY output is ASCII-only, so goldens stay byte-stable.
-func printKeyValues(rows [][]string, titleRows int, colorMode string) {
-	labels, widths := sizedKeyValues(rows)
+func printKeyValues(rows [][]string, titleRows int, colorMode string, budget int) {
+	labels, widths := sizedKeyValues(rows, budget)
 	aligns := columnAligns(labels, nil)        // key/value blocks are left-aligned
 	_, rows = elideCells(labels, rows, widths) // elide plain text before styling
 	profile := resolveColorProfile(colorMode)
@@ -215,9 +213,9 @@ const keyValueValueFloor = 6
 // sizedKeyValues sizes a two-column summary block to the terminal budget. The
 // block renders headerless, so an empty label slice stands in for the width
 // pass; callers with no rows must not call it.
-func sizedKeyValues(rows [][]string) ([]string, []int) {
+func sizedKeyValues(rows [][]string, budget int) ([]string, []int) {
 	labels := make([]string, len(rows[0])) // width pass only; no header row renders
-	return labels, fitKeyValues(naturalWidths(labels, rows), widthBudget())
+	return labels, fitKeyValues(naturalWidths(labels, rows), budget)
 }
 
 // fitKeyValues fits a two-column summary block to the budget: the value column
@@ -438,7 +436,7 @@ func middleElide(s string, w int) string {
 // toward their header width. Pinned columns never change. A column that cannot
 // fit is dropped whole, so the table never shows a bare ellipsis; a long header
 // may still middle-elide to its column width. Only AGE, ACTIVE and COST declare
-// a floor at their header width, and only COST is unelidable. Shrink priority
+// a floor at their header width, and COST and LIST are unelidable. Shrink priority
 // is derived from the actual headers via columnRegistry(), so --wide capability
 // columns participate alongside the core columns.
 func columnWidths(headers []string, rows [][]string, budget int) []int {

@@ -374,11 +374,10 @@ func TestStyledTableStripsToPlain(t *testing.T) {
 }
 
 func TestPrintTableRightAlign(t *testing.T) {
-	t.Setenv("COLUMNS", "0")
 	headers := []string{"A", "BB"}
 	rows := [][]string{{"x", "y"}}
 	// colorNever is NoTTY and the renderer is nil, so the table renders plain.
-	out := captureStdout(t, func() { printTable(headers, rows, colorNever, nil, []string{"BB"}) })
+	out := captureStdout(t, func() { printTable(headers, rows, colorNever, nil, []string{"BB"}, 0) })
 	want := "A  BB\nx   y\n"
 	if out != want {
 		t.Fatalf("right-aligned table = %q, want %q", out, want)
@@ -388,13 +387,12 @@ func TestPrintTableRightAlign(t *testing.T) {
 // TestPrintKeyValues is the key/value block contract: headerless two-column
 // layout on the shared two-cell gutter, no trailing padding.
 func TestPrintKeyValues(t *testing.T) {
-	t.Setenv("COLUMNS", "0")
 	rows := [][]string{
 		{"current worktree", "/SBX/wt"},
 		{"age", "6y"},
 		{"active time", "45m"},
 	}
-	out := captureStdout(t, func() { printKeyValues(rows, 1, colorNever) })
+	out := captureStdout(t, func() { printKeyValues(rows, 1, colorNever, 0) })
 	want := "current worktree  /SBX/wt\nage               6y\nactive time       45m\n"
 	if out != want {
 		t.Fatalf("key/value block = %q, want %q", out, want)
@@ -405,9 +403,8 @@ func TestPrintKeyValues(t *testing.T) {
 // style, the other labels faint, and the styling strips back to the exact plain
 // bytes.
 func TestPrintKeyValuesStylesTitleAndLabels(t *testing.T) {
-	t.Setenv("COLUMNS", "0")
 	rows := [][]string{{"current worktree", "/SBX/wt"}, {"age", "6y"}}
-	styled := captureStdout(t, func() { printKeyValues(rows, 1, colorAlways) })
+	styled := captureStdout(t, func() { printKeyValues(rows, 1, colorAlways, 0) })
 	if !strings.Contains(styled, "\x1b[1;36m") {
 		t.Errorf("title label is not a cyan title: %q", styled)
 	}
@@ -422,14 +419,13 @@ func TestPrintKeyValuesStylesTitleAndLabels(t *testing.T) {
 // TestPrintKeyValuesFitsWidth pins the summary block's budget: a long value is
 // elided to fit, the label survives, and no line exceeds the budget.
 func TestPrintKeyValuesFaintsNonValues(t *testing.T) {
-	t.Setenv("COLUMNS", "0")
 	rows := [][]string{
 		{"current worktree", "/SBX/wt"},
 		{"active time", "-"},
 		{"cost", "unknown"},
 		{"age", "6y"},
 	}
-	styled := captureStdout(t, func() { printKeyValues(rows, 1, colorAlways) })
+	styled := captureStdout(t, func() { printKeyValues(rows, 1, colorAlways, 0) })
 	// A non-value recedes with faint; a real value stays plain.
 	for _, v := range []string{"-", "unknown"} {
 		if !strings.Contains(styled, "\x1b[2m"+v) {
@@ -448,8 +444,7 @@ func TestPrintKeyValuesFitsWidth(t *testing.T) {
 	}
 	for _, width := range []int{80, 40, 30} {
 		t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
-			t.Setenv("COLUMNS", fmt.Sprintf("%d", width))
-			out := captureStdout(t, func() { printKeyValues(rows, 1, colorNever) })
+			out := captureStdout(t, func() { printKeyValues(rows, 1, colorNever, width) })
 			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 				if w := dispWidth(line); w > width {
 					t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
@@ -567,22 +562,24 @@ func TestDropZeroColumnsDisclosesHiddenColumns(t *testing.T) {
 	})
 }
 
-// TestStatusCellStyleTrimsPaddedNonValue pins that a COST cell aligned with
-// surrounding numbers — which pads an absent or unpriced value with spaces —
-// still recedes as a non-value instead of reading as a number.
-func TestStatusCellStyleTrimsPaddedNonValue(t *testing.T) {
-	for _, v := range []string{"    -", "  unknown"} {
-		if s := statusCellStyle("COST", v); !s.GetFaint() {
-			t.Errorf("statusCellStyle(COST, %q) faint=false, want true", v)
+// TestStatusCellStyleNonValuesRecede pins that both price columns treat a
+// non-value as a non-value: an absent or unpriced COST or LIST cell recedes
+// instead of reading as a number.
+func TestStatusCellStyleNonValuesRecede(t *testing.T) {
+	for _, header := range []string{"COST", "LIST"} {
+		for _, v := range []string{"-", "unknown"} {
+			if s := statusCellStyle(header, v); !s.GetFaint() {
+				t.Errorf("statusCellStyle(%s, %q) faint=false, want true", header, v)
+			}
+			if got := statusCell(header, v); !strings.Contains(got, "\x1b[2m") {
+				t.Errorf("statusCell(%s, %q) = %q, want faint ANSI", header, v, got)
+			}
 		}
-		if got := statusCell("COST", v); !strings.Contains(got, "\x1b[2m") {
-			t.Errorf("statusCell(COST, %q) = %q, want faint ANSI", v, got)
+		if s := statusCellStyle(header, "$1.00"); s.GetFaint() {
+			t.Errorf("statusCellStyle(%s, \"$1.00\") faint=true, want false", header)
 		}
-	}
-	if s := statusCellStyle("COST", "$1.00"); s.GetFaint() {
-		t.Errorf("statusCellStyle(COST, \"$1.00\") faint=true, want false")
-	}
-	if got := statusCell("COST", "$1.00"); strings.Contains(got, "\x1b[2m") {
-		t.Errorf("statusCell(COST, \"$1.00\") = %q, want no faint ANSI", got)
+		if got := statusCell(header, "$1.00"); strings.Contains(got, "\x1b[2m") {
+			t.Errorf("statusCell(%s, \"$1.00\") = %q, want no faint ANSI", header, got)
+		}
 	}
 }

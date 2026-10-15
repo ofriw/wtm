@@ -372,7 +372,7 @@ func TestFixtureRatesParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open fixture: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	c, err := parseCatalog(f)
 	if err != nil {
 		t.Fatalf("parseCatalog fixture: %v", err)

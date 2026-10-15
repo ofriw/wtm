@@ -285,6 +285,14 @@ func capture(t *testing.T, target **os.File, fn func()) string {
 	return out
 }
 
+func withStdout(t *testing.T, stdout *os.File, fn func()) {
+	t.Helper()
+	previous := os.Stdout
+	os.Stdout = stdout
+	defer func() { os.Stdout = previous }()
+	fn()
+}
+
 func captureStdout(t *testing.T, fn func()) string { return capture(t, &os.Stdout, fn) }
 func captureStderr(t *testing.T, fn func()) string { return capture(t, &os.Stderr, fn) }
 
@@ -299,13 +307,28 @@ func mustSymlink(t *testing.T, target, link string) {
 	}
 }
 
+// childTerminalEnv keeps CLI fixtures independent of the invoking terminal.
+// Explicit overrides remain available for environment-precedence contracts.
+func childTerminalEnv(overrides []string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		switch key {
+		case "COLUMNS", "LINES", "TERM", "COLORTERM", "NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE":
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, overrides...)
+}
+
 // runWTM execs the real binary in dir with extra env, returning stdout, stderr
 // and the exit code.
 func runWTM(t *testing.T, dir string, env []string, args ...string) (string, string, int) {
 	t.Helper()
 	cmd := exec.Command(buildWTM(t), args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = childTerminalEnv(env)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err := cmd.Run()

@@ -314,6 +314,22 @@ func (t promptTokens) hitRate() (float64, bool) {
 // rounding in cacheJSON from emitting a false 1.0.
 const maxHitRate = 0.999
 
+// ratiosDefined reports whether the summary's input:output ratios exist: both
+// sides must have recorded tokens, since a ratio without a denominator (no
+// output) or a numerator (no prompt tokens) is undefined.
+func (t promptTokens) ratiosDefined() bool { return t.context() > 0 && t.output > 0 }
+
+// outputRatio is one input:output share for the worktree summary: n divided by
+// the recorded output, ok=false when no output was recorded. Every summary
+// ratio divides by the same output, so the three read as comparable addends
+// (total = cached + uncached); a zero denominator is refused, never an infinity.
+func (t promptTokens) outputRatio(n int64) (float64, bool) {
+	if t.output <= 0 {
+		return 0, false
+	}
+	return float64(n) / float64(t.output), true
+}
+
 // tier returns the token count in one displayed tier. The cache-write classes
 // (5m, 1h, unclassified) collapse into the single displayed write tier; the
 // split stays internal so the rate catalog can price it exactly.
@@ -654,6 +670,19 @@ func (u *worktreeUsage) mergedModels() map[string]*modelUsage {
 	return out
 }
 
+// tokens sums every model's folded token counts across harnesses: the
+// worktree-level total the summary ratios divide. Dedupe already decided which
+// events fold (see foldEvent), so this only adds what those folds recorded.
+func (u *worktreeUsage) tokens() promptTokens {
+	var t promptTokens
+	for _, h := range u.harnesses {
+		for _, m := range h.models {
+			t = t.plus(m.tokens)
+		}
+	}
+	return t
+}
+
 // sortedModelNames returns the merged models ordered most expensive first,
 // then unknown costs, then by name.
 func (u *worktreeUsage) sortedModelNames(models map[string]*modelUsage) []string {
@@ -726,6 +755,13 @@ func humanDuration(d time.Duration) string {
 // round to a false 100%.
 func formatPercent(v float64) string {
 	return fmt.Sprintf("%.1f%%", v*100)
+}
+
+// formatRatio renders an input:output share with the output normalised to 1.
+// The shared denominator is what makes the summary's three ratios comparable
+// and additive.
+func formatRatio(v float64) string {
+	return fmt.Sprintf("%.1f:1", v)
 }
 
 // formatTokens renders a token count in a compact unit: exact below 1000, then

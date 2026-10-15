@@ -67,7 +67,7 @@ func assertEstimateLegend(t *testing.T, repo string, want bool) {
 	if rc != 0 {
 		t.Fatalf("status exit %d: %s", rc, stderr)
 	}
-	if got := strings.Contains(out, "~ estimated:"); got != want {
+	if got := strings.Contains(out, estimateLabel+" ="); got != want {
 		t.Errorf("legend present = %v, want %v:\n%s", got, want, out)
 	}
 	if want && (!strings.Contains(out, "~$") || !strings.Contains(out, "5-minute rate") || !strings.Contains(out, "lower bound")) {

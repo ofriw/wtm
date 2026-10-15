@@ -164,7 +164,6 @@ func TestReclaimFailsClosedOnUnreadableSession(t *testing.T) {
 
 func TestCorruptNativeMCPStatusConsistent(t *testing.T) {
 	sandbox(t)
-	t.Setenv("COLUMNS", "240") // Keep capability columns visible regardless of the host terminal.
 	repo := nativeRepo(t)
 	writeFile(t, filepath.Join(repo, piNativeMCPFile), "{broken\n", 0o644)
 	for _, args := range [][]string{{"status"}, {"status", "--wide"}, {"status", "--json"}} {

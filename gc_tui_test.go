@@ -83,19 +83,7 @@ func (p *ttyPoll) waitContains(sub string, timeout time.Duration, childDone <-ch
 	}
 }
 
-// gcTUIEnv scrubs ambient terminal state so the TUI render is deterministic.
-func gcTTYEnv() []string {
-	var env []string
-	for _, kv := range os.Environ() {
-		k, _, _ := strings.Cut(kv, "=")
-		switch k {
-		case "COLUMNS", "LINES", "TERM", "COLORTERM", "NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE":
-			continue
-		}
-		env = append(env, kv)
-	}
-	return append(env, "TERM=xterm")
-}
+func gcTTYEnv() []string { return childTerminalEnv([]string{"TERM=xterm"}) }
 
 // gcTTYWidth is the default pty width: wide enough that every form line stays
 // unwrapped, so polled titles are contiguous in the stripped stream.
