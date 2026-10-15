@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -398,4 +400,57 @@ func TestPriceLongContextPartialAboveFallsBack(t *testing.T) {
 	c := catalog{"mx": {standard: tokenRates{input: fptr(0.000001)}, above: tokenRates{cacheWrite1h: fptr(0.000003)}, hasAbove: true}}
 	e := usageEvent{model: "mx", tier: "standard", tokens: promptTokens{input: 250_000, cacheWrite1h: 10_000}}
 	assertCost(t, c.price(e), 250_000*0.000001+10_000*0.000003, true)
+}
+
+// TestWriteRatesCacheParallelWritersKeepValidCatalog pins the parallel-status
+// contract: each writer gets a private temp, so the final catalog is exactly one
+// writer's complete payload and no temp file survives. A shared temp lets one
+// rename land while another writes, so the old code tears or errors here.
+func TestWriteRatesCacheParallelWritersKeepValidCatalog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rates.json")
+	const writers = 16
+	payloads := make([][]byte, writers)
+	for i := range payloads {
+		payloads[i] = bytes.Repeat([]byte{byte('a' + i)}, 4096)
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, writers)
+	start := make(chan struct{})
+	for i := range payloads {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			errs[i] = writeRatesCache(path, payloads[i])
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("writer %d: %v", i, err)
+		}
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched := false
+	for _, p := range payloads {
+		if bytes.Equal(got, p) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		t.Fatalf("catalog is torn: %d bytes match no writer's complete payload", len(got))
+	}
+	leftover, err := filepath.Glob(path + ".tmp*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftover) != 0 {
+		t.Errorf("temp files left after concurrent writes: %v", leftover)
+	}
 }

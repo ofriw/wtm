@@ -481,14 +481,31 @@ func fetchRates(url string) ([]byte, error) {
 }
 
 // writeRatesCache persists the catalog atomically; a failed cache write must
-// not fail the command, so the error is the caller's to ignore.
+// not fail the command, so the error is the caller's to ignore. Each writer
+// gets a private temp file: parallel status runs must never share one, or a
+// rename would land the other writer's partial file.
 func writeRatesCache(path string, raw []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	name := tmp.Name()
+	// Remove the temp on every failure; a successful rename leaves nothing.
+	defer func() { _ = os.Remove(name) }()
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
