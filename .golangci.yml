@@ -1,6 +1,7 @@
 # Lint behavior is pinned, not inherited: golangci-lint's implicit defaults can
 # change between releases and turn unrelated PRs red. The binary version is the
-# single source of truth in .golangci-lint-version; the linter set is fixed here.
+# single source of truth in .golangci-lint-version; the linter and formatter sets
+# are fixed here.
 #
 # The action resolves versions as `version` > a go.mod golangci-lint dependency >
 # this file. Never add golangci-lint to go.mod, or this file stops being the pin.
@@ -14,3 +15,10 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+
+# Formatters run as part of `golangci-lint run`, so CI's lint job rejects a file
+# that is not gofmt/goimports-clean; `make fmt` fixes it locally.
+formatters:
+  enable:
+    - gofmt
+    - goimports
