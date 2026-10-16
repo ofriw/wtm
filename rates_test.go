@@ -1,14 +1,16 @@
 package main
 
 import (
-	"bytes"
+	"context"
+	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -214,46 +216,41 @@ func TestCacheFreshness(t *testing.T) {
 	}
 }
 
-// TestLoadCatalogStaleCacheFallback pins the cold-fetch guard: a recent failed
-// attempt skips the network and serves the stale cache instead of stalling.
+// TestLoadCatalogStaleCacheFallback pins the cold-fetch guard: after a failed
+// attempt, the next load skips the network and serves the stale cache instead
+// of stalling. The cooldown is observed through the server, not the marker.
 func TestLoadCatalogStaleCacheFallback(t *testing.T) {
-	home := t.TempDir()
-	setHomeEnv(t, home)
-	t.Setenv(ratesEnv, "")
-	path := filepath.Join(home, ".wtm", "rates.json")
-	writeFile(t, path, testCatalog, 0o644)
-	old := time.Now().Add(-ratesCacheTTL - time.Hour)
-	if err := os.Chtimes(path, old, old); err != nil {
-		t.Fatal(err)
+	pinStaleCatalog(t, testCatalog)
+	url, hits := serveRatesCounting(t, http.StatusInternalServerError, "boom")
+	if _, err := loadCatalogFrom(url); err != nil {
+		t.Fatalf("stale fallback: %v", err)
 	}
-	writeFile(t, attemptPath(path), "", 0o644)
-	c, err := loadCatalog()
+	c, err := loadCatalogFrom(url)
 	if err != nil {
-		t.Fatalf("loadCatalog: %v", err)
+		t.Fatalf("loadCatalogFrom: %v", err)
 	}
 	if _, ok := c["m1"]; !ok {
 		t.Error("stale cache was not used")
 	}
+	if hits.Load() != 1 {
+		t.Errorf("fetches = %d, want 1: the retry must skip the network", hits.Load())
+	}
 }
 
 // TestLoadCatalogFreshCacheSkipsNetwork pins the cache-first order: a fresh
-// cache is served without a fetch, so no attempt marker may appear (a regressed
-// fetch writes one when it fails).
+// cache is served without touching the network.
 func TestLoadCatalogFreshCacheSkipsNetwork(t *testing.T) {
-	home := t.TempDir()
-	setHomeEnv(t, home)
-	t.Setenv(ratesEnv, "")
-	path := filepath.Join(home, ".wtm", "rates.json")
-	writeFile(t, path, testCatalog, 0o644)
-	c, err := loadCatalog()
+	writeFile(t, isolatedRatesCache(t), testCatalog, 0o644)
+	url, hits := serveRatesCounting(t, http.StatusOK, testCatalog)
+	c, err := loadCatalogFrom(url)
 	if err != nil {
-		t.Fatalf("loadCatalog: %v", err)
+		t.Fatalf("loadCatalogFrom: %v", err)
 	}
 	if _, ok := c["m1"]; !ok {
 		t.Error("fresh cache was not served")
 	}
-	if _, err := os.Stat(attemptPath(path)); err == nil {
-		t.Error("attempt marker written: the network was touched")
+	if hits.Load() != 0 {
+		t.Errorf("fetches = %d, want 0: the network was touched", hits.Load())
 	}
 }
 
@@ -277,24 +274,37 @@ func TestFetchCoolingDown(t *testing.T) {
 
 // serveRates runs a local catalog server: no external network is ever touched.
 func serveRates(t *testing.T, status int, body string) string {
+	url, _ := serveRatesCounting(t, status, body)
+	return url
+}
+
+// serveRatesCounting is serveRates plus a request counter, so tests pin the
+// fetch contract through the network boundary instead of internal markers.
+func serveRatesCounting(t *testing.T, status int, body string) (string, *atomic.Int32) {
 	t.Helper()
+	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	return srv.URL
+	return srv.URL, &hits
 }
 
-// pinFreshCache writes a stale-but-present cache at the real cache path and
-// returns that path. Stale, so a fetch is attempted rather than served fresh.
-func pinFreshCache(t *testing.T) string {
+func isolatedRatesCache(t *testing.T) string {
 	t.Helper()
-	t.Setenv(ratesEnv, "") // a pinned local catalog would bypass the fetch under test
+	t.Setenv(ratesEnv, "") // A local override would bypass the fetch under test.
 	home := t.TempDir()
 	setHomeEnv(t, home)
-	path := filepath.Join(home, ".wtm", "rates.json")
-	writeFile(t, path, testCatalog, 0o644)
+	return filepath.Join(home, ".wtm", "rates.json")
+}
+
+// pinStaleCatalog leaves a stale cache so the loader attempts a refresh.
+func pinStaleCatalog(t *testing.T, body string) string {
+	t.Helper()
+	path := isolatedRatesCache(t)
+	writeFile(t, path, body, 0o644)
 	old := time.Now().Add(-ratesCacheTTL - time.Hour)
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
@@ -306,47 +316,46 @@ func pinFreshCache(t *testing.T) string {
 // loader: a 200 body is cached to disk and prices models, so a later offline
 // run can serve it.
 func TestRatesFetchSuccessCachesAndPrices(t *testing.T) {
-	t.Setenv(ratesEnv, "") // a pinned local catalog would bypass the fetch under test
-	setHomeEnv(t, t.TempDir())
+	path := isolatedRatesCache(t)
 	c, err := loadCatalogFrom(serveRates(t, http.StatusOK, testCatalog))
-	if err != nil {
-		t.Fatalf("loadCatalogFrom: %v", err)
-	}
-	raw, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".wtm", "rates.json"))
-	if err != nil || string(raw) != testCatalog {
-		t.Fatalf("cache = %q, err = %v, want the fetched body", raw, err)
-	}
-	assertCost(t, c.price(usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 1000}}), 0.001, true)
+	assertFetchedCatalog(t, c, err)
+	assertPersistedCatalog(t, path)
 }
 
 // TestRatesFetchErrorFallsBackToStale pins the outage path: an HTTP 500 with a
-// stale cache on disk still serves old prices instead of unknown, and records
-// the failed attempt so the retry cools down.
+// stale cache on disk still serves old prices instead of unknown, and the
+// failed attempt cools the retry down.
 func TestRatesFetchErrorFallsBackToStale(t *testing.T) {
-	path := pinFreshCache(t)
-	c, err := loadCatalogFrom(serveRates(t, http.StatusInternalServerError, "boom"))
+	pinStaleCatalog(t, testCatalog)
+	url, hits := serveRatesCounting(t, http.StatusInternalServerError, "boom")
+	c, err := loadCatalogFrom(url)
 	if err != nil {
 		t.Fatalf("stale fallback: %v", err)
 	}
 	if _, ok := c["m1"]; !ok {
 		t.Fatal("stale cache was not used")
 	}
-	if _, err := os.Stat(attemptPath(path)); err != nil {
-		t.Fatal("failed fetch did not record the attempt")
+	if _, err := loadCatalogFrom(url); err != nil {
+		t.Fatalf("second load: %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("fetches = %d, want 1: the retry must cool down", hits.Load())
 	}
 }
 
 // TestRatesFetchErrorWithoutCache pins the cold-outage path: an HTTP 500 with
 // no cache fails the load, so the caller reports unknown, never invented prices.
 func TestRatesFetchErrorWithoutCache(t *testing.T) {
-	t.Setenv(ratesEnv, "") // a pinned local catalog would bypass the fetch under test
-	setHomeEnv(t, t.TempDir())
-	path := filepath.Join(os.Getenv("HOME"), ".wtm", "rates.json")
-	if _, err := loadCatalogFrom(serveRates(t, http.StatusInternalServerError, "boom")); err == nil {
+	isolatedRatesCache(t)
+	url, hits := serveRatesCounting(t, http.StatusInternalServerError, "boom")
+	if _, err := loadCatalogFrom(url); err == nil {
 		t.Fatal("HTTP 500 with no cache must fail the load")
 	}
-	if _, err := os.Stat(attemptPath(path)); err != nil {
-		t.Fatal("failed fetch did not record the attempt")
+	if _, err := loadCatalogFrom(url); err == nil {
+		t.Fatal("second load with no cache must fail the load")
+	}
+	if hits.Load() != 1 {
+		t.Errorf("fetches = %d, want 1: the retry must cool down", hits.Load())
 	}
 }
 
@@ -402,55 +411,192 @@ func TestPriceLongContextPartialAboveFallsBack(t *testing.T) {
 	assertCost(t, c.price(e), 250_000*0.000001+10_000*0.000003, true)
 }
 
-// TestWriteRatesCacheParallelWritersKeepValidCatalog pins the parallel-status
-// contract: each writer gets a private temp, so the final catalog is exactly one
-// writer's complete payload and no temp file survives. A shared temp lets one
-// rename land while another writes, so the old code tears or errors here.
-func TestWriteRatesCacheParallelWritersKeepValidCatalog(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "rates.json")
-	const writers = 16
-	payloads := make([][]byte, writers)
-	for i := range payloads {
-		payloads[i] = bytes.Repeat([]byte{byte('a' + i)}, 4096)
+func assertFetchedCatalog(t *testing.T, c catalog, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("loadCatalogFrom: %v", err)
 	}
-	var wg sync.WaitGroup
-	errs := make([]error, writers)
-	start := make(chan struct{})
-	for i := range payloads {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			<-start
-			errs[i] = writeRatesCache(path, payloads[i])
-		}(i)
+	assertCost(t, c.price(usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 1000}}), 0.001, true)
+}
+
+func assertCatalogBytes(t *testing.T, r io.Reader, want string) {
+	t.Helper()
+	got, err := io.ReadAll(r)
+	if err != nil || string(got) != want {
+		t.Fatalf("catalog = %q, err = %v, want %q", got, err, want)
 	}
-	close(start)
-	wg.Wait()
-	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("writer %d: %v", i, err)
-		}
-	}
-	got, err := os.ReadFile(path)
+}
+
+func assertPersistedCatalog(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	matched := false
-	for _, p := range payloads {
-		if bytes.Equal(got, p) {
-			matched = true
-			break
-		}
-	}
-	if !matched {
-		t.Fatalf("catalog is torn: %d bytes match no writer's complete payload", len(got))
-	}
-	leftover, err := filepath.Glob(path + ".tmp*")
+	defer func() { _ = f.Close() }()
+	assertCatalogBytes(t, f, testCatalog)
+	assertNoRatesTempLeak(t, path)
+}
+
+// assertNoRatesTempLeak pins that writeFileAtomic left no sibling temp file.
+// Other entries (e.g. the .attempt marker) are legitimate, so this must not
+// require an otherwise empty directory.
+func assertNoRatesTempLeak(t *testing.T, path string) {
+	t.Helper()
+	leftover, err := filepath.Glob(path + ".tmp-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(leftover) != 0 {
-		t.Errorf("temp files left after concurrent writes: %v", leftover)
+		t.Fatalf("temp files left after cache write: %v", leftover)
 	}
+}
+
+// Delete-sharing readers retain old bytes while new openers see fetched bytes.
+// This rejects in-place writes and Windows rename without POSIX semantics.
+func TestRatesRefreshReplacesHeldSnapshot(t *testing.T) {
+	const stale = `{"m1":{"input_cost_per_token":0.000009}}`
+	path := pinStaleCatalog(t, stale)
+	held, err := openShared(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+	c, err := loadCatalogFrom(serveRates(t, http.StatusOK, testCatalog))
+	assertFetchedCatalog(t, c, err)
+	assertPersistedCatalog(t, path)
+	assertCatalogBytes(t, held, stale)
+}
+
+// TestRatesCacheWriteFailureStillPrices pins that a failed cache write is
+// non-fatal: the loader still prices the fetched catalog, and the blocked path
+// is left untouched with no temp file behind.
+func TestRatesCacheWriteFailureStillPrices(t *testing.T) {
+	path := isolatedRatesCache(t)
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c, err := loadCatalogFrom(serveRates(t, http.StatusOK, testCatalog))
+	assertFetchedCatalog(t, c, err)
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("cache directory replaced or missing: info=%v err=%v", info, err)
+	}
+	assertNoRatesTempLeak(t, path)
+}
+
+// releaseBarrier bounds how long the server holds a response, so a change in
+// the fetch count cannot stall the test. It must stay below the client timeout
+// (ratesFetchTimeout) so the client never wins the race.
+const releaseBarrier = 2 * time.Second
+
+// serveRatesBarrier holds every response until all expected loaders arrive, or
+// the bound expires, so the loaders overlap at the network.
+func serveRatesBarrier(t *testing.T, payloads []string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), releaseBarrier)
+	srv := httptest.NewServer(ratesBarrierHandler(ctx, payloads, new(atomic.Int32)))
+	t.Cleanup(func() { cancel(); srv.Close() })
+	return srv.URL
+}
+
+func ratesBarrierHandler(ctx context.Context, payloads []string, arrived *atomic.Int32) http.Handler {
+	release := make(chan struct{})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		i := int(arrived.Add(1) - 1)
+		if i >= len(payloads) {
+			http.Error(w, "unexpected catalog request", http.StatusInternalServerError)
+			return
+		}
+		if i == len(payloads)-1 {
+			close(release)
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = io.WriteString(w, payloads[i])
+	})
+}
+
+type catalogLoadResult struct {
+	catalog catalog
+	err     error
+}
+
+func concurrentCatalogLoads(url string, loaders int) []catalogLoadResult {
+	results := make(chan catalogLoadResult, loaders)
+	for i := 0; i < loaders; i++ {
+		go func() {
+			c, err := loadCatalogFrom(url)
+			results <- catalogLoadResult{c, err}
+		}()
+	}
+	all := make([]catalogLoadResult, loaders)
+	for i := range all {
+		all[i] = <-results
+	}
+	return all
+}
+
+// TestRatesParallelLoadsKeepValidCatalog pins the loader contract under
+// concurrency: every loader returns one complete catalog, and the cache holds
+// exactly one complete payload. Fewer fetches (cache sharing) pass. An extra
+// fetch is rejected by the barrier only while no cache exists; once a peer has
+// cached, a rejected loader still passes by serving that cache.
+func TestRatesParallelLoadsKeepValidCatalog(t *testing.T) {
+	path := isolatedRatesCache(t)
+	const loaders = 16
+	payloads := parallelRatePayloads(loaders)
+	for _, result := range concurrentCatalogLoads(serveRatesBarrier(t, payloads), loaders) {
+		assertOneServedCatalog(t, result, payloads)
+	}
+	assertOneServedCache(t, path, payloads)
+}
+
+func parallelRatePayloads(n int) []string {
+	payloads := make([]string, n)
+	for i := range payloads {
+		input := float64(i+1) / 1_000_000
+		output := float64(i+1) / 100_000
+		payloads[i] = fmt.Sprintf(`{"m%d":{"input_cost_per_token":%g,"output_cost_per_token":%g}}`, i, input, output)
+	}
+	return payloads
+}
+
+// assertOneServedCatalog requires the loader's catalog to price exactly one of
+// the served payloads at that payload's rate, proving it got one whole catalog.
+func assertOneServedCatalog(t *testing.T, result catalogLoadResult, payloads []string) {
+	t.Helper()
+	if result.err != nil {
+		t.Fatalf("loadCatalogFrom: %v", result.err)
+	}
+	for i := range payloads {
+		model := fmt.Sprintf("m%d", i)
+		priced := result.catalog.price(usageEvent{model: model, tier: "standard", tokens: promptTokens{input: 1000, output: 1000}})
+		if priced.total.list.known() {
+			assertCost(t, priced, float64(i+1)*0.011, true)
+			return
+		}
+	}
+	t.Fatal("loader returned no complete served catalog")
+}
+
+// assertOneServedCache requires the on-disk cache to equal exactly one served
+// payload, byte for byte, and to leave no temp file behind.
+func assertOneServedCache(t *testing.T, path string, payloads []string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, payload := range payloads {
+		if string(got) == payload {
+			assertNoRatesTempLeak(t, path)
+			return
+		}
+	}
+	t.Fatalf("cache is not one complete served payload: %q", got)
 }
