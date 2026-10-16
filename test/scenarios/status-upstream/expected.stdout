@@ -1,6 +1,6 @@
-PATH       BRANCH  UPSTREAM     LAST USED    AGE  ACTIVE  COST  STATUS  INTEGRATIONS
-/SBX/repo  main    -           2020-01-01  6y 2d       -     -  UNUSED  -
-/SBX/wt1   wt1     origin/wt1  2020-01-01  6y 2d       -     -  UNUSED  -
+PATH       BRANCH  UPSTREAM     LAST USED    AGE  ACTIVE  COST  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -           2020-01-01  6y 2d       -     -  UNUSED  -     -
+/SBX/wt1   wt1     origin/wt1  2020-01-01  6y 2d       -     -  UNUSED  -     -
 [
   {
     "path": "/SBX/repo",
@@ -17,7 +17,9 @@ PATH       BRANCH  UPSTREAM     LAST USED    AGE  ACTIVE  COST  STATUS  INTEGRAT
       "claude": "n/a",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   },
   {
     "path": "/SBX/wt1",
@@ -34,6 +36,8 @@ PATH       BRANCH  UPSTREAM     LAST USED    AGE  ACTIVE  COST  STATUS  INTEGRAT
       "claude": "n/a",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   }
 ]

@@ -1,6 +1,6 @@
-PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST  STATUS  INTEGRATIONS
-/SBX/repo  main    -         2020-01-01  6y 2d       -      -  ACTIVE  -
-/SBX/wt    wt      -         2020-01-01  6y 2d     45m  $4.00  ACTIVE  -
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -      -  ACTIVE  -     -
+/SBX/wt    wt      -         2020-01-01  6y 2d     45m  $4.00  ACTIVE  -     -
 
 current worktree  /SBX/wt
 age               6y 2d
@@ -25,7 +25,9 @@ deepseek-flash   45m  $4.00     -      -      -        -       -       -
       "claude": "n/a",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   },
   {
     "path": "/SBX/wt",
@@ -55,6 +57,8 @@ deepseek-flash   45m  $4.00     -      -      -        -       -       -
       "claude": "n/a",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   }
 ]

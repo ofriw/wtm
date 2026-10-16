@@ -1,6 +1,6 @@
-PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST  STATUS  INTEGRATIONS
-/SBX/repo  main    -         2020-01-01  6y 2d       -      -  ACTIVE  -
-/SBX/wt    wt      -         2020-01-01  6y 2d  1h 40m  $5.15  ACTIVE  -
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -      -  ACTIVE  -     -
+/SBX/wt    wt      -         2020-01-01  6y 2d  1h 40m  $5.15  ACTIVE  -     -
 
 current worktree  /SBX/repo
 age               6y 2d
@@ -23,7 +23,9 @@ no agent usage recorded
       "claude": "n/a",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   },
   {
     "path": "/SBX/wt",
@@ -65,6 +67,8 @@ no agent usage recorded
       "claude": "n/a",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   }
 ]

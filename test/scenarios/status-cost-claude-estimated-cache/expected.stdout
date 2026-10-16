@@ -1,6 +1,6 @@
-PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE    COST  STATUS  INTEGRATIONS
-/SBX/repo  main    -         2020-01-01  6y 2d       -       -  ACTIVE  -
-/SBX/wt    wt      -         2020-01-01  6y 2d      0s  ~$0.12  ACTIVE  -
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE    COST  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -       -  ACTIVE  -     -
+/SBX/wt    wt      -         2020-01-01  6y 2d      0s  ~$0.12  ACTIVE  -     -
 
 ~ estimated = a usage record omitted the cache-write lifetime (5m vs 1h), so wtm priced those tokens at the 5-minute rate; a 1-hour write costs more, so the value is a lower bound, not exact data
 
@@ -25,7 +25,9 @@ no agent usage recorded
       "claude": "n/a",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   },
   {
     "path": "/SBX/wt",
@@ -79,6 +81,8 @@ no agent usage recorded
       "claude": "n/a",
       "mcp": "n/a",
       "pi": "n/a"
-    }
+    },
+    "temp": false,
+    "expiresAt": null
   }
 ]

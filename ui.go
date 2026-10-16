@@ -76,6 +76,8 @@ func statusCellStyle(header, value string) lipgloss.Style {
 			return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Green)
 		}
 		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+	case "TEMP":
+		return tempCellStyle(value)
 	case "UPSTREAM":
 		return booleanStyle(value != "-")
 	case "COST", "LIST":
@@ -90,18 +92,33 @@ func statusCellStyle(header, value string) lipgloss.Style {
 	}
 	// Capability columns only appear in the opt-in --wide view.
 	if isCapabilityHeader(header) {
-		// WHY: the state word is the state, so it maps straight to the one
-		// semantic color scheme instead of through a value-string wrapper.
-		switch value {
-		case "yes":
-			return capStateStyle(capPresent)
-		case "partial":
-			return capStateStyle(capPartial)
-		default: // "-" and "n/a"
-			return capStateStyle(capAbsent)
-		}
+		return capabilityCellStyle(value)
 	}
 	return lipgloss.NewStyle()
+}
+
+// capabilityCellStyle maps a --wide capability cell. The state word is the
+// state, so it maps straight to the one semantic color scheme instead of
+// through a value-string wrapper.
+func capabilityCellStyle(value string) lipgloss.Style {
+	switch value {
+	case "yes":
+		return capStateStyle(capPresent)
+	case "partial":
+		return capStateStyle(capPartial)
+	default: // "-" and "n/a"
+		return capStateStyle(capAbsent)
+	}
+}
+
+func tempCellStyle(value string) lipgloss.Style {
+	if value == "-" {
+		return lipgloss.NewStyle().Faint(true)
+	}
+	if value == "expired" {
+		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Cyan)
 }
 
 // capStateStyle is the one semantic color scheme: present green, partial yellow,
@@ -486,7 +503,10 @@ func shrinkToHeaders(headers []string, widths []int, priority []string, unelidab
 
 // dropOverflowColumns is the last resort when even header widths do not fit:
 // drop whole columns (reclaiming their gutter) in the same priority order,
-// instead of rendering an unlabelled sliver.
+// instead of rendering an unlabelled sliver. Pinned columns (rank 0) are absent
+// from priority, so when the budget cannot hold even the pinned set they are
+// dropped tail-first: the grid must fit its budget, and the leading pinned
+// columns (the state) outlive the trailing ones (the temp countdown).
 func dropOverflowColumns(headers []string, widths []int, priority []string, budget, over int) {
 	for _, name := range priority {
 		if over <= 0 {
@@ -494,6 +514,13 @@ func dropOverflowColumns(headers []string, widths []int, priority []string, budg
 		}
 		i := slices.Index(headers, name)
 		if i < 0 || widths[i] == 0 {
+			continue
+		}
+		widths[i] = 0
+		over = lineWidth(widths) - budget
+	}
+	for i := len(widths) - 1; i >= 0 && over > 0; i-- {
+		if widths[i] == 0 {
 			continue
 		}
 		widths[i] = 0

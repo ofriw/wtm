@@ -64,11 +64,11 @@ var (
 	// wires a harness additionally lights that harness's own capability.
 	mcpCapability = capability{
 		id: "mcp", token: "mcp",
-		probe: func(in capInput) capState { return binary(anyMCPConfig(in.mcp)) },
+		probe: func(in capInput) capState { return presentIf(anyMCPConfig(in.mcp)) },
 	}
 )
 
-func binary(ok bool) capState {
+func presentIf(ok bool) capState {
 	if ok {
 		return capPresent
 	}

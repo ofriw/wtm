@@ -1,0 +1,6 @@
+worktree: /SBX/repo-tmp-wt-temp
+branch:   tmp/wt-temp
+base:     refs/heads/main (local)
+source:   /SBX/repo
+indexed:  false
+temp:     true (expires in 1h)

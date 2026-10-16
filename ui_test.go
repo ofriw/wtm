@@ -334,8 +334,8 @@ func TestGroupedCellColors(t *testing.T) {
 func TestStyledCellsStripToPlain(t *testing.T) {
 	headers := statusHeaders()
 	rows := [][]string{
-		statusRow(map[string]string{"PATH": "/SBX/repo", "BRANCH": "main", "UPSTREAM": "origin/main", "LAST USED": "2020-01-01", "AGE": "12d", "ACTIVE": "8h 20m", "COST": "$41.20", "STATUS": "ACTIVE", "INTEGRATIONS": "ch mc"}),
-		statusRow(map[string]string{"PATH": "/SBX/wt", "BRANCH": "(detached)", "UPSTREAM": "-", "LAST USED": "never", "AGE": "-", "ACTIVE": "-", "COST": "-", "STATUS": "UNUSED", "INTEGRATIONS": "-"}),
+		statusRow(map[string]string{"PATH": "/SBX/repo", "BRANCH": "main", "UPSTREAM": "origin/main", "LAST USED": "2020-01-01", "AGE": "12d", "ACTIVE": "8h 20m", "COST": "$41.20", "STATUS": "ACTIVE", "TEMP": "-", "INTEGRATIONS": "ch mc"}),
+		statusRow(map[string]string{"PATH": "/SBX/wt", "BRANCH": "(detached)", "UPSTREAM": "-", "LAST USED": "never", "AGE": "-", "ACTIVE": "-", "COST": "-", "STATUS": "UNUSED", "TEMP": "expired", "INTEGRATIONS": "-"}),
 	}
 	_, styled := renderCells(headers, rows, statusCell)
 	for r := range rows {
@@ -361,8 +361,8 @@ func TestStyledCellsStripToPlain(t *testing.T) {
 func TestStyledTableStripsToPlain(t *testing.T) {
 	headers := statusHeaders()
 	rows := [][]string{
-		statusRow(map[string]string{"PATH": "/SBX/repo", "BRANCH": "main", "UPSTREAM": "origin/main", "LAST USED": "2020-01-01", "AGE": "12d", "ACTIVE": "8h 20m", "COST": "$41.20", "STATUS": "ACTIVE", "INTEGRATIONS": "ch mc"}),
-		statusRow(map[string]string{"PATH": "/SBX/wt", "BRANCH": "(detached)", "UPSTREAM": "-", "LAST USED": "never", "AGE": "-", "ACTIVE": "-", "COST": "-", "STATUS": "UNUSED", "INTEGRATIONS": "-"}),
+		statusRow(map[string]string{"PATH": "/SBX/repo", "BRANCH": "main", "UPSTREAM": "origin/main", "LAST USED": "2020-01-01", "AGE": "12d", "ACTIVE": "8h 20m", "COST": "$41.20", "STATUS": "ACTIVE", "TEMP": "-", "INTEGRATIONS": "ch mc"}),
+		statusRow(map[string]string{"PATH": "/SBX/wt", "BRANCH": "(detached)", "UPSTREAM": "-", "LAST USED": "never", "AGE": "-", "ACTIVE": "-", "COST": "-", "STATUS": "UNUSED", "TEMP": "expired", "INTEGRATIONS": "-"}),
 	}
 	widths := naturalWidths(headers, rows)
 	aligns := columnAligns(headers, columnRightAligns(statusColumns))
