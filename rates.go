@@ -412,7 +412,7 @@ func fetchCoolingDown(path string) bool {
 // markFetchAttempt records a failed fetch. A write failure must not fail the
 // command, so the caller ignores the error.
 func markFetchAttempt(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	return os.WriteFile(attemptPath(path), nil, 0o644)
