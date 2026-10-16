@@ -450,13 +450,15 @@ func ratesCachePath() (string, error) {
 	return filepath.Join(home, ".wtm", "rates.json"), nil
 }
 
+// parseCatalogFile reads through readFileShared: on Windows a plain os.Open
+// handle blocks a concurrent writeFileAtomic replace, so the refresh would be
+// silently dropped (open_windows.go, rename_windows.go).
 func parseCatalogFile(path string) (catalog, error) {
-	f, err := os.Open(path)
+	data, err := readFileShared(path)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-	return parseCatalog(f)
+	return parseCatalog(bytes.NewReader(data))
 }
 
 func cacheFresh(path string) (bool, error) {
