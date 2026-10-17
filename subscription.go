@@ -45,12 +45,17 @@ type subscriptions struct {
 	// runs once per worktree per run. The map is shared by every forWorktree
 	// copy; a nil map skips the cache (zero-value proof in tests).
 	wtVerdicts map[string]bool
+	// parentScope holds the kill-switch warning's once-state. It is shared by
+	// every forWorktree copy and initialized per run, so two runs warn twice.
+	parentScope *parentScopeState
 }
+
+type parentScopeState struct{ warned bool }
 
 // loadSubscriptions reads both credential sources once per status run. It never
 // fails: an absent or malformed file yields an empty proof.
 func loadSubscriptions() subscriptions {
-	s := subscriptions{piOAuth: map[string]bool{}, wtVerdicts: map[string]bool{}}
+	s := subscriptions{piOAuth: map[string]bool{}, wtVerdicts: map[string]bool{}, parentScope: &parentScopeState{}}
 	if dir := piAgent.configDir(); dir != "" {
 		s.piOAuth = readPiOAuth(filepath.Join(dir, "auth.json"))
 	}
@@ -382,9 +387,20 @@ func (s subscriptions) piProven(provider string) bool {
 	return s.piOAuth[provider]
 }
 
-// parentScopeWarned keeps the kill-switch disclosure to one line per run:
+// warnParentScopeOnce keeps the kill-switch disclosure to one line per run.
 // forWorktree runs once per worktree, but the operator needs the warning once.
-var parentScopeWarned bool
+// A nil state is a zero-value proof; warn rather than hide the risk.
+func (s subscriptions) warnParentScopeOnce() {
+	if s.parentScope == nil {
+		warnf("WTM_CLAUDE_PARENT_SCOPE=0 disables ancestor settings check")
+		return
+	}
+	if s.parentScope.warned {
+		return
+	}
+	s.parentScope.warned = true
+	warnf("WTM_CLAUDE_PARENT_SCOPE=0 disables ancestor settings check")
+}
 
 // forWorktree drops a proof that a worktree setting invalidates: a per-repo
 // metered override bills outside the subscription even when the process env and
@@ -401,10 +417,7 @@ func (s subscriptions) forWorktree(root string) subscriptions {
 		// Fail-open and uncached: the kill-switch proves the harness never
 		// merges parent settings, so the ancestor walk is skipped and no
 		// verdict is cached (a cached verdict would go stale across env changes).
-		if !parentScopeWarned {
-			parentScopeWarned = true
-			warnf("WTM_CLAUDE_PARENT_SCOPE=0 disables ancestor settings check")
-		}
+		s.warnParentScopeOnce()
 		s.claude = !s.managed && !claudeProjectMetered(root)
 		return s
 	}

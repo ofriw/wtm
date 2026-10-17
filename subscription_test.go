@@ -1018,11 +1018,9 @@ func parentScopeSeed(t *testing.T) (string, sessionIndex) {
 // TestParentScopeKillSwitchWarnsOnceAndSkipsCache pins 3A: disabling the
 // ancestor walk warns once per run, stays fail-open, and never caches the
 // verdict (a cached verdict would go stale across env changes).
-func TestParentScopeKillSwitchWarnsOnceAndSkipsCache(t *testing.T) {
+func TestParentScopeKillSwitchWarnsOncePerRun(t *testing.T) {
 	dir, _ := parentScopeSeed(t)
 	t.Setenv("WTM_CLAUDE_PARENT_SCOPE", "0")
-	parentScopeWarned = false
-	defer func() { parentScopeWarned = false }()
 	subs := loadSubscriptions()
 	var first, second subscriptions
 	errOut := captureStderr(t, func() {
@@ -1033,10 +1031,30 @@ func TestParentScopeKillSwitchWarnsOnceAndSkipsCache(t *testing.T) {
 		t.Fatalf("claude = %v/%v, want fail-open true/true", first.claude, second.claude)
 	}
 	if got := strings.Count(errOut, "WTM_CLAUDE_PARENT_SCOPE=0"); got != 1 {
-		t.Fatalf("warnings = %d, want exactly 1:\n%s", got, errOut)
+		t.Fatalf("warnings = %d, want exactly 1 per run:\n%s", got, errOut)
 	}
 	if _, ok := subs.wtVerdicts[dir]; ok {
 		t.Error("the kill-switch verdict must skip the cache")
+	}
+
+	// A second run has its own once-state, so it warns again.
+	secondRun := loadSubscriptions()
+	errOut = captureStderr(t, func() { _ = secondRun.forWorktree(dir) })
+	if got := strings.Count(errOut, "WTM_CLAUDE_PARENT_SCOPE=0"); got != 1 {
+		t.Fatalf("second run warnings = %d, want exactly 1:\n%s", got, errOut)
+	}
+}
+
+// TestParentScopeNilStateWarnsEveryCall pins the zero-value proof: without the
+// per-run state, the kill-switch warning must not hide.
+func TestParentScopeNilStateWarnsEveryCall(t *testing.T) {
+	var subs subscriptions
+	errOut := captureStderr(t, func() {
+		subs.warnParentScopeOnce()
+		subs.warnParentScopeOnce()
+	})
+	if got := strings.Count(errOut, "WTM_CLAUDE_PARENT_SCOPE=0"); got != 2 {
+		t.Fatalf("warnings = %d, want one per call:\n%s", got, errOut)
 	}
 }
 
@@ -1045,8 +1063,6 @@ func TestParentScopeKillSwitchWarnsOnceAndSkipsCache(t *testing.T) {
 // disables the walk.
 func TestParentScopeCacheSkippedWhenDisabled(t *testing.T) {
 	dir, _ := parentScopeSeed(t)
-	parentScopeWarned = true
-	defer func() { parentScopeWarned = false }()
 	subs := loadSubscriptions()
 	if got := subs.forWorktree(dir); got.claude {
 		t.Fatal("enabled walk must void the proof under a metered parent")
