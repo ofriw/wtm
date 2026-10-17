@@ -430,19 +430,21 @@ func unionDuration(spans []span) time.Duration {
 // modelUsage is one model's totals inside a harness; spans are per-session
 // model spans, merged for the active time.
 type modelUsage struct {
-	cost   costPair
-	tiers  tokenTiers
-	tokens promptTokens
-	spans  []span
+	cost    costPair
+	tiers   tokenTiers
+	tokens  promptTokens
+	spans   []span
+	partial bool // lost records may have carried this model's tokens or time
 }
 
 func (m *modelUsage) active() time.Duration { return unionDuration(m.spans) }
 
 // harnessUsage is one harness's totals for a worktree.
 type harnessUsage struct {
-	cost   costPair
-	spans  []span // session spans (all events)
-	models map[string]*modelUsage
+	cost    costPair
+	spans   []span // session spans (all events)
+	models  map[string]*modelUsage
+	partial bool // an unreadable session or dropped record may belong here
 }
 
 func (h *harnessUsage) active() time.Duration { return unionDuration(h.spans) }
@@ -651,6 +653,7 @@ func (m *modelUsage) absorb(o *modelUsage) {
 	m.cost.add(o.cost)
 	m.tiers.add(o.tiers)
 	m.tokens = m.tokens.plus(o.tokens)
+	m.partial = m.partial || o.partial
 }
 
 func minTime(a, b time.Time) time.Time {

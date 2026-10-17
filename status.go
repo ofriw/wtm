@@ -672,14 +672,39 @@ func cellAge(w worktree, c columnContext) string {
 	return humanDuration(c.now.Sub(w.Created))
 }
 
+// partialValue prefixes the shared "not exact" marker. A partial total must not
+// render a lost-data value as exact; zero-with-loss stays unknown below.
+func partialValue(s string, partial bool) string {
+	if partial {
+		return "~" + s
+	}
+	return s
+}
+
+// activeCellValue owns the ACTIVE cell grammar and reports whether the value
+// carries the partial marker. A partial total reads "unknown" when it has no
+// readable events, or no readable span, and "~<duration>" when it has some.
+// The legend reads the flag, so it never explains a marker that cannot render.
+func activeCellValue(w worktree) (string, bool) {
+	if w.Usage == nil {
+		return "-", false
+	}
+	if w.Usage.partial {
+		active := w.Usage.active()
+		if !w.Usage.hasEvents() || active == 0 {
+			return "unknown", false
+		}
+		return partialValue(humanDuration(active), true), true
+	}
+	return humanDuration(w.Usage.active()), false
+}
+
 // cellActive is the union of the worktree's session spans; "-" only when the
 // worktree has no events. A worktree with point events has a zero span, which
 // reads as "0s": measured-but-empty usage must not hide behind "-".
 func cellActive(w worktree, _ columnContext) string {
-	if w.Usage == nil {
-		return "-"
-	}
-	return humanDuration(w.Usage.active())
+	s, _ := activeCellValue(w)
+	return s
 }
 
 // cellCost is the billed amount: what the credentials actually charge. "-" when
@@ -962,6 +987,7 @@ type jsonHarnessUsage struct {
 	ListCost      *optCost                  `json:"listCost,omitempty"`
 	ListCostEst   bool                      `json:"listCostEstimated,omitempty"`
 	ActiveSeconds int64                     `json:"activeSeconds"`
+	Partial       bool                      `json:"partial,omitempty"`
 	Models        map[string]jsonModelUsage `json:"models"`
 }
 
@@ -971,6 +997,7 @@ type jsonModelUsage struct {
 	ListCost        *optCost                 `json:"listCost,omitempty"`
 	ListCostEst     bool                     `json:"listCostEstimated,omitempty"`
 	ActiveSeconds   int64                    `json:"activeSeconds"`
+	Partial         bool                     `json:"partial,omitempty"`
 	Tiers           map[string]jsonTierUsage `json:"tiers,omitempty"`
 	CacheMissTokens *int64                   `json:"cacheMissTokens,omitempty"`
 	CacheHitRate    *float64                 `json:"cacheHitRate,omitempty"`
@@ -996,11 +1023,16 @@ type jsonInputOutputRatio struct {
 	Total    float64 `json:"total"`
 	Cached   float64 `json:"cached"`
 	Uncached float64 `json:"uncached"`
+	// Partial marks shares computed from a total that lost records. The values
+	// remain the readable subset; the flag says they may change.
+	Partial bool `json:"partial,omitempty"`
 }
 
-// optCost is the optional list price beside a machine cost. A nil pointer omits
-// the key entirely (no proven subscription); a pointer is always present, and
-// its nil value renders null (a subscription is proven but the list is unknown).
+// optCost is the optional list price beside a machine cost. The key is present
+// only when a proven subscription makes the billed and list values differ (see
+// listCostJSON); its nil pointer is therefore not a "no subscription" signal.
+// When present, a nil v renders null: the subscription is proven but the list
+// is unknown.
 type optCost struct{ v *float64 }
 
 func (o optCost) MarshalJSON() ([]byte, error) {
@@ -1010,9 +1042,10 @@ func (o optCost) MarshalJSON() ([]byte, error) {
 	return json.Marshal(*o.v)
 }
 
-// listCostJSON adds the list price only when the pair shows one, so unproven
-// output and a proven equal price stay exactly as before. A proven total with
-// neither side priced omits the key: null beside "unknown" adds no signal.
+// listCostJSON emits the list price only when showsList() is true and at least
+// one side is priced. Unproven output, a proven equal price, and a proven
+// both-unknown partial all omit the key. When present, a null value means the
+// list is unknown.
 func listCostJSON(p costPair) *optCost {
 	if !p.showsList() || p.bothUnpriced() {
 		return nil
@@ -1076,15 +1109,20 @@ func ageSeconds(w worktree, now time.Time) *int64 {
 	return &s
 }
 
-// applyUsageJSON adds the event-derived fields; an eventless worktree omits them.
+// applyUsageJSON adds the event-derived fields; an eventless worktree omits
+// them. A total loss keeps partial:true but no measured values: activeSeconds
+// and usage would otherwise read as a false measured zero.
 func applyUsageJSON(j *jsonWorktree, u *worktreeUsage) {
 	if u == nil {
+		return
+	}
+	j.Partial = u.partial
+	if !u.hasEvents() {
 		return
 	}
 	a := seconds(u.active())
 	j.ActiveSeconds = &a
 	j.Usage = usageJSON(u)
-	j.Partial = u.partial
 }
 
 // cost is the worktree's price pair; empty when it has no events.
@@ -1100,7 +1138,7 @@ func usageJSON(u *worktreeUsage) map[string]jsonHarnessUsage {
 	for name, h := range u.harnesses {
 		models := make(map[string]jsonModelUsage, len(h.models))
 		for model, m := range h.models {
-			mu := jsonModelUsage{Cost: m.cost.billed.jsonValue(), CostEstimated: m.cost.billed.isEstimated(), ActiveSeconds: seconds(m.active()), Tiers: tiersJSON(m.tokens, m.tiers)}
+			mu := jsonModelUsage{Cost: m.cost.billed.jsonValue(), CostEstimated: m.cost.billed.isEstimated(), ActiveSeconds: seconds(m.active()), Partial: m.partial, Tiers: tiersJSON(m.tokens, m.tiers)}
 			mu.CacheMissTokens, mu.CacheHitRate = cacheJSON(m.tokens)
 			if lc := listCostJSON(m.cost); lc != nil {
 				mu.ListCost = lc
@@ -1108,7 +1146,7 @@ func usageJSON(u *worktreeUsage) map[string]jsonHarnessUsage {
 			}
 			models[model] = mu
 		}
-		hu := jsonHarnessUsage{Cost: h.cost.billed.jsonValue(), CostEstimated: h.cost.billed.isEstimated(), ActiveSeconds: seconds(h.active()), Models: models}
+		hu := jsonHarnessUsage{Cost: h.cost.billed.jsonValue(), CostEstimated: h.cost.billed.isEstimated(), ActiveSeconds: seconds(h.active()), Partial: h.partial, Models: models}
 		if lc := listCostJSON(h.cost); lc != nil {
 			hu.ListCost = lc
 			hu.ListCostEst = h.cost.list.isEstimated()
@@ -1119,8 +1157,8 @@ func usageJSON(u *worktreeUsage) map[string]jsonHarnessUsage {
 }
 
 // tiersJSON projects a model's token tiers into the machine contract. It returns
-// nil when no tier recorded tokens, so a cost-only record (a spawn child, an
-// older Pi session) omits the breakdown instead of reporting four empty tiers.
+// nil when no tier recorded tokens, so a cost-only legacy record (an older Pi
+// session or spawn result) omits the breakdown instead of four empty tiers.
 func tiersJSON(tokens promptTokens, tiers tokenTiers) map[string]jsonTierUsage {
 	if tokens.total() == 0 {
 		return nil
@@ -1178,7 +1216,7 @@ func inputOutputRatioJSON(u *worktreeUsage) *jsonInputOutputRatio {
 	if !t.ratiosDefined() {
 		return nil
 	}
-	var r jsonInputOutputRatio
+	r := jsonInputOutputRatio{Partial: u.partial}
 	for _, d := range detailRatioMeta {
 		v, _ := t.outputRatio(d.num(t))
 		r.set(d.jsonKey, roundRate(v))
@@ -1194,6 +1232,7 @@ func inputOutputRatioJSON(u *worktreeUsage) *jsonInputOutputRatio {
 type costLegend struct {
 	tableReasons estimateReasons
 	list         bool
+	partial      bool
 }
 
 // costLegendNeeded reports what the table-level cost disclosure must explain.
@@ -1217,6 +1256,18 @@ func (l *costLegend) table(cols []worktreeColumn, wts []worktree, ctx columnCont
 		}
 	}
 	l.list = columnKept(cols, rows, colList.header, budget)
+	l.partial = columnKept(cols, rows, colActive.header, budget) && anyPartialActive(wts)
+}
+
+// anyPartialActive reports whether any table row renders a partial "~" ACTIVE
+// value, so the legend never explains a marker that cannot render.
+func anyPartialActive(wts []worktree) bool {
+	for _, w := range wts {
+		if _, marked := activeCellValue(w); marked {
+			return true
+		}
+	}
+	return false
 }
 
 // detailFit is the breakdown block's width fit and its legend needs. One fit
@@ -1227,6 +1278,7 @@ type detailFit struct {
 	rows    [][]string
 	reasons estimateReasons
 	list    bool
+	partial bool
 	dropped bool
 }
 
@@ -1250,7 +1302,35 @@ func fitDetailBlock(cur worktree, now time.Time, budget int) detailFit {
 		f.reasons = f.reasons.merge(modelsEstimated(cur.Usage))
 	}
 	f.list = columnKept(f.cols, f.rows, colList.header, budget)
+	f.partial = detailPartial(cur, f.cols, f.rows, now, budget)
 	return f
+}
+
+// detailPartial reports whether the fitted detail block renders a partial
+// marker: the summary ACTIVE value, a surviving ratio row, a model time, or a
+// surviving token cell. A total loss renders only "unknown", so it needs no
+// dangling "~" legend.
+func detailPartial(cur worktree, cols []worktreeColumn, rows [][]string, now time.Time, budget int) bool {
+	if cur.Usage == nil || !cur.Usage.partial {
+		return false
+	}
+	if _, marked := activeCellValue(cur); marked {
+		return true
+	}
+	if cur.Usage.tokens().ratiosDefined() && !summaryRatioHidden(detailSummaryRows(cur, now), budget) {
+		return true
+	}
+	timeKept := columnKept(cols, rows, colTime.header, budget)
+	tokensKept := tokenGroupKept(cols)
+	for _, m := range cur.Usage.mergedModels() {
+		if !m.partial {
+			continue
+		}
+		if (timeKept && m.active() > 0) || (tokensKept && m.tokens.total() > 0) {
+			return true
+		}
+	}
+	return false
 }
 
 // costColumnKept reports whether the COST column survives the width fit, so a
@@ -1306,8 +1386,13 @@ type legendGroup struct {
 var listLegend = legendEntry{"list", "pay-as-you-go price of the same tokens"}
 
 // estimateLabel is the shared label of the "~" caveat clauses. Each reason text
-// stays its own SSOT constant in rates.go / usage.go.
-const estimateLabel = "~ estimated"
+// stays its own SSOT constant in rates.go / usage.go. partialLabel shares the
+// same "not exact" glyph but names loss, not an assumption.
+const (
+	estimateLabel = "~ estimated"
+	partialLabel  = "~ partial"
+	partialLegend = "unreadable session records may change this value"
+)
 
 // legendIndent nests a titled group's clauses under its heading.
 const legendIndent = "  "
@@ -1372,12 +1457,15 @@ func hangWrapped(prefix, text string, width int) []string {
 // table scanner never meets an unexplained second price.
 func printCostLegend(l costLegend, colorMode string, budget int) {
 	list := l.list
-	if !l.tableReasons.any() && !list {
+	if !l.tableReasons.any() && !list && !l.partial {
 		return
 	}
 	var group legendGroup
 	if list {
 		group.items = append(group.items, listLegend)
+	}
+	if l.partial {
+		group.items = append(group.items, legendEntry{partialLabel, partialLegend})
 	}
 	if l.tableReasons.cache {
 		group.items = append(group.items, legendEntry{estimateLabel, estimateCacheWriteLifetime})
@@ -1447,7 +1535,7 @@ func printStatusDetail(wts []worktree, current string, now time.Time, colorMode 
 		warnf("terminal too narrow; hid %s; widen the terminal or use --json", strings.Join(tokenColumnNames(), ", "))
 	}
 	printTable(columnHeaders(f.cols), f.rows, colorMode, statusCell, columnRightAligns(f.cols), budget)
-	printDetailLegend(f.reasons, f.list, tokenGroupKept(f.cols) && detailHasTokens(cur.Usage), colorMode, budget)
+	printDetailLegend(f.reasons, f.list, f.partial, tokenGroupKept(f.cols) && detailHasTokens(cur.Usage), colorMode, budget)
 }
 
 // tokenHeaderSet is the set of detail headers owned by the token group.
@@ -1526,7 +1614,7 @@ func detailSummaryRows(cur worktree, now time.Time) [][]string {
 		{detailCostLabel, detailCost(cur)},
 	}
 	if cur.Usage != nil {
-		rows = append(rows, tokenRatioRows(cur.Usage.tokens())...)
+		rows = append(rows, tokenRatioRows(cur.Usage.tokens(), cur.Usage.partial)...)
 	}
 	return rows
 }
@@ -1546,17 +1634,26 @@ var detailRatioMeta = []struct {
 	{"uncached in:out", "uncached", promptTokens.miss},
 }
 
-// tokenRatioRows renders the summary's ratio group, or nothing when the
-// worktree recorded no output: a ratio without a denominator is undefined, and
-// three such rows would read as noise, not data.
-func tokenRatioRows(t promptTokens) [][]string {
+// tokenRatioRows renders the summary's ratio group. A whole total with no output
+// shows nothing: a ratio without a denominator is undefined. A partial total
+// shows unknown rows instead, because lost records may hold the output.
+func tokenRatioRows(t promptTokens, partial bool) [][]string {
 	if !t.ratiosDefined() {
-		return nil
+		if !partial {
+			return nil
+		}
+		// A lost record may carry the missing output, so the ratio is unknown
+		// rather than absent.
+		rows := make([][]string, 0, len(detailRatioMeta))
+		for _, d := range detailRatioMeta {
+			rows = append(rows, []string{d.label, "unknown"})
+		}
+		return rows
 	}
 	rows := make([][]string, 0, len(detailRatioMeta))
 	for _, d := range detailRatioMeta {
 		v, _ := t.outputRatio(d.num(t))
-		rows = append(rows, []string{d.label, formatRatio(v)})
+		rows = append(rows, []string{d.label, partialValue(formatRatio(v), partial)})
 	}
 	return rows
 }
@@ -1593,6 +1690,17 @@ func dropElidedSummaryRows(rows [][]string, budget int) [][]string {
 	return slices.DeleteFunc(slices.Clone(rows), func(row []string) bool {
 		return slices.Contains(hidden, row[0])
 	})
+}
+
+// summaryRatioHidden reports whether the ratio group is hidden by the summary's
+// width fit, so the detail legend never explains a marker that cannot render.
+func summaryRatioHidden(rows [][]string, budget int) bool {
+	for _, group := range summaryHiddenGroups(rows, budget) {
+		if slices.Contains(group, detailRatioMeta[0].label) {
+			return true
+		}
+	}
+	return false
 }
 
 // summaryHiddenGroups is the shared, silent decision for rendering and legends.
@@ -1746,14 +1854,17 @@ func tokenGroupKept(cols []worktreeColumn) bool {
 // estimate reasons its cells carry, what the LIST column holds, then the
 // token-group arithmetic, in column order. Columns and their explanation
 // therefore stay in one block, and a breakdown that keeps none prints nothing.
-func printDetailLegend(reasons estimateReasons, list, tokens bool, colorMode string, budget int) {
-	if !reasons.any() && !list && !tokens {
+func printDetailLegend(reasons estimateReasons, list, partial, tokens bool, colorMode string, budget int) {
+	if !reasons.any() && !list && !partial && !tokens {
 		return
 	}
 	var groups []legendGroup
 	var head legendGroup
 	if list {
 		head.items = append(head.items, listLegend)
+	}
+	if partial {
+		head.items = append(head.items, legendEntry{partialLabel, partialLegend})
 	}
 	if reasons.cache {
 		head.items = append(head.items, legendEntry{estimateLabel, estimateCacheWriteLifetime})
@@ -1809,7 +1920,16 @@ func detailRows(u *worktreeUsage, showList bool) [][]string {
 	var rows [][]string
 	for _, name := range u.sortedModelNames(models) {
 		m := models[name]
-		row := []string{name, humanDuration(m.active()), m.cost.billed.cell()}
+		active := m.active()
+		timeCell := humanDuration(active)
+		if m.partial {
+			if active == 0 {
+				timeCell = "unknown"
+			} else {
+				timeCell = partialValue(timeCell, true)
+			}
+		}
+		row := []string{name, timeCell, m.cost.billed.cell()}
 		if showList {
 			row = append(row, listCell(m.cost))
 		}
@@ -1821,33 +1941,44 @@ func detailRows(u *worktreeUsage, showList bool) [][]string {
 	return rows
 }
 
+// partialTokenCell renders one token count from a total that may have lost
+// records. present gates presence; value is shown. A missing value with loss is
+// unknown, a readable partial value carries the "~" marker, and a whole total
+// keeps the existing "-"/count grammar.
+func partialTokenCell(value int64, present, partial bool) string {
+	if partial {
+		if !present {
+			return "unknown"
+		}
+		return partialValue(formatTokens(value), true)
+	}
+	if !present {
+		return "-"
+	}
+	return formatTokens(value)
+}
+
 // tokenCount renders one tier's count: the compact form when the tier recorded
 // tokens, "-" when it recorded none.
 func tokenCount(m *modelUsage, t tier) string {
-	if n := m.tokens.tier(t); n > 0 {
-		return formatTokens(n)
-	}
-	return "-"
+	n := m.tokens.tier(t)
+	return partialTokenCell(n, n > 0, m.partial)
 }
 
 // totalInputCell renders the model's total prompt tokens (uncached input, cache
 // reads and cache writes): the base every cache share is taken from. "-" when the
 // model recorded no prompt tokens.
 func totalInputCell(m *modelUsage) string {
-	if m.tokens.context() == 0 {
-		return "-"
-	}
-	return formatTokens(m.tokens.context())
+	context := m.tokens.context()
+	return partialTokenCell(context, context != 0, m.partial)
 }
 
 // missCount renders the miss subtotal: "-" when the model recorded no prompt
 // tokens, else the compact count. A zero beside a nonzero hit is an honest sign
 // that the build left the recorded window (see hitRateCell).
 func missCount(m *modelUsage) string {
-	if m.tokens.context() == 0 {
-		return "-"
-	}
-	return formatTokens(m.tokens.miss())
+	context := m.tokens.context()
+	return partialTokenCell(m.tokens.miss(), context != 0, m.partial)
 }
 
 // hitRateCell renders one model's cache-hit share: the percent, "unknown" when
@@ -1856,7 +1987,10 @@ func missCount(m *modelUsage) string {
 func hitRateCell(m *modelUsage) string {
 	rate, ok := m.tokens.hitRate()
 	if ok {
-		return formatPercent(rate)
+		return partialValue(formatPercent(rate), m.partial)
+	}
+	if m.partial {
+		return "unknown"
 	}
 	if m.tokens.context() == 0 {
 		return "-"

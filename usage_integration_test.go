@@ -106,6 +106,25 @@ func TestBuildUsageCrossHarnessPartialIsUnknown(t *testing.T) {
 	if got := h.cost.cell(); got != "$2.00" {
 		t.Errorf("claude cost = %q, want $2.00", got)
 	}
+	if h.partial {
+		t.Error("a readable harness with no lost records must stay exact")
+	}
+	for name, m := range h.models {
+		if m.partial {
+			t.Errorf("model %q must stay exact when its harness lost nothing", name)
+		}
+	}
+	var j jsonWorktree
+	applyUsageJSON(&j, &u)
+	jh := j.Usage[claudeAgent.name]
+	if jh.Partial {
+		t.Error("readable harness JSON must omit the partial flag")
+	}
+	for name, m := range jh.Models {
+		if m.Partial {
+			t.Errorf("readable model JSON %q must omit the partial flag", name)
+		}
+	}
 }
 
 // piUsageLine builds one self-priced Pi record with the given cost total, so a
@@ -323,6 +342,56 @@ func TestBuildUsageBadTimestampWarnsAndPartials(t *testing.T) {
 	}
 	if got := cellCost(ws.wts[0], columnContext{}); got != "unknown" {
 		t.Errorf("cost = %q, want unknown", got)
+	}
+}
+
+// TestBuildUsageOversizedRecordWarnsAndPartials pins the disclosure end to end:
+// an oversized billed record is counted, the total is partial, and the warning
+// names the loss while a later good record still folds.
+func TestBuildUsageOversizedRecordWarnsAndPartials(t *testing.T) {
+	dir := t.TempDir()
+	session := filepath.Join(dir, "s.jsonl")
+	big := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":9}},"pad":"` + strings.Repeat("a", maxSessionHeader) + `"}}`
+	writeFile(t, session, big+"\n"+piUsageLine(1.5)+"\n", 0o644)
+	ws := workspace{
+		wts: []worktree{{Path: dir}},
+		idx: sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}},
+	}
+	errOut := captureStderr(t, func() { ws.loadUsage() })
+	if !strings.Contains(errOut, "oversized") {
+		t.Fatalf("warning must name the oversized loss:\n%s", errOut)
+	}
+	u := ws.wts[0].Usage
+	if u == nil || !u.partial {
+		t.Fatalf("oversized record must taint the total: %+v", u)
+	}
+	if h := u.harnesses[piAgent.name]; h == nil || len(h.models) == 0 {
+		t.Fatalf("the good record after the loss must still fold: %+v", u)
+	}
+}
+
+// TestBuildUsageOversizedUnbilledRecordStillDiscloses pins the conservative
+// policy: after the discard the parser cannot know whether the record carried
+// billed data, so an oversized user record still marks the total partial.
+func TestBuildUsageOversizedUnbilledRecordStillDiscloses(t *testing.T) {
+	dir := t.TempDir()
+	session := filepath.Join(dir, "s.jsonl")
+	big := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"` + strings.Repeat("a", maxSessionHeader) + `"}}`
+	writeFile(t, session, big+"\n"+piUsageLine(1.5)+"\n", 0o644)
+	ws := workspace{
+		wts: []worktree{{Path: dir}},
+		idx: sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}},
+	}
+	errOut := captureStderr(t, func() { ws.loadUsage() })
+	if !strings.Contains(errOut, "oversized") {
+		t.Fatalf("warning must name the oversized loss:\n%s", errOut)
+	}
+	u := ws.wts[0].Usage
+	if u == nil || !u.partial {
+		t.Fatalf("oversized record must taint the total: %+v", u)
+	}
+	if h := u.harnesses[piAgent.name]; h == nil || len(h.models) == 0 {
+		t.Fatalf("the good record after the loss must still fold: %+v", u)
 	}
 }
 

@@ -167,6 +167,27 @@ func TestClaudeUsageSkipsUntimestamped(t *testing.T) {
 	}
 }
 
+// TestClaudeUsageOversizedRecordIsDropped pins the bounded-memory loss
+// contract: an oversized billed record is counted once, and the next good
+// record still prices.
+func TestClaudeUsageOversizedRecordIsDropped(t *testing.T) {
+	big := `{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","requestId":"big","message":{"id":"big","model":"m","usage":{"input_tokens":999999},"pad":"` + strings.Repeat("a", maxSessionHeader) + `"}}`
+	good := `{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"good","message":{"id":"good","model":"m","usage":{"input_tokens":100,"output_tokens":10}}}`
+	events, dropped, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(big + "\n" + good + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1", dropped)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want only the good record: %+v", len(events), events)
+	}
+	if events[0].tokens.input != 100 || events[0].tokens.output != 10 {
+		t.Errorf("good record tokens = %+v, want input=100 output=10", events[0].tokens)
+	}
+}
+
 // TestClaudeUsageSkipsNonAssistant pins the type filter: only an assistant
 // record carries billed usage, so a user record with a usage object is not an
 // event.

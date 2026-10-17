@@ -160,7 +160,7 @@ func TestStatusCostLegend(t *testing.T) {
 	if got := captureStdout(t, func() { printCostLegend(costLegend{list: true}, colorNever, 0) }); !strings.Contains(got, listLegend.text) {
 		t.Fatalf("a table-kept list line must print under the table, got:\n%q", got)
 	}
-	detail := captureStdout(t, func() { printDetailLegend(estimateReasons{}, true, true, colorNever, 0) })
+	detail := captureStdout(t, func() { printDetailLegend(estimateReasons{}, true, false, true, colorNever, 0) })
 	// The token group is a titled block: the heading prints alone, its clauses
 	// indent under it, and every "=" still shares one column with the LIST line.
 	wantDetail := "\nlist   = " + listLegend.text + "\n" +
@@ -171,8 +171,19 @@ func TestStatusCostLegend(t *testing.T) {
 	if detail != wantDetail {
 		t.Fatalf("breakdown legend = \n%s\nwant:\n%s", detail, wantDetail)
 	}
-	if got := captureStdout(t, func() { printDetailLegend(estimateReasons{}, false, false, colorNever, 0) }); got != "" {
+	if got := captureStdout(t, func() { printDetailLegend(estimateReasons{}, false, false, false, colorNever, 0) }); got != "" {
 		t.Fatalf("an empty breakdown legend must print nothing, got:\n%q", got)
+	}
+	partial := captureStdout(t, func() { printCostLegend(costLegend{partial: true}, colorNever, 0) })
+	if !strings.Contains(partial, partialLabel+" = "+partialLegend) {
+		t.Fatalf("partial table legend missing its line:\n%s", partial)
+	}
+	if strings.Contains(partial, estimateLabel+" = ") {
+		t.Fatalf("partial-only legend must not explain an estimate:\n%s", partial)
+	}
+	detailPartial := captureStdout(t, func() { printDetailLegend(estimateReasons{}, false, true, false, colorNever, 0) })
+	if !strings.Contains(detailPartial, partialLabel+" = "+partialLegend) {
+		t.Fatalf("partial detail legend missing its line:\n%s", detailPartial)
 	}
 }
 
@@ -415,7 +426,7 @@ func TestStatusDetailTokenRatios(t *testing.T) {
 	if rows := detailSummaryRows(worktree{Path: "/wt", Usage: pricedTokens(promptTokens{input: 1000})}, at(0)); len(rows) != 4 {
 		t.Errorf("rows without output = %d, want 4 (ratio group hidden):\n%q", len(rows), rows)
 	}
-	if rows := tokenRatioRows(promptTokens{output: 100}); len(rows) != 0 {
+	if rows := tokenRatioRows(promptTokens{output: 100}, false); len(rows) != 0 {
 		t.Errorf("output-only rows = %q, want hidden (no input context)", rows)
 	}
 }
@@ -566,6 +577,71 @@ func TestStatusPartialJSONFlag(t *testing.T) {
 	if _, ok := raw[1]["partial"]; ok {
 		t.Error("whole total must omit the partial key")
 	}
+	// The loss reaches the harness and model levels too, not just the worktree.
+	pi := got[0].Usage["pi"]
+	if !pi.Partial {
+		t.Error("harness partial flag lost")
+	}
+	if m := pi.Models["m"]; !m.Partial {
+		t.Error("model partial flag lost")
+	}
+	if m := pi.Models["m"]; m.Cost != nil {
+		t.Errorf("affected model cost = %v, want null (unknown)", *m.Cost)
+	}
+}
+
+// TestStatusPartialDerivedValuesAreMarked pins the mixed-loss contract: readable
+// values are lower-bound estimates, not exact, and every affected level says so.
+func TestStatusPartialDerivedValuesAreMarked(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.jsonl")
+	writeFile(t, good, `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"input":100,"output":10,"cacheRead":20,"cost":{"total":1}}}}
+{"type":"message","timestamp":"2026-01-01T00:00:10Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}
+`, 0o644)
+	idx := sessionIndex{canonical(dir): {
+		{path: filepath.Join(dir, "missing.jsonl"), harness: piAgent.name},
+		{path: good, harness: piAgent.name},
+	}}
+	u, err := buildUsage(dir, idx, nil, subscriptions{})
+	if err == nil {
+		t.Fatal("buildUsage must report the unreadable session")
+	}
+	wt := worktree{Path: dir, Usage: &u}
+	if got := cellActive(wt, columnContext{}); got != "~10s" {
+		t.Errorf("active = %q, want ~10s", got)
+	}
+	if got := cellCost(wt, columnContext{}); got != "unknown" {
+		t.Errorf("cost = %q, want unknown", got)
+	}
+	wantRow := []string{"m", "~10s", "unknown", "~120", "~10", "~20", "unknown", "~100", "~16.7%"}
+	if got := detailRows(&u, false)[0]; !slices.Equal(got, wantRow) {
+		t.Errorf("detail row = %q, want %q", got, wantRow)
+	}
+	rows := detailSummaryRows(wt, at(0))
+	wantRatios := [][]string{{"total in:out", "~12.0:1"}, {"cached in:out", "~2.0:1"}, {"uncached in:out", "~10.0:1"}}
+	gotRatios := rows[len(rows)-len(wantRatios):]
+	for i := range wantRatios {
+		if !slices.Equal(gotRatios[i], wantRatios[i]) {
+			t.Errorf("ratio row %d = %q, want %q", i, gotRatios[i], wantRatios[i])
+		}
+	}
+	var j jsonWorktree
+	j.InputOutputRatio = inputOutputRatioJSON(&u)
+	applyUsageJSON(&j, &u)
+	if !j.Partial || j.ActiveSeconds == nil || *j.ActiveSeconds != 10 {
+		t.Fatalf("worktree JSON = %+v, want partial with activeSeconds 10", j)
+	}
+	pi := j.Usage[piAgent.name]
+	if !pi.Partial {
+		t.Error("harness partial flag lost")
+	}
+	m := pi.Models["m"]
+	if !m.Partial || m.Cost != nil || m.CacheHitRate == nil || m.CacheMissTokens == nil {
+		t.Fatalf("model JSON = %+v, want partial, null cost, cache metrics", m)
+	}
+	if j.InputOutputRatio == nil || !j.InputOutputRatio.Partial {
+		t.Fatalf("ratio JSON = %+v, want partial shares", j.InputOutputRatio)
+	}
 }
 
 // TestLoadUsageKeepsAllUnreadable pins the disclosure fix: a worktree whose
@@ -584,10 +660,19 @@ func TestLoadUsageKeepsAllUnreadable(t *testing.T) {
 	if got := cellCost(ws.wts[0], columnContext{}); got != "unknown" {
 		t.Errorf("cost = %q, want unknown", got)
 	}
+	if got := cellActive(ws.wts[0], columnContext{}); got != "unknown" {
+		t.Errorf("active = %q, want unknown (not a measured 0s)", got)
+	}
 	var j jsonWorktree
 	applyUsageJSON(&j, u)
 	if !j.Partial {
 		t.Error("partial flag lost on total loss")
+	}
+	if j.ActiveSeconds != nil {
+		t.Errorf("activeSeconds = %v, want omitted on total loss", *j.ActiveSeconds)
+	}
+	if j.Usage != nil {
+		t.Errorf("usage = %+v, want omitted on total loss", j.Usage)
 	}
 }
 
@@ -772,6 +857,140 @@ func TestPartialProvenHarnessCell(t *testing.T) {
 	wt := worktree{Path: "/test", Usage: &u}
 	if got := cellCost(wt, columnContext{}); got != "unknown" {
 		t.Errorf("cost = %q, want unknown", got)
+	}
+}
+
+// TestStatusPartialZeroStaysUnknown pins unknown != zero: when a lost total has
+// no readable token or span count, the cell must not read an approximate zero.
+func TestStatusPartialZeroStaysUnknown(t *testing.T) {
+	m := &modelUsage{partial: true, cost: costPair{billed: knownZero()}}
+	if got := totalInputCell(m); got != "unknown" {
+		t.Errorf("in = %q, want unknown", got)
+	}
+	if got := tokenCount(m, tierOutput); got != "unknown" {
+		t.Errorf("out = %q, want unknown", got)
+	}
+	if got := missCount(m); got != "unknown" {
+		t.Errorf("miss = %q, want unknown", got)
+	}
+	if got := hitRateCell(m); got != "unknown" {
+		t.Errorf("hit%% = %q, want unknown", got)
+	}
+	rows := detailRows(&worktreeUsage{harnesses: map[string]*harnessUsage{
+		"pi": {models: map[string]*modelUsage{"m": m}},
+	}}, false)
+	if got := rows[0][1]; got != "unknown" {
+		t.Errorf("model time = %q, want unknown", got)
+	}
+	if rows := tokenRatioRows(promptTokens{}, true); len(rows) != len(detailRatioMeta) || rows[0][1] != "unknown" {
+		t.Errorf("partial undefined ratios = %q, want unknown rows", rows)
+	}
+}
+
+// TestStatusPartialLegendNeedsRenderedMarker pins the anti-dangle rule: a total
+// loss renders "unknown", not "~", so no legend explains a missing marker.
+func TestStatusPartialLegendNeedsRenderedMarker(t *testing.T) {
+	lost := worktree{Path: "/lost", Usage: &worktreeUsage{partial: true}}
+	if anyPartialActive([]worktree{lost}) {
+		t.Error("a total loss must not claim a partial ACTIVE marker")
+	}
+	lostWts := []worktree{lost}
+	lostCols := statusSchema(false, lostWts)
+	lostLegend := costLegendNeeded(lostCols, lostWts, "", at(0), 0, 0)
+	if lostLegend.partial {
+		t.Error("table legend must not print a partial clause without a marker")
+	}
+	if got := captureStdout(t, func() { printCostLegend(lostLegend, colorNever, 0) }); strings.Contains(got, partialLabel) {
+		t.Errorf("table legend printed a dangling partial clause:\n%s", got)
+	}
+	lostFit := fitDetailBlock(lost, at(0), 0)
+	if lostFit.partial {
+		t.Error("detail legend must not print a partial clause without a marker")
+	}
+	if got := captureStdout(t, func() { printDetailLegend(estimateReasons{}, false, lostFit.partial, false, colorNever, 0) }); strings.Contains(got, partialLabel) {
+		t.Errorf("detail legend printed a dangling partial clause:\n%s", got)
+	}
+
+	mixed := worktree{Path: "/mixed", Usage: &worktreeUsage{
+		partial: true,
+		harnesses: map[string]*harnessUsage{"pi": {
+			partial: true,
+			spans:   []span{{start: at(0), end: at(10)}},
+			models: map[string]*modelUsage{"m": {
+				partial: true,
+				spans:   []span{{start: at(0), end: at(10)}},
+			}},
+		}},
+	}}
+	mixedWts := []worktree{mixed}
+	if !anyPartialActive(mixedWts) {
+		t.Error("a readable partial span must claim the ACTIVE marker")
+	}
+	mixedCols := statusSchema(false, mixedWts)
+	mixedLegend := costLegendNeeded(mixedCols, mixedWts, "", at(0), 0, 0)
+	if !mixedLegend.partial {
+		t.Error("table legend must explain the rendered partial marker")
+	}
+	if got := captureStdout(t, func() { printCostLegend(mixedLegend, colorNever, 0) }); !strings.Contains(got, partialLabel) {
+		t.Errorf("table legend missing the partial clause:\n%s", got)
+	}
+	mixedFit := fitDetailBlock(mixed, at(0), 0)
+	if !mixedFit.partial {
+		t.Error("detail legend must explain the rendered partial marker")
+	}
+	if got := captureStdout(t, func() { printDetailLegend(estimateReasons{}, false, mixedFit.partial, false, colorNever, 0) }); !strings.Contains(got, partialLabel) {
+		t.Errorf("detail legend missing the partial clause:\n%s", got)
+	}
+}
+
+// TestStatusPartialDetailLegendCoversTokenAndRatioMarkers pins the other detail
+// marker sources: a partial token cell and a partial ratio row each need the
+// legend even when no readable span exists.
+func TestStatusPartialDetailLegendCoversTokenAndRatioMarkers(t *testing.T) {
+	cases := map[string]promptTokens{
+		"token": {input: 1},
+		"ratio": {input: 1, output: 1},
+	}
+	for name, tokens := range cases {
+		t.Run(name, func(t *testing.T) {
+			u := worktreeUsage{partial: true, harnesses: map[string]*harnessUsage{"pi": {
+				partial: true,
+				models: map[string]*modelUsage{"m": {
+					partial: true,
+					tokens:  tokens,
+				}},
+			}}}
+			w := worktree{Path: "/wt", Usage: &u}
+			if f := fitDetailBlock(w, at(0), 0); !f.partial {
+				t.Errorf("detail legend missing a rendered %s marker", name)
+			}
+		})
+	}
+}
+
+// TestStatusPartialZeroSecondsJSONStaysQualified pins the machine contract for a
+// partial harness or model whose readable activity is zero: activeSeconds:0 is
+// kept, and partial:true marks it as a lower bound.
+func TestStatusPartialZeroSecondsJSONStaysQualified(t *testing.T) {
+	u := worktreeUsage{partial: true, harnesses: map[string]*harnessUsage{"pi": {
+		partial: true,
+		models: map[string]*modelUsage{"m": {
+			partial: true,
+			cost:    costPair{billed: knownZero()},
+		}},
+	}}}
+	var j jsonWorktree
+	applyUsageJSON(&j, &u)
+	if !j.Partial || j.ActiveSeconds == nil || *j.ActiveSeconds != 0 {
+		t.Fatalf("worktree JSON = %+v, want partial with activeSeconds 0", j)
+	}
+	h := j.Usage["pi"]
+	if !h.Partial || h.ActiveSeconds != 0 {
+		t.Errorf("harness JSON = %+v, want partial with activeSeconds 0", h)
+	}
+	m := h.Models["m"]
+	if !m.Partial || m.ActiveSeconds != 0 {
+		t.Errorf("model JSON = %+v, want partial with activeSeconds 0", m)
 	}
 }
 

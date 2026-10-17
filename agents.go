@@ -35,8 +35,8 @@ type agent struct {
 	sessionSubdir string
 	sessionOwner  func(*bufio.Reader) (string, error)
 	// parseUsage reads one session file into cost/time events, plus the count of
-	// records it could not read (bad JSON or timestamp). A nonzero count lets the
-	// caller warn and taint the total partial. catalogRated marks a harness whose
+	// records it could not read (bad JSON, timestamp, or oversized). A nonzero
+	// count lets the caller warn and taint the total partial. catalogRated marks a harness whose
 	// records carry tokens but no cost, so the public catalog must price them
 	// (Claude Code); a self-pricing harness (Pi) adds cost to each event.
 	parseUsage   func(*bufio.Reader) ([]usageEvent, int, error)
@@ -269,7 +269,7 @@ func (a agent) readSessionOwner(p string) (string, error) {
 }
 
 func piSessionOwner(r *bufio.Reader) (string, error) {
-	line, err := sessionRecord(r)
+	line, _, err := sessionRecord(r)
 	if err == io.EOF {
 		err = nil
 	}
@@ -279,7 +279,7 @@ func piSessionOwner(r *bufio.Reader) (string, error) {
 // Claude can write queue metadata before the first record with a cwd.
 func claudeSessionOwner(r *bufio.Reader) (string, error) {
 	for n := 0; n < maxSessionOwnerRecords; n++ {
-		line, err := sessionRecord(r)
+		line, _, err := sessionRecord(r)
 		if cwd := recordCWD(line); cwd != "" {
 			return cwd, nil
 		}
@@ -305,8 +305,11 @@ func recordCWD(line []byte) string {
 	return h.CWD
 }
 
-// Drain oversized lines without retaining them, then resume at the next record.
-func sessionRecord(r *bufio.Reader) ([]byte, error) {
+// sessionRecord returns one record. An oversized record drains without being
+// retained and reports oversized=true exactly once, so the parser can count the
+// loss and continue at the next record. Owner scans ignore the flag: an
+// oversized header proves nothing about ownership.
+func sessionRecord(r *bufio.Reader) ([]byte, bool, error) {
 	var line []byte
 	oversized := false
 	for {
@@ -318,7 +321,7 @@ func sessionRecord(r *bufio.Reader) ([]byte, error) {
 			line = append(line, part...)
 		}
 		if err != bufio.ErrBufferFull {
-			return line, err
+			return line, oversized, err
 		}
 	}
 }
@@ -611,11 +614,11 @@ func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions
 func usageLossErr(first error, dropped int) error {
 	switch {
 	case first != nil && dropped > 0:
-		return fmt.Errorf("%w; %d session record(s) with bad JSON or timestamp dropped", first, dropped)
+		return fmt.Errorf("%w; %d session record(s) dropped (bad JSON, timestamp, or oversized)", first, dropped)
 	case first != nil:
 		return first
 	case dropped > 0:
-		return fmt.Errorf("%d session record(s) with bad JSON or timestamp dropped; totals are partial", dropped)
+		return fmt.Errorf("%d session record(s) dropped (bad JSON, timestamp, or oversized); totals are partial", dropped)
 	default:
 		return nil
 	}
@@ -624,15 +627,24 @@ func usageLossErr(first error, dropped int) error {
 // markPartial taints the total and each harness that kept some spans but also
 // lost a session or records, so a partial sum never looks exact. A harness with
 // no readable spans keeps no entry: a zero-span unknown would read as 0s active
-// instead of none, so the worktree-level flag carries that loss instead.
+// instead of none, so the worktree-level flag carries that loss instead. Every
+// model in an affected harness is marked because the lost records may have
+// belonged to any of them; an unaffected harness stays exact.
 func markPartial(u *worktreeUsage, lost map[string]bool) {
 	if len(lost) == 0 {
 		return
 	}
 	u.partial = true
 	for name := range lost {
-		if h, ok := u.harnesses[name]; ok {
-			h.cost.addUnknown()
+		h, ok := u.harnesses[name]
+		if !ok {
+			continue
+		}
+		h.partial = true
+		h.cost.addUnknown()
+		for _, m := range h.models {
+			m.partial = true
+			m.cost.addUnknown()
 		}
 	}
 }

@@ -56,8 +56,11 @@ func claudeUsageEvents(r *bufio.Reader) ([]usageEvent, int, error) {
 	var events []usageEvent
 	dropped := 0
 	for {
-		line, err := sessionRecord(r)
-		if len(line) > 0 && bytes.Contains(line, usageKey) {
+		line, oversized, err := sessionRecord(r)
+		if oversized {
+			// Billed relevance is unknowable after the discard, so count it.
+			dropped++
+		} else if len(line) > 0 && bytes.Contains(line, usageKey) {
 			var rec claudeUsageRecord
 			if json.Unmarshal(line, &rec) != nil {
 				dropped++

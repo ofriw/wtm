@@ -505,6 +505,23 @@ func TestPiUsageSkipsCorruptLines(t *testing.T) {
 	assertPiEvent(t, events[4], "m-a", nil)
 }
 
+// TestPiUsageOversizedRecordIsDropped pins the bounded-memory loss contract: an
+// oversized record is counted once, and the next good record still prices.
+func TestPiUsageOversizedRecordIsDropped(t *testing.T) {
+	big := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":9}},"pad":"` + strings.Repeat("a", maxSessionHeader) + `"}}`
+	events, dropped, err := piUsageEvents(bufio.NewReader(strings.NewReader(big + "\n" + piUsageLine(1.5) + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1", dropped)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want only the good record: %+v", len(events), events)
+	}
+	assertPiEvent(t, events[0], "m", fptr(1.5))
+}
+
 // TestPiProviderToolResultDoesNotUpdate pins that a toolResult with a provider
 // field does not update the running provider. Only assistant messages carry the
 // session's provider; a toolResult's provider belongs to a child agent and must
@@ -649,6 +666,10 @@ func TestPiSpawnWithoutIDCrossSessionBillsOnce(t *testing.T) {
 	if got := u.cost().cell(); got != "$0.30" {
 		t.Fatalf("cost = %q, want $0.30 (cross-session spawn bills once)", got)
 	}
+	wantTokens := promptTokens{input: 300, output: 30, cacheRead: 5, cacheWrite5m: 2}
+	if got := u.tokens(); got != wantTokens {
+		t.Fatalf("tokens = %+v, want %+v (each child folds once)", got, wantTokens)
+	}
 }
 
 // TestPiUsageTokensAndTierCost pins the parser's token contract: a modern Pi
@@ -666,10 +687,6 @@ func TestPiUsageTokensAndTierCost(t *testing.T) {
 	}
 	assertPiEvent(t, e, "m", fptr(0.34))
 	if e.tierCost == nil {
-	wantTokens := promptTokens{input: 300, output: 30, cacheRead: 5, cacheWrite5m: 2}
-	if got := u.tokens(); got != wantTokens {
-		t.Fatalf("tokens = %+v, want %+v (each child folds once)", got, wantTokens)
-	}
 		t.Fatal("tierCost = nil, want the record's per-class prices")
 	}
 	for _, tc := range []struct {

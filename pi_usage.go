@@ -119,8 +119,11 @@ func piUsageEvents(r *bufio.Reader) ([]usageEvent, int, error) {
 	spawnAt := map[string]time.Time{}
 	current, provider := "", ""
 	for {
-		line, err := sessionRecord(r)
-		if len(line) > 0 && piInteresting(line) {
+		line, oversized, err := sessionRecord(r)
+		if oversized {
+			// Billed relevance is unknowable after the discard, so count it.
+			dropped++
+		} else if len(line) > 0 && piInteresting(line) {
 			var rec piUsageRecord
 			if json.Unmarshal(line, &rec) != nil {
 				dropped++
@@ -259,10 +262,10 @@ type piSpawnChild struct {
 	model    string
 	provider string
 	cost     *float64
+	tokens   promptTokens
 }
 
 // appendPiSpawn records one event per child Pi reports on the parent's spawn
-	tokens   promptTokens
 // result. The child runs in memory, so this is its only record. A failed spawn
 // that reports neither a child nor a cost is a known-zero event, so it cannot
 // poison the total; a non-error child with no cost stays unknown-cost. A batch
@@ -295,10 +298,10 @@ func piSpawnChildren(current, provider string, msg *piMessage) []piSpawnChild {
 			model, cost, tokens := "", (*float64)(nil), promptTokens{}
 			if r.Usage != nil {
 				model, cost = r.Usage.Model, r.Usage.Cost
+				tokens = piSpawnUsageTokens(r.Usage)
 			}
 			// An older result carries no route, so the child proves nothing: it
 			// keeps an empty provider, which piProven rejects, instead of
-				tokens = piSpawnUsageTokens(r.Usage)
 			// inheriting the parent's subscription.
 			children = append(children, piSpawnChild{model: piChildModel(model, current), provider: "", cost: cost, tokens: tokens})
 		}
@@ -357,9 +360,6 @@ func spawnCost(msg *piMessage) *float64 {
 	return nil
 }
 
-// addPiEvent records one Pi usage; a missing cost.total is a priced-unknown
-// event that still counts toward active time.
-func addPiEvent(events *[]usageEvent, at time.Time, id string, model, provider string, u *piUsage) {
 // spawnTokens chooses one token source for a modern single child: details.stats
 // first, then the tool-result usage. The two describe the same child, so adding
 // both would double count it.
@@ -400,6 +400,9 @@ func piSpawnUsageTokens(u *piSpawnUsage) promptTokens {
 	}
 }
 
+// addPiEvent records one Pi usage; a missing cost.total is a priced-unknown
+// event that still counts toward active time.
+func addPiEvent(events *[]usageEvent, at time.Time, id string, model, provider string, u *piUsage) {
 	if u == nil {
 		return
 	}
@@ -419,12 +422,12 @@ func piSpawnUsageTokens(u *piSpawnUsage) promptTokens {
 // cache-write class, so it fills the 5-minute field; the display collapses the
 // two write classes anyway.
 func piTokens(u *piUsage) promptTokens {
-	return promptTokens{
-		input:        derefInt(u.Input),
-		output:       derefInt(u.Output),
 	if u == nil {
 		return promptTokens{}
 	}
+	return promptTokens{
+		input:        derefInt(u.Input),
+		output:       derefInt(u.Output),
 		cacheRead:    derefInt(u.CacheRead),
 		cacheWrite5m: derefInt(u.CacheWrite),
 	}
