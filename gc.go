@@ -270,7 +270,7 @@ func cmdGC(g *globals, args []string) error {
 		return err
 	}
 	// Selection and the fresh under-lock idle check share one clock reading.
-	now := time.Now()
+	now := nowFunc()
 	selected, plan, err := selectAndConfirmGC(g, ws.wts, o, ws.ttl, ws.root, now)
 	if err != nil {
 		return handleGCAbort(g, o, err)

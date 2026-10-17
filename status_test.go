@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -184,13 +185,57 @@ func TestWorktreeLastUsed(t *testing.T) {
 		mkSession(t, repo, "future", now.Add(48*time.Hour))
 		idx := mustIndexSessions(t)
 		got := worktreeLastUsed(repo, idx)
-		if got.After(time.Now()) {
+		if got.After(now.Add(time.Minute)) {
 			t.Fatalf("future timestamp not clamped: %v", got)
 		}
 		if got.Before(now.Add(-time.Minute)) {
 			t.Fatalf("clamp lost recency: %v", got)
 		}
 	})
+}
+
+// TestNowFunc pins the clock seam: absent env reads the wall clock, a valid
+// RFC3339 value is honored, and a malformed value discloses itself and falls
+// back to the wall clock.
+func TestNowFunc(t *testing.T) {
+	// t.Setenv restores the original value at cleanup; unset here to hit the
+	// true absent-env path, not just the empty-value one.
+	t.Setenv("WTM_NOW", "")
+	_ = os.Unsetenv("WTM_NOW")
+	if got := nowFunc(); got.Before(time.Now().Add(-time.Minute)) {
+		t.Errorf("absent env = %v, want the wall clock", got)
+	}
+	t.Setenv("WTM_NOW", "2026-01-01T00:00:00Z")
+	if got := nowFunc(); !got.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("valid env = %v, want 2026-01-01T00:00:00Z", got)
+	}
+	t.Setenv("WTM_NOW", "nope")
+	var got time.Time
+	warned := captureStderr(t, func() { got = nowFunc() })
+	if got.Before(time.Now().Add(-time.Minute)) {
+		t.Errorf("malformed env = %v, want the wall clock", got)
+	}
+	if !strings.Contains(warned, `WTM_NOW "nope"`) {
+		t.Errorf("malformed env not disclosed: %q", warned)
+	}
+}
+
+// TestWorktreeCreated pins the creation mark: the .git entry mtime, and an
+// unknown mark (no .git entry) that must never read as a real zero age.
+func TestWorktreeCreated(t *testing.T) {
+	dir := t.TempDir()
+	if !worktreeCreated(dir).IsZero() {
+		t.Error("a worktree without a .git entry must have no creation mark")
+	}
+	mark := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	gitEntry := filepath.Join(dir, ".git")
+	writeFile(t, gitEntry, "gitdir: /elsewhere\n", 0o644)
+	if err := os.Chtimes(gitEntry, mark, mark); err != nil {
+		t.Fatal(err)
+	}
+	if got := worktreeCreated(dir); !got.Equal(mark) {
+		t.Errorf("worktreeCreated = %v, want the .git entry mtime %v", got, mark)
+	}
 }
 
 func TestDiscover(t *testing.T) {
@@ -339,10 +384,9 @@ func TestDisplayPath(t *testing.T) {
 }
 
 func TestPrintTable(t *testing.T) {
-	t.Setenv("COLUMNS", "0") // non-TTY goldens must stay at natural widths
 	headers := []string{"A", "BB"}
 	rows := [][]string{{"x", "y"}, {"long", "z"}}
-	out := captureStdout(t, func() { printTable(headers, rows, colorAuto, nil, nil) })
+	out := captureStdout(t, func() { printTable(headers, rows, colorAuto, nil, nil, 0) })
 	want := "A     BB\nx     y\nlong  z\n"
 	if out != want {
 		t.Fatalf("printTable = %q, want %q", out, want)
@@ -353,15 +397,17 @@ func TestPrintTable(t *testing.T) {
 // policy is derived from the same registry: a rename or a new rank cannot pass
 // without updating this contract.
 func TestStatusHeadersSSOT(t *testing.T) {
-	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "STATUS", "TEMP", "INTEGRATIONS"}
+	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "AGE", "ACTIVE", "COST", "STATUS", "TEMP", "INTEGRATIONS"}
 	if !slices.Equal(columnHeaders(statusColumns), want) {
 		t.Fatalf("status headers = %v, want %v", columnHeaders(statusColumns), want)
 	}
 	// The elision order production derives for this table is a contract, not an
-	// implementation detail.
+	// implementation detail. The identity columns give up width first; AGE,
+	// ACTIVE and COST survive longer, and the integration state gives up width
+	// last.
 	registry := columnRegistry()
 	priority := dynamicShrinkPriority(want, registry)
-	wantShrink := []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED", "INTEGRATIONS"}
+	wantShrink := []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED", "AGE", "ACTIVE", "COST", "INTEGRATIONS"}
 	if !slices.Equal(priority, wantShrink) {
 		t.Errorf("shrink priority = %v, want %v", priority, wantShrink)
 	}
@@ -371,7 +417,7 @@ func TestStatusHeadersSSOT(t *testing.T) {
 	for _, c := range allColumns() {
 		registered[c.header] = true
 	}
-	for _, cols := range [][]worktreeColumn{statusColumns, gcPickerColumns} {
+	for _, cols := range [][]worktreeColumn{statusColumns, gcPickerColumns, detailColumns()} {
 		for _, c := range cols {
 			if !registered[c.header] {
 				t.Errorf("column %q is used by a grid but missing from allColumns", c.header)
@@ -425,11 +471,10 @@ func TestWideColumnsShrinkable(t *testing.T) {
 // TestRenderGridMatchesPrintTable pins the extraction: printTable's bytes must
 // equal the shared grid engine's header+body rejoined under a no-color profile.
 func TestRenderGridMatchesPrintTable(t *testing.T) {
-	t.Setenv("COLUMNS", "0")
 	headers := []string{"A", "BB", "CCC"}
 	rows := [][]string{{"x", "yy", "zzz"}, {"longer", "y", "z"}}
-	out := captureStdout(t, func() { printTable(headers, rows, colorNever, nil, []string{"CCC"}) })
-	header, body := renderGrid(sizedGrid(headers, rows, widthBudget(), []string{"CCC"}))
+	out := captureStdout(t, func() { printTable(headers, rows, colorNever, nil, []string{"CCC"}, 0) })
+	header, body := renderGrid(sizedGrid(headers, rows, 0, []string{"CCC"}))
 	if got := gridString(header, body) + "\n"; got != out {
 		t.Fatalf("renderGrid = %q, printTable = %q", got, out)
 	}
@@ -438,7 +483,6 @@ func TestRenderGridMatchesPrintTable(t *testing.T) {
 // TestPrintStatusTableFits proves the whole status table honors a pinned budget
 // end to end, and that displayPath runs before width budgeting.
 func TestPrintStatusTableFits(t *testing.T) {
-	t.Setenv("COLUMNS", "80")
 	home := t.TempDir()
 	setHomeEnv(t, home)
 	wts := []worktree{{
@@ -447,7 +491,7 @@ func TestPrintStatusTableFits(t *testing.T) {
 		Upstream: upstream{Short: "origin/feature/a-rather-long-branch-name", Remote: "origin", Ref: "refs/heads/x"},
 		Caps:     map[string]capState{"chunkhound": capPresent, "mcp": capPresent},
 	}}
-	out := captureStdout(t, func() { printStatusTable(statusColumns, wts, time.Now(), 10*time.Hour, colorNever) })
+	out := captureStdout(t, func() { printStatusTable(statusColumns, wts, at(0), 10*time.Hour, colorNever, 80) })
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		if w := dispWidth(line); w > 80 {
 			t.Errorf("line exceeds 80 cells: %d\n%q", w, line)
@@ -464,8 +508,453 @@ func TestPrintStatusTableFits(t *testing.T) {
 	}
 }
 
+// narrowCostWorktree is one priced worktree with long identity cells, so every
+// narrow budget must squeeze the table.
+func narrowCostWorktree(home string, now time.Time) []worktree {
+	return []worktree{{
+		Path:     filepath.Join(home, "Documents", "GitHub", "project"),
+		Branch:   "feat/cost-tracking",
+		LastUsed: now,
+		Created:  now.Add(-72 * time.Hour),
+		Usage:    fixtureUsage(),
+	}}
+}
+
+// TestStatusNarrowKeepsCostColumns pins the elision-order fix at every narrow
+// budget: identity columns give up width first, the AGE, ACTIVE and COST
+// headers survive whole while the budget allows, no line exceeds the budget,
+// no slivers render, and a dropped cost column is disclosed on stderr.
+func TestStatusNarrowKeepsCostColumns(t *testing.T) {
+	home := t.TempDir()
+	setHomeEnv(t, home)
+	now := at(0)
+	wts := narrowCostWorktree(home, now)
+	for _, width := range []int{80, 60, 40} {
+		t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
+			var errOut string
+			out := captureStdout(t, func() {
+				errOut = captureStderr(t, func() {
+					printStatusTable(statusColumns, wts, now, 10*time.Hour, colorNever, width)
+				})
+			})
+			headerLine, _, _ := strings.Cut(out, "\n")
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := dispWidth(line); w > width {
+					t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
+				}
+			}
+			headers := columnHeaders(statusColumns)
+			rows := gridRows(statusColumns, wts, columnContext{now: now, ttl: 10 * time.Hour})
+			widths := columnWidths(headers, rows, width)
+			idx := headerIndex(headers)
+			assertWithin(t, widths, width)
+			assertNoSlivers(t, headers, widths)
+			for _, h := range []string{"AGE", "ACTIVE", "COST"} {
+				if widths[idx[h]] == 0 {
+					if !strings.Contains(errOut, h) {
+						t.Errorf("dropped %s is not disclosed on stderr: %q", h, errOut)
+					}
+					continue
+				}
+				if !strings.Contains(headerLine, h) {
+					t.Errorf("header %q missing at %d cols:\n%s", h, width, out)
+				}
+			}
+		})
+	}
+}
+
+// narrowProvenPairWorktree is one priced worktree billing through a proven
+// subscription, with long identity cells so every narrow budget must squeeze
+// the table. It returns the worktree and the COST and LIST values the render
+// must show. The caller needs no credential setup: the exact case goes through
+// the real Pi parser and the real proof (openai-codex bills OAuth-only), while
+// the estimated variant widens the list value through the fold contract
+// directly. sandbox sets HOME, so the proof reads real files.
+func narrowProvenPairWorktree(t *testing.T, now time.Time, estimated bool) ([]worktree, string, string) {
+	t.Helper()
+	env := sandbox(t)
+	cost, list := "$0.00", "$41.20"
+	var u worktreeUsage
+	if estimated {
+		list = "~$41.20"
+		u.addSession("pi", []usageEvent{{at: now, model: "m"}}, func(usageEvent) pricedEvent {
+			var l, billed money
+			l.addEstimated(41.20)
+			billed.addKnown(0)
+			return pricedEvent{total: costPair{list: l, billed: billed, subscription: true}}
+		})
+	} else {
+		u = piUsageOne(t, piProviderLine("openai-codex", 41.20))
+	}
+	if got := u.cost().cell(); got != cost+"/"+list {
+		t.Fatalf("proven pair = %q, want %q", got, cost+"/"+list)
+	}
+	return []worktree{{
+		Path:     filepath.Join(env.Home, "Documents", "GitHub", "project"),
+		Branch:   "feat/cost-tracking",
+		LastUsed: now,
+		Created:  now.Add(-72 * time.Hour),
+		Usage:    &u,
+	}}, cost, list
+}
+
+// TestStatusNarrowKeepsProvenPrices pins the unelidable-price policy for a
+// proven subscription: at every narrow budget the table either keeps the full
+// COST and LIST values or drops each column whole with stderr disclosure. A
+// middle-cut currency would read as a wrong number, and dropping the
+// counterfactual LIST never takes the billed COST beside it with it.
+func TestStatusNarrowKeepsProvenPrices(t *testing.T) {
+	for _, estimated := range []bool{false, true} {
+		wts, cost, list := narrowProvenPairWorktree(t, at(0), estimated)
+		t.Run(cost+"/"+list, func(t *testing.T) {
+			now := at(0)
+			for _, width := range []int{80, 60, 40, 20} {
+				t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
+					cols := statusSchema(false, wts)
+					var errOut string
+					out := captureStdout(t, func() {
+						errOut = captureStderr(t, func() {
+							printStatusTable(cols, wts, now, 10*time.Hour, colorNever, width)
+						})
+					})
+					for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+						if w := dispWidth(line); w > width {
+							t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
+						}
+					}
+					headers := columnHeaders(cols)
+					rows := gridRows(cols, wts, columnContext{now: now, ttl: 10 * time.Hour})
+					widths := columnWidths(headers, rows, width)
+					idx := headerIndex(headers)
+					assertWithin(t, widths, width)
+					assertNoSlivers(t, headers, widths)
+					assertPricesWholeOrDropped(t, out, errOut, widths, idx, cost, list)
+				})
+			}
+		})
+	}
+}
+
+// detailHeaderLine returns the breakdown grid's header line, so an alignment
+// assertion can read the headers even when the MODEL column was dropped.
+func detailHeaderLine(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "TIME") && strings.Contains(line, "COST") {
+			return line
+		}
+	}
+	return strings.Split(out, "\n")[0]
+}
+
+// assertPricesWholeOrDropped checks both price columns of a rendered table: a
+// kept column carries its header and its full value, while a dropped one is
+// disclosed on stderr and leaves no fragment behind.
+func assertPricesWholeOrDropped(t *testing.T, out, errOut string, widths []int, idx map[string]int, cost, list string) {
+	t.Helper()
+	for _, col := range []struct{ header, value string }{{"COST", cost}, {"LIST", list}} {
+		w := widths[idx[col.header]]
+		if w == 0 {
+			if !strings.Contains(errOut, col.header) {
+				t.Errorf("dropped %s is not disclosed on stderr: %q", col.header, errOut)
+			}
+			if strings.Contains(out, col.value) {
+				t.Errorf("dropped %s still renders %q:\n%s", col.header, col.value, out)
+			}
+			continue
+		}
+		if w < dispWidth(col.value) {
+			t.Errorf("%s cut to %d cells, narrower than its %d-cell value %q", col.header, w, dispWidth(col.value), col.value)
+		}
+		if !strings.Contains(out, col.header) || !strings.Contains(out, col.value) {
+			t.Errorf("%s kept but its header or %q not rendered whole:\n%s", col.header, col.value, out)
+		}
+	}
+}
+
+// TestStatusNarrowWidthSweep sweeps every budget from 10 to 120 cells, so a
+// fit regression between the hand-picked sample widths cannot hide. It pins
+// the same invariants the sampled narrow tests assert on the wider of the two
+// price values (~$41.20): lines fit the budget, no slivers render, and each
+// price column renders whole or drops whole with stderr disclosure.
+func TestStatusNarrowWidthSweep(t *testing.T) {
+	now := at(0)
+	wts, cost, list := narrowProvenPairWorktree(t, now, true)
+	ctx := columnContext{now: now, ttl: 10 * time.Hour}
+	cols := statusSchema(false, wts)
+	headers := columnHeaders(cols)
+	rows := gridRows(cols, wts, ctx)
+	idx := headerIndex(headers)
+	for width := 10; width <= 120; width++ {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			var errOut string
+			out := captureStdout(t, func() {
+				errOut = captureStderr(t, func() {
+					printStatusTable(cols, wts, now, 10*time.Hour, colorNever, width)
+				})
+			})
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := dispWidth(line); w > width {
+					t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
+				}
+			}
+			widths := columnWidths(headers, rows, width)
+			assertWithin(t, widths, width)
+			assertNoSlivers(t, headers, widths)
+			assertPricesWholeOrDropped(t, out, errOut, widths, idx, cost, list)
+		})
+	}
+}
+
+// TestStatusDetailProvenPricesNarrow pins the breakdown's shared width policy
+// for a proven subscription: the block fits the budget and keeps the full COST
+// and LIST values while the identity columns give up width first, and each
+// price column drops whole with disclosure only when it cannot fit.
+// TestCostLegendDetailMatchesBreakdown pins the legend's agreement with the
+// rendered breakdown: the LIST column's explanation appears in the detail
+// legend exactly when the breakdown table carries the column. Both derive from
+// the single fitDetailBlock that printStatusDetail renders with, so they cannot
+// diverge — this test pins that external contract at every width.
+func TestCostLegendDetailMatchesBreakdown(t *testing.T) {
+	now := at(0)
+	env := sandbox(t)
+	cur := worktree{
+		Path:  filepath.Join(env.Home, "a", "long", "checkout", "path"),
+		Usage: subscriptionUsage(now, 41.20),
+	}
+	wts := []worktree{cur}
+	for _, width := range []int{100, 80, 60, 50, 40, 30, 20, 15, 10} {
+		t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
+			var out string
+			captureStderr(t, func() {
+				out = captureStdout(t, func() {
+					printStatusDetail(wts, cur.Path, now, colorNever, width)
+				})
+			})
+			headerLine := ""
+			for _, line := range strings.Split(out, "\n") {
+				if strings.Contains(line, "COST") && strings.Contains(line, "LIST") {
+					headerLine = line
+					break
+				}
+			}
+			renderedList := headerLine != ""
+			// The detail legend's list clause starts with the lowercase label
+			// "list =" (wrapping indents continuations past the label), so a
+			// line carrying both signals the explanation.
+			legendExplains := false
+			for _, line := range strings.Split(out, "\n") {
+				if strings.Contains(line, listLegend.label) && strings.Contains(line, "=") {
+					legendExplains = true
+					break
+				}
+			}
+			if renderedList != legendExplains {
+				t.Errorf("width %d: breakdown renders LIST=%v but legend mentions list=%v:\n%s", width, renderedList, legendExplains, out)
+			}
+		})
+	}
+}
+
+// TestTokenGroupDisclosurePrintsOnce pins the anti-duplicate contract: when the
+// breakdown drops the token group at narrow width, the stderr disclosure prints
+// exactly once, not twice (once from the legend pass, once from the renderer).
+// A count assertion catches the regression where the legend pass discloses the
+// drop the renderer already disclosed.
+func TestTokenGroupDisclosurePrintsOnce(t *testing.T) {
+	now := at(0)
+	env := sandbox(t)
+	cur := worktree{
+		Path:  filepath.Join(env.Home, "a", "long", "checkout", "path"),
+		Usage: subscriptionUsage(now, 41.20),
+	}
+	wts := []worktree{cur}
+	errOut := captureStderr(t, func() {
+		captureStdout(t, func() {
+			costLegendNeeded(statusSchema(false, wts), wts, cur.Path, now, 10*time.Hour, 40)
+			printStatusDetail(wts, cur.Path, now, colorNever, 40)
+		})
+	})
+	count := strings.Count(errOut, "terminal too narrow; hid")
+	if count != 1 {
+		t.Errorf("token group disclosure printed %d times, want 1:\n%s", count, errOut)
+	}
+}
+
+func TestStatusDetailProvenPricesNarrow(t *testing.T) {
+	env := sandbox(t)
+	u := piUsageOne(t, piProviderLine("openai-codex", 41.20))
+	const cost, list = "$0.00", "$41.20"
+	if got := u.cost().cell(); got != cost+"/"+list {
+		t.Fatalf("proven pair = %q, want %q", got, cost+"/"+list)
+	}
+	cur := worktree{
+		Path:  filepath.Join(env.Home, "a", "very", "long", "checkout", "path", "that", "keeps", "going", "on"),
+		Usage: &u,
+	}
+	for _, width := range []int{80, 60, 40, 20} {
+		t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
+			var errOut string
+			out := captureStdout(t, func() {
+				errOut = captureStderr(t, func() {
+					printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, width)
+				})
+			})
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := dispWidth(line); w > width {
+					t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
+				}
+			}
+			cols, rows := detailSchema(cur.Usage)
+			headers := columnHeaders(cols)
+			widths := columnWidths(headers, rows, width)
+			assertWithin(t, widths, width)
+			assertNoSlivers(t, headers, widths)
+			assertPricesWholeOrDropped(t, out, errOut, widths, headerIndex(headers), cost, list)
+		})
+	}
+}
+
+// TestStatusDetailHeadersShareValueEdge pins the alignment contract the split
+// exists for: each right-aligned header sits over the right edge of its own
+// values, in a mixed table where one model carries a list price and another
+// does not. Packing both prices into one cell put the header over the list side
+// while every billed value sat at the column's left edge.
+func TestStatusDetailHeadersShareValueEdge(t *testing.T) {
+	now := at(0)
+	env := sandbox(t)
+	var u worktreeUsage
+	u.addSession("pi", []usageEvent{{at: now, model: "pair"}}, func(usageEvent) pricedEvent {
+		var list, billed money
+		list.addKnown(41.20)
+		billed.addKnown(0)
+		return pricedEvent{total: costPair{list: list, billed: billed, subscription: true}}
+	})
+	u.addSession("pi", []usageEvent{{at: now, model: "solo"}}, func(usageEvent) pricedEvent {
+		var list, billed money
+		list.addKnown(12.34)
+		billed.addKnown(12.34)
+		return pricedEvent{total: costPair{list: list, billed: billed}}
+	})
+	cur := worktree{Path: filepath.Join(env.Home, "wt"), Usage: &u}
+	out := captureStdout(t, func() { printStatusDetail([]worktree{cur}, cur.Path, now, colorNever, 0) })
+	row := func(name string) string {
+		for _, l := range strings.Split(out, "\n") {
+			if strings.HasPrefix(l, name) {
+				return l
+			}
+		}
+		t.Fatalf("no model row starts with %q:\n%s", name, out)
+		return ""
+	}
+	// endOf is the column just past sub: the shared right edge of a right-aligned
+	// column's header and its values.
+	endOf := func(line, sub string) int {
+		i := strings.Index(line, sub)
+		if i < 0 {
+			t.Fatalf("%q missing from %q", sub, line)
+		}
+		return i + len(sub)
+	}
+	header, pair, solo := detailHeaderLine(out), row("pair"), row("solo")
+	for _, c := range []struct {
+		name, cell, header string
+		row                string
+	}{
+		{"pair billed", "$0.00", "COST", pair},
+		{"solo billed", "$12.34", "COST", solo},
+		{"pair list", "$41.20", "LIST", pair},
+	} {
+		if got, want := endOf(c.row, c.cell), endOf(header, c.header); got != want {
+			t.Errorf("%s right edge = %d, %s header right edge = %d\n%s", c.name, got, c.header, want, out)
+		}
+	}
+	if strings.Contains(pair, "/") || strings.Contains(solo, "/") {
+		t.Errorf("a cost cell still packs two prices:\n%s", out)
+	}
+}
+
+// TestStatusDetailSummaryDropsCostWhole pins the summary-block currency rule:
+// at width 20 with a long path the fitted value column cannot hold the
+// $0.00/$41.20 pair, so the cost row is hidden with disclosure instead of
+// rendering a middle-cut $0….20 that reads as a wrong number.
+func TestStatusDetailSummaryDropsCostWhole(t *testing.T) {
+	env := sandbox(t)
+	u := piUsageOne(t, piProviderLine("openai-codex", 41.20))
+	cur := worktree{
+		Path:  filepath.Join(env.Home, "a", "very", "long", "checkout", "path", "that", "keeps", "going", "on"),
+		Usage: &u,
+	}
+	var errOut string
+	out := captureStdout(t, func() {
+		errOut = captureStderr(t, func() {
+			printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, 20)
+		})
+	})
+	if strings.Contains(out, "$0\u2026") || strings.Contains(out, "$0...") {
+		t.Fatalf("summary cut the pair instead of hiding it:\n%s", out)
+	}
+	if !strings.Contains(errOut, "hid cost") {
+		t.Fatalf("hidden summary cost is not disclosed on stderr: %q\n%s", errOut, out)
+	}
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		if w := dispWidth(line); w > 20 {
+			t.Errorf("line exceeds 20 cells: %d\n%q", w, line)
+		}
+	}
+}
+
+// TestStatusDetailSummaryDropsRatioGroupWhole pins the ratio group's drop
+// policy: one overflowing share hides the whole group (a partial set of shares
+// reads as arbitrary), disclosed once on stderr. The labels are literal: the
+// rendered text is the user-facing contract, so a label rename in
+// detailRatioMeta must fail here, not drift through a shared helper.
+func TestStatusDetailSummaryDropsRatioGroupWhole(t *testing.T) {
+	u := pricedTokens(promptTokens{input: 49_500_000, cacheWrite5m: 500_000, output: 500_000})
+	cur := worktree{Path: "/SBX/wt", Usage: u}
+	var errOut string
+	out := captureStdout(t, func() {
+		errOut = captureStderr(t, func() {
+			printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, 20)
+		})
+	})
+	for _, label := range []string{"total in:out", "cached in:out", "uncached in:out"} {
+		if strings.Contains(out, label) {
+			t.Errorf("ratio group must drop whole, but %q rendered:\n%s", label, out)
+		}
+	}
+	if want := "hid total in:out, cached in:out, uncached in:out; widen the terminal"; !strings.Contains(errOut, want) {
+		t.Errorf("ratio drop is not disclosed with the whole group: %q\nwant %q", errOut, want)
+	}
+}
+
+// TestStatusDetailFitsNarrowBudget pins the detail block's shared width policy:
+// the summary and the breakdown both fit the budget, and the breakdown keeps
+// COST while the identity columns give up width first.
+func TestStatusDetailFitsNarrowBudget(t *testing.T) {
+	cur := worktree{
+		Path:  "/SBX/home/a/very/long/checkout/path/that/keeps/going/on",
+		Usage: fixtureUsage(),
+	}
+	for _, width := range []int{80, 60, 40} {
+		t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
+			out := captureStdout(t, func() {
+				printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, width)
+			})
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := dispWidth(line); w > width {
+					t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
+				}
+			}
+			if !strings.Contains(out, "COST") || !strings.Contains(out, "$4.00") {
+				t.Errorf("cost column lost at %d cols:\n%s", width, out)
+			}
+		})
+	}
+}
+
 func TestPrintStatusJSON(t *testing.T) {
-	now := time.Now()
+	now := at(0)
 	ttl := 10 * time.Hour
 	last := time.Date(2021, 2, 3, 4, 5, 6, 0, time.UTC)
 	wts := []worktree{
@@ -473,7 +962,7 @@ func TestPrintStatusJSON(t *testing.T) {
 		{Path: "/main", Branch: "main", Main: true, Temp: true, TempCreated: now, TempTTL: ttl, Caps: map[string]capState{"chunkhound": capPartial}, Upstream: upstream{Short: "origin/main", Remote: "origin", Ref: "refs/heads/main"}},
 	}
 	out := captureStdout(t, func() {
-		if err := printStatusJSON(wts, now, ttl); err != nil {
+		if err := printStatusJSON(wts, now, ttl, ""); err != nil {
 			t.Errorf("printStatusJSON: %v", err)
 		}
 	})
@@ -541,7 +1030,7 @@ func TestPrintStatusJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
 		t.Fatalf("re-decode JSON: %v", err)
 	}
-	wantKeys := []string{"branch", "expiresAt", "integrations", "lastUsed", "main", "path", "status", "temp", "upstream"}
+	wantKeys := []string{"ageSeconds", "branch", "cost", "current", "expiresAt", "integrations", "lastUsed", "main", "path", "status", "temp", "upstream"}
 	for i, m := range raw {
 		keys := make([]string, 0, len(m))
 		for k := range m {

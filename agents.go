@@ -34,6 +34,13 @@ type agent struct {
 	configDirRel  []string // under home
 	sessionSubdir string
 	sessionOwner  func(*bufio.Reader) (string, error)
+	// parseUsage reads one session file into cost/time events, plus the count of
+	// records it could not read (bad JSON, timestamp, or oversized). A nonzero
+	// count lets the caller warn and taint the total partial. catalogRated marks a harness whose
+	// records carry tokens but no cost, so the public catalog must price them
+	// (Claude Code); a self-pricing harness (Pi) adds cost to each event.
+	parseUsage   func(*bufio.Reader) ([]usageEvent, int, error)
+	catalogRated bool
 }
 
 // agents is the SSOT for known harnesses: seeding, indexing and MCP status
@@ -262,7 +269,7 @@ func (a agent) readSessionOwner(p string) (string, error) {
 }
 
 func piSessionOwner(r *bufio.Reader) (string, error) {
-	line, err := sessionRecord(r)
+	line, _, err := sessionRecord(r)
 	if err == io.EOF {
 		err = nil
 	}
@@ -272,7 +279,7 @@ func piSessionOwner(r *bufio.Reader) (string, error) {
 // Claude can write queue metadata before the first record with a cwd.
 func claudeSessionOwner(r *bufio.Reader) (string, error) {
 	for n := 0; n < maxSessionOwnerRecords; n++ {
-		line, err := sessionRecord(r)
+		line, _, err := sessionRecord(r)
 		if cwd := recordCWD(line); cwd != "" {
 			return cwd, nil
 		}
@@ -298,8 +305,11 @@ func recordCWD(line []byte) string {
 	return h.CWD
 }
 
-// Drain oversized lines without retaining them, then resume at the next record.
-func sessionRecord(r *bufio.Reader) ([]byte, error) {
+// sessionRecord returns one record. An oversized record drains without being
+// retained and reports oversized=true exactly once, so the parser can count the
+// loss and continue at the next record. Owner scans ignore the flag: an
+// oversized header proves nothing about ownership.
+func sessionRecord(r *bufio.Reader) ([]byte, bool, error) {
 	var line []byte
 	oversized := false
 	for {
@@ -311,7 +321,7 @@ func sessionRecord(r *bufio.Reader) ([]byte, error) {
 			line = append(line, part...)
 		}
 		if err != bufio.ErrBufferFull {
-			return line, err
+			return line, oversized, err
 		}
 	}
 }
@@ -321,10 +331,12 @@ func sessionRecord(r *bufio.Reader) ([]byte, error) {
 // instead of one per worktree.
 type sessionIndex map[string][]sessionRef
 
-// sessionRef carries an owned file and the boundary for empty-dir cleanup.
+// sessionRef carries an owned file, the boundary for empty-dir cleanup, and
+// the harness that owns it, so usage loads without re-resolving the harness.
 type sessionRef struct {
 	path       string
 	group      string
+	harness    string
 	root       string
 	rootTarget string
 	owner      func(*bufio.Reader) (string, error)
@@ -466,7 +478,7 @@ func (s *sessionScan) add(a agent, base, target, p string, d fs.DirEntry) error 
 	}
 	key := canonical(cwd)
 	s.idx[key] = append(s.idx[key], sessionRef{
-		path: p, group: sessionGroup(base, p), root: base, rootTarget: target, owner: a.sessionOwner,
+		path: p, group: sessionGroup(base, p), harness: a.name, root: base, rootTarget: target, owner: a.sessionOwner,
 	})
 	return nil
 }
@@ -535,6 +547,225 @@ func sessionMtime(p string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("session is not a regular file: %s", p)
 	}
 	return info.ModTime(), nil
+}
+
+// parsedSession pairs one readable session's events with its fold inputs, so
+// buildUsage can parse every session before it folds any.
+type parsedSession struct {
+	harness string
+	events  []usageEvent
+	price   func(usageEvent) pricedEvent
+}
+
+// buildUsage parses a worktree's owned sessions once and aggregates cost/time.
+// cat is nil when no catalog is available: a catalog-rated harness then reports
+// unknown cost instead of a wrong number. subs is the run's credential proof; an
+// empty proof leaves every event at its list price, and a worktree-level metered
+// override drops the Claude proof for this worktree alone.
+func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
+	subs = subs.forWorktree(wtPath)
+	var u worktreeUsage
+	lost := map[string]bool{}
+	var firstErr error
+	dropped := 0
+	var sessions []parsedSession
+	for _, ref := range idx[canonical(wtPath)] {
+		a, ok := agentByName(ref.harness)
+		if !ok || a.parseUsage == nil {
+			continue
+		}
+		events, n, err := readUsage(a, ref.path)
+		if err != nil {
+			// A bad file sorts anywhere, so record the loss now and taint the
+			// total after folding, when even a good session listed later in the
+			// walk has folded.
+			lost[ref.harness] = true
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if n > 0 {
+			// The readable records still fold; the dropped ones only taint the
+			// total, so a partial sum never reads as exact.
+			lost[ref.harness] = true
+			dropped += n
+		}
+		sessions = append(sessions, parsedSession{harness: ref.harness, events: events, price: usagePricer(a, cat, subs)})
+	}
+	lists := make([][]usageEvent, len(sessions))
+	for i, s := range sessions {
+		lists[i] = s.events
+	}
+	// Spans fold the original events; only the billed winners carry cost. This
+	// keeps activity time independent of the session order and of what dedupe
+	// removes from a shared transcript.
+	billed := dedupeKeyedEvents(lists)
+	for i, s := range sessions {
+		u.addBilledSession(s.harness, s.events, billed[i], s.price)
+	}
+	markPartial(&u, lost)
+	return u, usageLossErr(firstErr, dropped)
+}
+
+// usageLossErr reports the session loss that makes a total partial: an
+// unreadable session, unreadable records, or both. One worktree-level warning
+// keeps a read-only run alive while still disclosing the loss.
+func usageLossErr(first error, dropped int) error {
+	switch {
+	case first != nil && dropped > 0:
+		return fmt.Errorf("%w; %d session record(s) dropped (bad JSON, timestamp, or oversized)", first, dropped)
+	case first != nil:
+		return first
+	case dropped > 0:
+		return fmt.Errorf("%d session record(s) dropped (bad JSON, timestamp, or oversized); totals are partial", dropped)
+	default:
+		return nil
+	}
+}
+
+// markPartial taints the total and each harness that kept some spans but also
+// lost a session or records, so a partial sum never looks exact. A harness with
+// no readable spans keeps no entry: a zero-span unknown would read as 0s active
+// instead of none, so the worktree-level flag carries that loss instead. Every
+// model in an affected harness is marked because the lost records may have
+// belonged to any of them; an unaffected harness stays exact.
+func markPartial(u *worktreeUsage, lost map[string]bool) {
+	if len(lost) == 0 {
+		return
+	}
+	u.partial = true
+	for name := range lost {
+		h, ok := u.harnesses[name]
+		if !ok {
+			continue
+		}
+		h.partial = true
+		h.cost.addUnknown()
+		for _, m := range h.models {
+			m.partial = true
+			m.cost.addUnknown()
+		}
+	}
+}
+
+func readUsage(a agent, path string) ([]usageEvent, int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = f.Close() }()
+	return a.parseUsage(bufio.NewReader(f))
+}
+
+// usagePricer resolves one event to its price pair and per-tier breakdown. The
+// list side is the pay-as-you-go price today's code reports; a proven
+// subscription replaces the billed side with the $0 marginal cost while the
+// list side stays visible. A Claude proof that still permits overage yields an
+// estimated zero only when the event priced something (a known nonzero list,
+// real tokens, or a self-priced cost); a zero-token event keeps the exact zero,
+// so an empty turn never reads estimated. The substitution reaches every tier,
+// so a covered event never shows a bare $0.00 beside a metered list per tier.
+// API-key and otherwise metered usage still bills, so a proven $0 never claims
+// the whole invoice.
+func usagePricer(a agent, cat catalog, subs subscriptions) func(usageEvent) pricedEvent {
+	return func(e usageEvent) pricedEvent {
+		p := listPrice(a, cat, e)
+		switch subs.coverage(a.name, e.provider, e.at) {
+		case coverageAllowance:
+			coverTiers(&p, knownZero)
+		case coverageOveragePossible:
+			if (p.total.list.known() && p.total.list.amount != 0) || e.tokens.total() > 0 || e.webSearch > 0 || e.cost != nil {
+				coverTiers(&p, estimatedZero)
+			} else {
+				coverTiers(&p, knownZero)
+			}
+		}
+		return p
+	}
+}
+
+// coverTiers replaces the billed side of the total and every priced tier with
+// the coverage zero, keeping the list side intact. The invariant: every cost
+// figure carries the billed/list pair, so a proven subscription discounts each
+// tier exactly as it discounts the total. A tier the event never priced stays
+// absent rather than becoming a spurious $0.00.
+func coverTiers(p *pricedEvent, zero func() money) {
+	p.total.billed = zero()
+	p.total.subscription = true
+	for i := range p.tiers {
+		if !p.tiers[i].list.any {
+			continue
+		}
+		p.tiers[i].billed = zero()
+		p.tiers[i].subscription = true
+	}
+}
+
+// listPrice resolves one event's pay-as-you-go price and per-tier breakdown: a
+// harness-supplied cost wins, a catalog-rated token record is priced from the
+// catalog, and everything else (including a catalog-rated record with no
+// catalog) is unknown.
+func listPrice(a agent, cat catalog, e usageEvent) pricedEvent {
+	switch {
+	case e.cost != nil:
+		return piPrice(e)
+	case a.catalogRated && cat != nil:
+		return cat.price(e)
+	default:
+		return unpriced()
+	}
+}
+
+// piPrice prices a self-reported Pi event: the record carries the total and,
+// in modern sessions, the per-class split. An older record with only the total
+// leaves every tier absent rather than inventing a breakdown.
+func piPrice(e usageEvent) pricedEvent {
+	var p pricedEvent
+	p.total.list.addKnown(*e.cost)
+	if c := e.tierCost; c != nil {
+		addKnownClass(&p.tiers[tierInput].list, c.input)
+		addKnownClass(&p.tiers[tierOutput].list, c.output)
+		addKnownClass(&p.tiers[tierCacheRead].list, c.cacheRead)
+		addKnownClass(&p.tiers[tierCacheWrite].list, c.cacheWrite)
+	}
+	for i := range p.tiers {
+		p.tiers[i].billed = p.tiers[i].list
+	}
+	p.total.billed = p.total.list
+	return p
+}
+
+// addKnownClass records a harness-reported class price. A nil field leaves the
+// tier untouched, which reads as absent, never as a real zero.
+func addKnownClass(m *money, v *float64) {
+	if v != nil {
+		m.addKnown(*v)
+	}
+}
+
+// agentByName resolves a session owner to its descriptor.
+func agentByName(name string) (agent, bool) {
+	for _, a := range agents() {
+		if a.name == name {
+			return a, true
+		}
+	}
+	return agent{}, false
+}
+
+// hasHarness reports whether any of the given worktrees owns a session from
+// the named harness. Status uses it to load the catalog only when it can be
+// needed, so a Pi-only repo never touches the network.
+func (idx sessionIndex) hasHarness(wts []worktree, name string) bool {
+	for _, w := range wts {
+		for _, r := range idx[canonical(w.Path)] {
+			if r.harness == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // purgeSessions deletes only confirmed owned files. Unknown and unrelated

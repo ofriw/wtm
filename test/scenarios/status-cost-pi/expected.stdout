@@ -1,0 +1,74 @@
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -      -  ACTIVE  -     -
+/SBX/wt    wt      -         2020-01-01  6y 2d  1h 40m  $5.15  ACTIVE  -     -
+
+current worktree  /SBX/repo
+age               6y 2d
+active time       -
+cost              -
+no agent usage recorded
+[
+  {
+    "path": "/SBX/repo",
+    "branch": "main",
+    "upstream": "",
+    "main": true,
+    "current": true,
+    "lastUsed": "2020-01-01T00:00:00Z",
+    "status": "ACTIVE",
+    "ageSeconds": 189388800,
+    "cost": null,
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    },
+    "temp": false,
+    "expiresAt": null
+  },
+  {
+    "path": "/SBX/wt",
+    "branch": "wt",
+    "upstream": "",
+    "main": false,
+    "current": false,
+    "lastUsed": "2020-01-01T00:00:00Z",
+    "status": "ACTIVE",
+    "ageSeconds": 189388800,
+    "cost": 5.15,
+    "activeSeconds": 6000,
+    "usage": {
+      "pi": {
+        "cost": 5.15,
+        "activeSeconds": 6000,
+        "models": {
+          "deepseek-flash": {
+            "cost": 4,
+            "activeSeconds": 2700
+          },
+          "gpt-6": {
+            "cost": 0.25,
+            "activeSeconds": 0
+          },
+          "grok-4.3": {
+            "cost": 0.6,
+            "activeSeconds": 600
+          },
+          "legacy-child": {
+            "cost": 0.3,
+            "activeSeconds": 0
+          }
+        }
+      }
+    },
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    },
+    "temp": false,
+    "expiresAt": null
+  }
+]

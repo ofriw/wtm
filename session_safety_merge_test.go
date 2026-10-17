@@ -151,7 +151,7 @@ func TestSharedSessionSafetyRootMustBeDirectory(t *testing.T) {
 
 func TestSharedSessionSafetyEvidenceAge(t *testing.T) {
 	known := time.Unix(2_000_000, 0)
-	for _, age := range []time.Time{time.Time{}, known.Add(time.Second), known, known.Add(-time.Second)} {
+	for _, age := range []time.Time{{}, known.Add(time.Second), known, known.Add(-time.Second)} {
 		want := age.IsZero() || age.After(known)
 		if got := (unverifiedSession{ModTime: age}).blocksRemoval(known); got != want {
 			t.Fatalf("activity at %s blocks %s = %v, want %v", age, known, got, want)
