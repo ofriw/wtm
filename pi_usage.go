@@ -85,7 +85,11 @@ type piSpawnRoute struct {
 }
 
 type piSpawnStats struct {
-	Cost *float64 `json:"cost"`
+	Cost             *float64 `json:"cost"`
+	InputTokens      *int64   `json:"inputTokens"`
+	OutputTokens     *int64   `json:"outputTokens"`
+	CacheReadTokens  *int64   `json:"cacheReadTokens"`
+	CacheWriteTokens *int64   `json:"cacheWriteTokens"`
 }
 
 // piSpawnResult is one child in an older spawn result. Only the usage block is
@@ -94,11 +98,15 @@ type piSpawnResult struct {
 	Usage *piSpawnUsage `json:"usage"`
 }
 
-// piSpawnUsage is an older child's own billing: the model that answered and the
-// cost Pi computed for it.
+// piSpawnUsage is an older child's own billing: the model that answered, the
+// cost Pi computed for it, and its token counts.
 type piSpawnUsage struct {
-	Model string   `json:"model"`
-	Cost  *float64 `json:"cost"`
+	Model      string   `json:"model"`
+	Cost       *float64 `json:"cost"`
+	Input      *int64   `json:"input"`
+	Output     *int64   `json:"output"`
+	CacheRead  *int64   `json:"cacheRead"`
+	CacheWrite *int64   `json:"cacheWrite"`
 }
 
 // piUsageEvents parses one Pi session into cost/time events, reporting how many
@@ -246,11 +254,6 @@ func piMessageModel(msg *piMessage) string {
 	return msg.Model
 }
 
-// appendPiSpawn records the child-agent cost Pi reports on the parent's spawn
-// result. The child runs in memory, so this is the only record of it. A failed
-// spawn is still an event: it carries a known-zero cost when it reports neither
-// a child nor a cost, so it cannot poison the total. A non-error child with no
-// cost stays an unknown-cost event (design open item).
 // piSpawnChild is one spawned child's billing facts.
 type piSpawnChild struct {
 	model    string
@@ -259,14 +262,18 @@ type piSpawnChild struct {
 }
 
 // appendPiSpawn records one event per child Pi reports on the parent's spawn
-// result, so a batch spawn that mixed models prices each on its own model.
+	tokens   promptTokens
+// result. The child runs in memory, so this is its only record. A failed spawn
+// that reports neither a child nor a cost is a known-zero event, so it cannot
+// poison the total; a non-error child with no cost stays unknown-cost. A batch
+// that mixed models prices each child on its own model.
 func appendPiSpawn(events *[]usageEvent, at time.Time, id string, current, provider string, msg *piMessage, spawnAt map[string]time.Time) {
 	// Pair every child with its tool call so its running time counts. A missing
 	// call (older session) or a result before the call degrades to a point event.
 	start, paired := spawnAt[msg.ToolCallID]
 	paired = paired && !start.After(at)
 	for i, child := range piSpawnChildren(current, provider, msg) {
-		e := usageEvent{at: at, model: child.model, provider: child.provider, cost: child.cost, end: at}
+		e := usageEvent{at: at, model: child.model, provider: child.provider, cost: child.cost, tokens: child.tokens, end: at}
 		if paired {
 			e.at, e.end = start, at
 		}
@@ -285,14 +292,15 @@ func piSpawnChildren(current, provider string, msg *piMessage) []piSpawnChild {
 	if d := msg.Details; d != nil && len(d.Results) > 0 {
 		children := make([]piSpawnChild, 0, len(d.Results))
 		for _, r := range d.Results {
-			model, cost := "", (*float64)(nil)
+			model, cost, tokens := "", (*float64)(nil), promptTokens{}
 			if r.Usage != nil {
 				model, cost = r.Usage.Model, r.Usage.Cost
 			}
 			// An older result carries no route, so the child proves nothing: it
 			// keeps an empty provider, which piProven rejects, instead of
+				tokens = piSpawnUsageTokens(r.Usage)
 			// inheriting the parent's subscription.
-			children = append(children, piSpawnChild{model: piChildModel(model, current), provider: "", cost: cost})
+			children = append(children, piSpawnChild{model: piChildModel(model, current), provider: "", cost: cost, tokens: tokens})
 		}
 		return children
 	}
@@ -302,7 +310,7 @@ func piSpawnChildren(current, provider string, msg *piMessage) []piSpawnChild {
 		zero := 0.0
 		cost = &zero
 	}
-	return []piSpawnChild{{model: piSpawnModel(current, msg), provider: piChildProvider(provider, msg), cost: cost}}
+	return []piSpawnChild{{model: piSpawnModel(current, msg), provider: piChildProvider(provider, msg), cost: cost, tokens: spawnTokens(msg)}}
 }
 
 // piSpawnModel is the child's model: Pi records it on the result, and a result
@@ -352,6 +360,46 @@ func spawnCost(msg *piMessage) *float64 {
 // addPiEvent records one Pi usage; a missing cost.total is a priced-unknown
 // event that still counts toward active time.
 func addPiEvent(events *[]usageEvent, at time.Time, id string, model, provider string, u *piUsage) {
+// spawnTokens chooses one token source for a modern single child: details.stats
+// first, then the tool-result usage. The two describe the same child, so adding
+// both would double count it.
+func spawnTokens(msg *piMessage) promptTokens {
+	if msg.Details != nil {
+		if tokens, ok := piSpawnStatsTokens(msg.Details.Stats); ok {
+			return tokens
+		}
+	}
+	return piTokens(msg.Usage)
+}
+
+// piSpawnStatsTokens reads the modern spawn token shape. ok is false when the
+// stats block records no token class, so the caller can fall back.
+func piSpawnStatsTokens(s *piSpawnStats) (promptTokens, bool) {
+	if s == nil || (s.InputTokens == nil && s.OutputTokens == nil && s.CacheReadTokens == nil && s.CacheWriteTokens == nil) {
+		return promptTokens{}, false
+	}
+	return promptTokens{
+		input:        derefInt(s.InputTokens),
+		output:       derefInt(s.OutputTokens),
+		cacheRead:    derefInt(s.CacheReadTokens),
+		cacheWrite5m: derefInt(s.CacheWriteTokens),
+	}, true
+}
+
+// piSpawnUsageTokens reads the legacy per-child token shape. Each child owns its
+// own usage block, so there is no parent aggregate to fall back to.
+func piSpawnUsageTokens(u *piSpawnUsage) promptTokens {
+	if u == nil {
+		return promptTokens{}
+	}
+	return promptTokens{
+		input:        derefInt(u.Input),
+		output:       derefInt(u.Output),
+		cacheRead:    derefInt(u.CacheRead),
+		cacheWrite5m: derefInt(u.CacheWrite),
+	}
+}
+
 	if u == nil {
 		return
 	}
@@ -374,6 +422,9 @@ func piTokens(u *piUsage) promptTokens {
 	return promptTokens{
 		input:        derefInt(u.Input),
 		output:       derefInt(u.Output),
+	if u == nil {
+		return promptTokens{}
+	}
 		cacheRead:    derefInt(u.CacheRead),
 		cacheWrite5m: derefInt(u.CacheWrite),
 	}

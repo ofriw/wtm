@@ -137,14 +137,3 @@ func classifyCacheWrite(t *promptTokens, u *claudeUsage) {
 		t.unclassifiedCacheWrite = total - t.cacheWrite5m - t.cacheWrite1h
 	}
 }
-
-func (t promptTokens) total() int64 {
-	return t.input + t.output + t.cacheRead + t.cacheWrite5m + t.cacheWrite1h + t.unclassifiedCacheWrite
-}
-
-func derefInt(p *int64) int64 {
-	if p == nil {
-		return 0
-	}
-	return *p
-}

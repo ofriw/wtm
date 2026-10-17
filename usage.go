@@ -285,6 +285,21 @@ type promptTokens struct {
 	unclassifiedCacheWrite int64
 }
 
+// total is the sum of every token class, for dedupe scoring and the empty-tier
+// test. It is not the prompt size; context() is.
+func (t promptTokens) total() int64 {
+	return t.input + t.output + t.cacheRead + t.cacheWrite5m + t.cacheWrite1h + t.unclassifiedCacheWrite
+}
+
+// derefInt reads an optional JSON count; absent means zero, never a negative
+// sentinel. Parsers use it so one missing field cannot fail a record.
+func derefInt(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
 // context is the request's input size (every prompt token: fresh, written and
 // cached), used for the long-context rate and as the hit-rate denominator.
 func (t promptTokens) context() int64 {

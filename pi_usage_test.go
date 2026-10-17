@@ -78,11 +78,44 @@ func TestPiModelFallbackFromModelChange(t *testing.T) {
 // details.stats, with equal values. The child must appear as one event.
 func TestPiSpawnCountsOnce(t *testing.T) {
 	events := parsePi(t,
-		`{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"toolResult","toolName":"spawn","usage":{"cost":{"total":0.25}},"details":{"model":"m-child","stats":{"cost":0.25}}}}`)
+		`{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"toolResult","toolName":"spawn","usage":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"cost":{"total":0.25}},"details":{"model":"m-child","stats":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":20,"cacheWriteTokens":10,"cost":0.25}}}}`)
 	if len(events) != 1 {
 		t.Fatalf("got %d events, want 1: %+v", len(events), events)
 	}
 	assertPiEvent(t, events[0], "m-child", fptr(0.25))
+	// The two shapes describe one child: stats wins, never the sum.
+	if got, want := events[0].tokens, (promptTokens{input: 100, output: 50, cacheRead: 20, cacheWrite5m: 10}); got != want {
+		t.Errorf("tokens = %+v, want %+v", got, want)
+	}
+}
+
+// TestPiSpawnModernStatsTokens pins the modern token shape when the tool-result
+// usage carries no token counts.
+func TestPiSpawnModernStatsTokens(t *testing.T) {
+	events := parsePi(t,
+		`{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"toolResult","toolName":"spawn","details":{"model":"m-child","stats":{"inputTokens":1000,"outputTokens":200,"cacheReadTokens":300,"cacheWriteTokens":40,"cost":0.7}}}}`)
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1: %+v", len(events), events)
+	}
+	if got, want := events[0].tokens, (promptTokens{input: 1000, output: 200, cacheRead: 300, cacheWrite5m: 40}); got != want {
+		t.Errorf("tokens = %+v, want %+v", got, want)
+	}
+}
+
+// TestPiSpawnStatsCostOnlyFallsBackToUsageTokens pins the single-source rule:
+// when stats records no token class, the tool-result usage supplies the child's
+// tokens, and the stats cost still prices it.
+func TestPiSpawnStatsCostOnlyFallsBackToUsageTokens(t *testing.T) {
+	events := parsePi(t,
+		`{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"toolResult","toolName":"spawn","usage":{"input":7,"output":3,"cacheRead":5,"cacheWrite":2,"cost":{"total":0.9}},"details":{"model":"m-child","stats":{"cost":0.4}}}}`)
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1: %+v", len(events), events)
+	}
+	// stats wins the cost; usage supplies the missing token classes.
+	assertPiEvent(t, events[0], "m-child", fptr(0.4))
+	if got, want := events[0].tokens, (promptTokens{input: 7, output: 3, cacheRead: 5, cacheWrite5m: 2}); got != want {
+		t.Errorf("tokens = %+v, want %+v", got, want)
+	}
 }
 
 // TestPiSpawnLegacyResultsSchema pins the older Pi shape: a spawn result writes
@@ -91,12 +124,15 @@ func TestPiSpawnCountsOnce(t *testing.T) {
 func TestPiSpawnLegacyResultsSchema(t *testing.T) {
 	events := parsePi(t,
 		`{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"assistant","model":"m-parent","content":[{"type":"toolCall","id":"c1","name":"spawn"}],"usage":{"cost":{"total":0.05}}}}`,
-		`{"type":"message","timestamp":"2026-01-01T00:00:35Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"spawn","details":{"mode":"spawn","results":[{"prompt":"p","usage":{"model":"m-child","cost":0.7},"output":"o"}]}}}`)
+		`{"type":"message","timestamp":"2026-01-01T00:00:35Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"spawn","details":{"mode":"spawn","results":[{"prompt":"p","usage":{"model":"m-child","cost":0.7,"input":100,"output":50,"cacheRead":20,"cacheWrite":10},"output":"o"}]}}}`)
 	if len(events) != 2 {
 		t.Fatalf("got %d events, want 2: %+v", len(events), events)
 	}
 	spawn := events[1]
 	assertPiEvent(t, spawn, "m-child", fptr(0.7))
+	if got, want := spawn.tokens, (promptTokens{input: 100, output: 50, cacheRead: 20, cacheWrite5m: 10}); got != want {
+		t.Errorf("tokens = %+v, want %+v", got, want)
+	}
 	if !spawn.at.Equal(at(5)) || !spawn.end.Equal(at(35)) {
 		t.Errorf("spawn span = %v..%v, want 00:00:05..00:00:35", spawn.at, spawn.end)
 	}
@@ -123,12 +159,45 @@ func TestPiSpawnLegacyChildProvesNothing(t *testing.T) {
 // child, each on its own model, so no child is summed into another's row.
 func TestPiSpawnLegacyBatch(t *testing.T) {
 	events := parsePi(t,
-		`{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"toolResult","toolName":"spawn","details":{"mode":"spawn","results":[{"usage":{"model":"m-a","cost":0.1}},{"usage":{"model":"m-b","cost":0.2}}]}}}`)
+		`{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"toolResult","toolName":"spawn","details":{"mode":"spawn","results":[{"usage":{"model":"m-a","cost":0.1,"input":100,"output":10}},{"usage":{"model":"m-b","cost":0.2,"input":200,"output":20}}]}}}`)
 	if len(events) != 2 {
 		t.Fatalf("got %d events, want 2: %+v", len(events), events)
 	}
 	assertPiEvent(t, events[0], "m-a", fptr(0.1))
 	assertPiEvent(t, events[1], "m-b", fptr(0.2))
+	if got, want := events[0].tokens, (promptTokens{input: 100, output: 10}); got != want {
+		t.Errorf("m-a tokens = %+v, want %+v", got, want)
+	}
+	if got, want := events[1].tokens, (promptTokens{input: 200, output: 20}); got != want {
+		t.Errorf("m-b tokens = %+v, want %+v", got, want)
+	}
+}
+
+// TestPiSpawnTokensFoldIntoWorktree pins the downstream contract: child tokens
+// reach the model rows, the worktree token total, the cache hit rate, and the
+// input:output ratio.
+func TestPiSpawnTokensFoldIntoWorktree(t *testing.T) {
+	events := parsePi(t,
+		`{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"toolResult","toolName":"spawn","details":{"mode":"spawn","results":[{"usage":{"model":"m-a","cost":0.1,"input":100,"output":10,"cacheRead":50,"cacheWrite":5}},{"usage":{"model":"m-b","cost":0.2,"input":200,"output":20}}]}}}`)
+	var u worktreeUsage
+	u.addSession("pi", events, pairPricer(func(e usageEvent) money {
+		var m money
+		if e.cost != nil {
+			m.addKnown(*e.cost)
+		}
+		return m
+	}))
+	got := u.tokens()
+	want := promptTokens{input: 300, output: 30, cacheRead: 50, cacheWrite5m: 5}
+	if got != want {
+		t.Errorf("worktree tokens = %+v, want %+v", got, want)
+	}
+	if rate, ok := got.hitRate(); !ok || formatPercent(rate) != "14.1%" {
+		t.Errorf("hit rate = %v/%v, want 14.1%%", rate, ok)
+	}
+	if ratio, ok := got.outputRatio(got.context()); !ok || formatRatio(ratio) != "11.8:1" {
+		t.Errorf("input:output ratio = %v/%v, want 11.8:1", ratio, ok)
+	}
 }
 
 // TestPiSpawnLegacyIdenticalChildrenKeepBoth pins the dedupe discriminator: two
@@ -254,6 +323,9 @@ func TestPiSpawnLegacyResultWithoutCost(t *testing.T) {
 		t.Fatalf("got %d events, want 2: %+v", len(events), events)
 	}
 	assertPiEvent(t, events[1], "m-parent", nil)
+	if events[1].tokens.total() != 0 {
+		t.Errorf("cost-only legacy child tokens = %+v, want none", events[1].tokens)
+	}
 }
 
 // TestPiSpawnRoutedProvider pins the child's billing provider: Pi records the
@@ -551,7 +623,7 @@ func TestPiIdlessSameTimestampCollisionBillsOnce(t *testing.T) {
 // record id still dedupes across sessions — the content fallback plus the child
 // index is the identity — so a repeated transcript bills each child once.
 func TestPiSpawnWithoutIDCrossSessionBillsOnce(t *testing.T) {
-	line := `{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"toolResult","toolName":"spawn","details":{"mode":"spawn","results":[{"usage":{"model":"m-a","cost":0.1}},{"usage":{"model":"m-b","cost":0.2}}]}}}`
+	line := `{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"toolResult","toolName":"spawn","details":{"mode":"spawn","results":[{"usage":{"model":"m-a","cost":0.1,"input":100,"output":10,"cacheRead":5,"cacheWrite":2}},{"usage":{"model":"m-b","cost":0.2,"input":200,"output":20}}]}}}`
 	a := parsePi(t, line)
 	b := parsePi(t, line)
 	if len(a) != 2 || len(b) != 2 {
@@ -594,6 +666,10 @@ func TestPiUsageTokensAndTierCost(t *testing.T) {
 	}
 	assertPiEvent(t, e, "m", fptr(0.34))
 	if e.tierCost == nil {
+	wantTokens := promptTokens{input: 300, output: 30, cacheRead: 5, cacheWrite5m: 2}
+	if got := u.tokens(); got != wantTokens {
+		t.Fatalf("tokens = %+v, want %+v (each child folds once)", got, wantTokens)
+	}
 		t.Fatal("tierCost = nil, want the record's per-class prices")
 	}
 	for _, tc := range []struct {
