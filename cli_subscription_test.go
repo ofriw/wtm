@@ -23,8 +23,9 @@ func subscriptionBinaryRepo(t *testing.T) (string, sandboxEnv) {
 	t.Helper()
 	env := sandbox(t)
 	pinRates(t)
-	// Keep the external contract independent of the production override list.
-	for _, key := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"} {
+	// sandbox already clears the production rule list; this keeps the binary
+	// test explicit if the sandbox changes.
+	for _, key := range claudeMeteredKeys() {
 		t.Setenv(key, "")
 	}
 	writeClaudeAccount(t, "stripe_subscription", "2025-01-01T00:00:00Z")

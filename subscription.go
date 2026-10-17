@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -138,10 +139,68 @@ func readClaudeSubscription() (bool, time.Time, bool) {
 	return true, parseSubscriptionSince(acct.OAuthAccount.SubscriptionCreatedAt), allowanceOnly
 }
 
-// claudeMeteredKeys are the environment keys that bill Claude Code outside the
-// subscription. This list is the SSOT for the process environment, a settings
-// file's env block, and the test sandbox.
-var claudeMeteredKeys = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"}
+// claudeMeteredRule is one configured value that bills Claude Code outside the
+// subscription. presenceOnly keys void coverage when non-empty; provider
+// switches use Claude's boolean grammar, so a disabled flag keeps coverage.
+type claudeMeteredRule struct {
+	key          string
+	presenceOnly bool
+}
+
+// claudeMeteredRules is the SSOT for the process environment, a settings file's
+// env block, the managed settings file, and the test sandbox.
+var claudeMeteredRules = []claudeMeteredRule{
+	{key: "ANTHROPIC_API_KEY", presenceOnly: true},
+	{key: "ANTHROPIC_AUTH_TOKEN", presenceOnly: true},
+	{key: "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", presenceOnly: true},
+	{key: "CLAUDE_CODE_USE_BEDROCK"},
+	{key: "CLAUDE_CODE_USE_VERTEX"},
+	{key: "CLAUDE_CODE_USE_FOUNDRY"},
+	{key: "CLAUDE_CODE_USE_ANTHROPIC_AWS"},
+	{key: "CLAUDE_CODE_USE_MANTLE"},
+}
+
+// claudeMeteredKeys lists every rule key for sandbox setup; it derives from the
+// rule table so a new mode cannot be missed.
+func claudeMeteredKeys() []string {
+	keys := make([]string, len(claudeMeteredRules))
+	for i, r := range claudeMeteredRules {
+		keys[i] = r.key
+	}
+	return keys
+}
+
+// claudeEnvTrue applies Claude Code's boolean grammar: trim, lowercase, and
+// accept only 1, true, yes, or on. Any other value, including 0 and false,
+// leaves a provider switch disabled.
+func claudeEnvTrue(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// claudeMeteredEnv applies the rule table to one environment view. A
+// presence-only key needs a non-empty value; a boolean key needs a true value.
+func claudeMeteredEnv(lookup func(string) (string, bool)) bool {
+	for _, r := range claudeMeteredRules {
+		v, ok := lookup(r.key)
+		if !ok {
+			continue
+		}
+		if r.presenceOnly {
+			if v != "" {
+				return true
+			}
+			continue
+		}
+		if claudeEnvTrue(v) {
+			return true
+		}
+	}
+	return false
+}
 
 // claudeSettings is the subset of a Claude settings file that changes billing:
 // apiKeyHelper always runs, and an env block can export a metered key.
@@ -160,12 +219,10 @@ func settingsMetered(path string) bool {
 	if s.APIKeyHelper != "" {
 		return true
 	}
-	for _, k := range claudeMeteredKeys {
-		if s.Env[k] != "" {
-			return true
-		}
-	}
-	return false
+	return claudeMeteredEnv(func(k string) (string, bool) {
+		v, ok := s.Env[k]
+		return v, ok
+	})
 }
 
 // claudeUserMetered reports a user settings file that bills outside the
@@ -262,12 +319,7 @@ func managedMetered() bool {
 // claudeMeteredOverride reports a process or user-level setting that bills
 // outside the subscription.
 func claudeMeteredOverride() bool {
-	for _, key := range claudeMeteredKeys {
-		if os.Getenv(key) != "" {
-			return true
-		}
-	}
-	return claudeUserMetered()
+	return claudeMeteredEnv(os.LookupEnv) || claudeUserMetered()
 }
 
 // parseSubscriptionSince reads the account's start mark; an absent or

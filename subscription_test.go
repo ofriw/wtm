@@ -446,6 +446,18 @@ func TestSubscriptionClaudeUnprovenStaysList(t *testing.T) {
 			t.Setenv("CLAUDE_CODE_USE_VERTEX", "1")
 			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
 		}},
+		"api key descriptor override": {func(t *testing.T) {
+			t.Setenv("CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "3")
+			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+		}},
+		"anthropic aws override": {func(t *testing.T) {
+			t.Setenv("CLAUDE_CODE_USE_ANTHROPIC_AWS", "1")
+			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+		}},
+		"mantle override": {func(t *testing.T) {
+			t.Setenv("CLAUDE_CODE_USE_MANTLE", "1")
+			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+		}},
 		"key helper": {func(t *testing.T) {
 			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
 			writeFile(t, filepath.Join(claudeAgent.configDir(), "settings.json"), `{"apiKeyHelper":"/bin/fetch"}`, 0o600)
@@ -461,6 +473,18 @@ func TestSubscriptionClaudeUnprovenStaysList(t *testing.T) {
 		"user settings env key": {func(t *testing.T) {
 			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
 			writeFile(t, filepath.Join(claudeAgent.configDir(), "settings.json"), `{"env":{"CLAUDE_CODE_USE_VERTEX":"1"}}`, 0o600)
+		}},
+		"settings api key descriptor": {func(t *testing.T) {
+			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+			writeFile(t, filepath.Join(claudeAgent.configDir(), "settings.local.json"), `{"env":{"CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR":"3"}}`, 0o600)
+		}},
+		"settings anthropic aws": {func(t *testing.T) {
+			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+			writeFile(t, filepath.Join(claudeAgent.configDir(), "settings.local.json"), `{"env":{"CLAUDE_CODE_USE_ANTHROPIC_AWS":"1"}}`, 0o600)
+		}},
+		"settings mantle": {func(t *testing.T) {
+			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+			writeFile(t, filepath.Join(claudeAgent.configDir(), "settings.local.json"), `{"env":{"CLAUDE_CODE_USE_MANTLE":"1"}}`, 0o600)
 		}},
 		"other billing type": {func(t *testing.T) {
 			writeClaudeAccount(t, "invoice", "2020-01-01T00:00:00Z")
@@ -485,6 +509,48 @@ func TestSubscriptionClaudeUnprovenStaysList(t *testing.T) {
 	}
 }
 
+// TestClaudeProviderFlagBooleanSemantics pins Claude's boolean grammar on both
+// proof paths: only 1/true/yes/on disable coverage; a disabled flag keeps it.
+func TestClaudeProviderFlagBooleanSemantics(t *testing.T) {
+	boolKeys := []string{
+		"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+		"CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+		"CLAUDE_CODE_USE_MANTLE",
+	}
+	values := []struct {
+		value string
+		true  bool
+	}{
+		{"", false}, {"0", false}, {"false", false}, {"no", false}, {"off", false},
+		{"1", true}, {"true", true}, {"yes", true}, {"on", true},
+		{" TRUE ", true}, {"  On  ", true}, {" FALSE ", false},
+	}
+	for _, key := range boolKeys {
+		for _, scope := range []string{"process", "settings"} {
+			for _, tc := range values {
+				t.Run(key+"/"+scope+"/"+tc.value, func(t *testing.T) {
+					sandbox(t)
+					writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+					if scope == "process" {
+						t.Setenv(key, tc.value)
+					} else {
+						path := filepath.Join(claudeAgent.configDir(), "settings.local.json")
+						writeFile(t, path, fmt.Sprintf(`{"env":{%q:%q}}`, key, tc.value), 0o600)
+					}
+					want := "$0.00/$0.10"
+					if tc.true {
+						want = "$0.10"
+					}
+					u := claudeUsageWorktree(t)
+					if got := u.cost().cell(); got != want {
+						t.Fatalf("%s=%q cost = %q, want %q", key, tc.value, got, want)
+					}
+				})
+			}
+		}
+	}
+}
+
 // TestSubscriptionClaudeProjectOverrideStaysList pins the repo-level rule:
 // Claude Code reads the worktree's own .claude/settings*.json, so an
 // apiKeyHelper or a metered env key there bills outside the subscription.
@@ -496,7 +562,10 @@ func TestSubscriptionClaudeProjectOverrideStaysList(t *testing.T) {
 		"helper settings":       {claudeSettingsFile, `{"apiKeyHelper":"/bin/fetch"}`},
 		"helper local settings": {claudeLocalSettingsFile, `{"apiKeyHelper":"/bin/fetch"}`},
 		"env api key":           {claudeSettingsFile, `{"env":{"ANTHROPIC_API_KEY":"sk-test"}}`},
+		"env key descriptor":    {claudeSettingsFile, `{"env":{"CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR":"3"}}`},
 		"env vertex":            {claudeLocalSettingsFile, `{"env":{"CLAUDE_CODE_USE_VERTEX":"1"}}`},
+		"env anthropic aws":     {claudeLocalSettingsFile, `{"env":{"CLAUDE_CODE_USE_ANTHROPIC_AWS":"1"}}`},
+		"env mantle":            {claudeLocalSettingsFile, `{"env":{"CLAUDE_CODE_USE_MANTLE":"1"}}`},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -512,6 +581,19 @@ func TestSubscriptionClaudeProjectOverrideStaysList(t *testing.T) {
 				t.Error("a repo override must omit listCost")
 			}
 		})
+	}
+}
+
+// TestSubscriptionClaudeProjectDisabledFlagStaysCovered pins the boolean grammar
+// on the repo path: a disabled provider switch keeps the account proof.
+func TestSubscriptionClaudeProjectDisabledFlagStaysCovered(t *testing.T) {
+	sandbox(t)
+	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+	dir, idx := claudeWorktreeDir(t)
+	writeFile(t, filepath.Join(dir, claudeLocalSettingsFile), `{"env":{"CLAUDE_CODE_USE_VERTEX":"false"}}`, 0o600)
+	u := buildClaudeUsage(t, dir, idx)
+	if got := u.cost().cell(); got != "$0.00/$0.10" {
+		t.Fatalf("cost = %q, want $0.00/$0.10 (a disabled switch keeps coverage)", got)
 	}
 }
 
@@ -570,8 +652,10 @@ func TestSubscriptionClaudeParentSettingsIgnored(t *testing.T) {
 // worktree's proof at once, since IT owns that file.
 func TestSubscriptionClaudeManagedOverrideStaysList(t *testing.T) {
 	cases := map[string]string{
-		"helper":  `{"apiKeyHelper":"/bin/fetch"}`,
-		"env key": `{"env":{"CLAUDE_CODE_USE_VERTEX":"1"}}`,
+		"helper":            `{"apiKeyHelper":"/bin/fetch"}`,
+		"env key":           `{"env":{"CLAUDE_CODE_USE_VERTEX":"1"}}`,
+		"env anthropic aws": `{"env":{"CLAUDE_CODE_USE_ANTHROPIC_AWS":"1"}}`,
+		"env mantle":        `{"env":{"CLAUDE_CODE_USE_MANTLE":"1"}}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -588,6 +672,20 @@ func TestSubscriptionClaudeManagedOverrideStaysList(t *testing.T) {
 				t.Error("a managed override must omit listCost")
 			}
 		})
+	}
+}
+
+// TestSubscriptionClaudeManagedDisabledFlagStaysCovered pins the boolean
+// grammar on the enterprise path: a disabled switch keeps coverage.
+func TestSubscriptionClaudeManagedDisabledFlagStaysCovered(t *testing.T) {
+	sandbox(t)
+	managed := filepath.Join(t.TempDir(), "managed-settings.json")
+	writeFile(t, managed, `{"env":{"CLAUDE_CODE_USE_MANTLE":"0"}}`, 0o600)
+	t.Setenv("WTM_MANAGED_SETTINGS", managed)
+	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+	u := claudeUsageWorktree(t)
+	if got := u.cost().cell(); got != "$0.00/$0.10" {
+		t.Fatalf("cost = %q, want $0.00/$0.10 (a disabled switch keeps coverage)", got)
 	}
 }
 

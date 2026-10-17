@@ -191,7 +191,7 @@ func sandbox(t *testing.T) sandboxEnv {
 	t.Setenv("CLAUDE_CONFIG_DIR", claude)
 	// A metered key in the caller's environment would turn every Claude proof
 	// unproven, so the sandbox clears the list the proof reads.
-	for _, k := range claudeMeteredKeys {
+	for _, k := range claudeMeteredKeys() {
 		t.Setenv(k, "")
 	}
 	// Replace the managed-settings path list with none, so a host's real
