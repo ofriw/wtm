@@ -90,15 +90,8 @@ func readPiOAuth(path string) map[string]bool {
 // The suffix is "-custom-oauth" when a custom OAuth endpoint is configured.
 // It returns false when neither HOME nor the config dir is resolvable.
 func claudeAccountFile() (string, bool) {
-	configDir := claudeAgent.configDir()
-	if configDir != "" {
-		if primary := filepath.Join(configDir, ".config.json"); exists(primary) {
-			return primary, true
-		}
-	}
-	suffix := ""
-	if os.Getenv("CLAUDE_CODE_CUSTOM_OAUTH_URL") != "" {
-		suffix = "-custom-oauth"
+	if primary, ok := claudePrimaryAccountFile(); ok {
+		return primary, true
 	}
 	base := os.Getenv("CLAUDE_CONFIG_DIR")
 	if base == "" {
@@ -108,7 +101,26 @@ func claudeAccountFile() (string, bool) {
 		}
 		base = home
 	}
-	return filepath.Join(base, ".claude"+suffix+".json"), true
+	return filepath.Join(base, ".claude"+claudeAccountSuffix()+".json"), true
+}
+
+// claudePrimaryAccountFile is the config-dir .config.json, which wins over the
+// suffixed file whenever it exists.
+func claudePrimaryAccountFile() (string, bool) {
+	configDir := claudeAgent.configDir()
+	if configDir == "" {
+		return "", false
+	}
+	primary := filepath.Join(configDir, ".config.json")
+	return primary, exists(primary)
+}
+
+// claudeAccountSuffix marks the account file a custom OAuth endpoint writes.
+func claudeAccountSuffix() string {
+	if os.Getenv("CLAUDE_CODE_CUSTOM_OAUTH_URL") != "" {
+		return "-custom-oauth"
+	}
+	return ""
 }
 
 // readClaudeSubscription proves the Claude Code subscription: the account must
@@ -296,15 +308,20 @@ func managedSettingsPaths() []string {
 		}
 		return paths
 	}
+	return defaultManagedSettingsPaths()
+}
+
+// defaultManagedSettingsPaths lists the OS managed-settings locations in the
+// order Claude Code reads them: Unix paths first, then the Windows dirs.
+func defaultManagedSettingsPaths() []string {
 	paths := []string{
 		"/etc/claude-code/managed-settings.json",
 		"/Library/Application Support/ClaudeCode/managed-settings.json",
 	}
-	if d := os.Getenv("ProgramFiles"); d != "" {
-		paths = append(paths, filepath.Join(d, "ClaudeCode", "managed-settings.json"))
-	}
-	if d := os.Getenv("ProgramData"); d != "" {
-		paths = append(paths, filepath.Join(d, "ClaudeCode", "managed-settings.json"))
+	for _, env := range []string{"ProgramFiles", "ProgramData"} {
+		if d := os.Getenv(env); d != "" {
+			paths = append(paths, filepath.Join(d, "ClaudeCode", "managed-settings.json"))
+		}
 	}
 	return paths
 }
@@ -421,18 +438,32 @@ func (s subscriptions) forWorktree(root string) subscriptions {
 		s.claude = !s.managed && !claudeProjectMetered(root)
 		return s
 	}
-	if s.wtVerdicts != nil {
-		if v, ok := s.wtVerdicts[root]; ok {
-			s.claude = v
-			return s
-		}
+	if v, ok := s.cachedWorktreeVerdict(root); ok {
+		s.claude = v
+		return s
 	}
+	s.claude = s.cleanWorktreeVerdict(root)
+	return s
+}
+
+// cachedWorktreeVerdict returns a verdict already computed for root this run.
+// A nil cache is a zero-value proof and reports a miss.
+func (s subscriptions) cachedWorktreeVerdict(root string) (bool, bool) {
+	if s.wtVerdicts == nil {
+		return false, false
+	}
+	v, ok := s.wtVerdicts[root]
+	return v, ok
+}
+
+// cleanWorktreeVerdict walks the repo and ancestor settings once and caches the
+// result, so a multi-worktree run pays for each chain only once.
+func (s subscriptions) cleanWorktreeVerdict(root string) bool {
 	v := !s.managed && !claudeProjectMetered(root) && !claudeParentsMetered(root)
 	if s.wtVerdicts != nil {
 		s.wtVerdicts[root] = v
 	}
-	s.claude = v
-	return s
+	return v
 }
 
 // claudeProven bounds the account proof by the subscription start: an event
