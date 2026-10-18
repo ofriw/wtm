@@ -70,31 +70,58 @@ func secondaryValue(v string) bool { return v == "-" || v == "unknown" }
 // truecolor/NO_COLOR) degrades cleanly. UNUSED is Yellow, not Red: it is the
 // gc candidate, not an error.
 func statusCellStyle(header, value string) lipgloss.Style {
-	switch header {
-	case "STATUS":
-		if value == "ACTIVE" {
-			return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Green)
-		}
-		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
-	case "TEMP":
-		return tempCellStyle(value)
-	case "UPSTREAM":
-		return booleanStyle(value != "-")
-	case "COST", "LIST":
-		// A number is the signal; "unknown" and "-" are non-values and recede.
-		if secondaryValue(value) {
-			return lipgloss.NewStyle().Faint(true)
-		}
-	case "BRANCH", "LAST USED":
-		if value == "(detached)" || value == "never" {
-			return lipgloss.NewStyle().Faint(true)
-		}
+	if style, ok := statusColumnStyle(header, value); ok {
+		return style
 	}
 	// Capability columns only appear in the opt-in --wide view.
 	if isCapabilityHeader(header) {
 		return capabilityCellStyle(value)
 	}
 	return lipgloss.NewStyle()
+}
+
+// statusColumnStyle maps the fixed status columns. The ok result is false when
+// the header has no rule, so the caller can fall through to the capability
+// columns.
+func statusColumnStyle(header, value string) (lipgloss.Style, bool) {
+	switch header {
+	case "STATUS":
+		return statusWordStyle(value), true
+	case "TEMP":
+		return tempCellStyle(value), true
+	case "UPSTREAM":
+		return booleanStyle(value != "-"), true
+	case "COST", "LIST", "BRANCH", "LAST USED":
+		return secondaryColumnStyle(header, value)
+	}
+	return lipgloss.Style{}, false
+}
+
+// statusWordStyle colors the STATUS word: ACTIVE is live, anything else is the
+// gc candidate.
+func statusWordStyle(value string) lipgloss.Style {
+	if value == "ACTIVE" {
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Green)
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+}
+
+// secondaryColumnStyle fades a COST/LIST non-value and a stale BRANCH/LAST USED
+// marker; any other value stays plain. The ok result is false so the caller can
+// try the capability columns.
+func secondaryColumnStyle(header, value string) (lipgloss.Style, bool) {
+	switch header {
+	case "COST", "LIST":
+		// A number is the signal; "unknown" and "-" are non-values and recede.
+		if secondaryValue(value) {
+			return lipgloss.NewStyle().Faint(true), true
+		}
+	case "BRANCH", "LAST USED":
+		if value == "(detached)" || value == "never" {
+			return lipgloss.NewStyle().Faint(true), true
+		}
+	}
+	return lipgloss.Style{}, false
 }
 
 // capabilityCellStyle maps a --wide capability cell. The state word is the
@@ -464,9 +491,18 @@ func columnWidths(headers []string, rows [][]string, budget int) []int {
 	registry := columnRegistry()
 	priority := dynamicShrinkPriority(headers, registry)
 	floors := dynamicShrinkFloor(headers, registry)
-	// An unelidable column must not be cut, so it is excluded from both shrink
-	// passes; when the budget still overflows, dropOverflowColumns drops it
-	// whole instead of rendering a truncated value.
+	unelidable := collectUnelidableFloors(headers, widths, registry, floors)
+	over := shrinkToFloors(headers, widths, priority, floors, budget)
+	over = shrinkToHeaders(headers, widths, priority, unelidable, over)
+	dropOverflowColumns(headers, widths, priority, budget, over)
+	return widths
+}
+
+// collectUnelidableFloors pins each unelidable column at its natural width and
+// returns the exclusion set both shrink passes honor. An unelidable column must
+// not be cut, so when the budget still overflows, dropOverflowColumns drops it
+// whole instead of rendering a truncated value.
+func collectUnelidableFloors(headers []string, widths []int, registry map[string]worktreeColumn, floors map[string]int) map[string]bool {
 	unelidable := map[string]bool{}
 	for i, h := range headers {
 		if c, ok := registry[h]; ok && c.unelidable {
@@ -474,10 +510,7 @@ func columnWidths(headers []string, rows [][]string, budget int) []int {
 			floors[h] = max(floors[h], widths[i])
 		}
 	}
-	over := shrinkToFloors(headers, widths, priority, floors, budget)
-	over = shrinkToHeaders(headers, widths, priority, unelidable, over)
-	dropOverflowColumns(headers, widths, priority, budget, over)
-	return widths
+	return unelidable
 }
 
 // shrinkToHeaders is the fallback after the declared floors: a column may give

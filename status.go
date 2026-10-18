@@ -490,12 +490,17 @@ func cmdStatus(g *globals, args []string) error {
 	if g.json {
 		return printStatusJSON(ws.wts, now, ws.ttl, current)
 	}
+	renderStatus(ws, wide, now, current, g.color)
+	return nil
+}
+
+// renderStatus prints the table, its legend then the detail block in that order.
+func renderStatus(ws workspace, wide bool, now time.Time, current, colorMode string) {
 	budget := widthBudget()
 	cols := statusSchema(wide, ws.wts)
-	printStatusTable(cols, ws.wts, now, ws.ttl, g.color, budget)
-	printCostLegend(costLegendNeeded(cols, ws.wts, current, now, ws.ttl, budget), g.color, budget)
-	printStatusDetail(ws.wts, current, now, g.color, budget)
-	return nil
+	printStatusTable(cols, ws.wts, now, ws.ttl, colorMode, budget)
+	printCostLegend(costLegendNeeded(cols, ws.wts, current, now, ws.ttl, budget), colorMode, budget)
+	printStatusDetail(ws.wts, current, now, colorMode, budget)
 }
 
 // parseStatusFlags parses and validates the status flags. --wide shapes only
@@ -539,29 +544,39 @@ func nowFunc() time.Time {
 // reaches the network. An unreadable session degrades to a warning: status is
 // read-only and must still report what it knows.
 func (ws *workspace) loadUsage() {
-	var cat catalog
-	if ws.idx.hasHarness(ws.wts, claudeAgent.name) {
-		c, err := loadCatalog()
-		if err != nil {
-			warnf("claude cost unavailable: %s", err)
-			// cat stays nil: every harness will report unknown, which is the honest
-			// answer when no catalog is available at all.
-		} else {
-			cat = c
-		}
-	}
+	cat := ws.usageCatalog()
 	// Read the credential proof once: it is a per-run snapshot, not per-worktree.
 	subs := loadSubscriptions()
 	for i := range ws.wts {
-		u, err := buildUsage(ws.wts[i].Path, ws.idx, cat, subs)
-		if err != nil {
-			warnf("usage for %s: %s", displayPath(ws.wts[i].Path), err)
-		}
-		if u.hasEvents() || u.partial {
-			// A worktree whose every session was unreadable keeps its usage so
-			// the loss reads as unknown, never as no usage.
-			ws.wts[i].Usage = &u
-		}
+		ws.attachUsage(i, cat, subs)
+	}
+}
+
+// usageCatalog loads the price catalog only for a repo with Claude sessions, so
+// a Pi-only repo never reaches the network.
+func (ws *workspace) usageCatalog() catalog {
+	if !ws.idx.hasHarness(ws.wts, claudeAgent.name) {
+		return nil
+	}
+	cat, err := loadCatalog()
+	if err != nil {
+		warnf("claude cost unavailable: %s", err)
+		// A nil catalog makes every harness report unknown, which is the honest
+		// answer when no catalog is available at all.
+		return nil
+	}
+	return cat
+}
+
+// attachUsage stores one worktree's usage, keeping a total loss so the loss
+// reads as unknown, never as no usage.
+func (ws *workspace) attachUsage(i int, cat catalog, subs subscriptions) {
+	u, err := buildUsage(ws.wts[i].Path, ws.idx, cat, subs)
+	if err != nil {
+		warnf("usage for %s: %s", displayPath(ws.wts[i].Path), err)
+	}
+	if u.hasEvents() || u.partial {
+		ws.wts[i].Usage = &u
 	}
 }
 
@@ -1064,33 +1079,40 @@ func printStatusJSON(wts []worktree, now time.Time, ttl time.Duration, current s
 
 // jsonWorktreeFrom projects one worktree into the machine contract.
 func jsonWorktreeFrom(w worktree, now time.Time, ttl time.Duration, active []capability, current string) jsonWorktree {
-	cost := w.cost()
 	j := jsonWorktree{
 		// WHY: branchName() is the SSOT for detached display so JSON matches the table's "(detached)".
 		Path: w.Path, Branch: w.branchName(), Upstream: w.Upstream.Short, Main: w.Main,
 		Current: w.Path == current, Status: w.status(now, ttl),
-		Integrations:  integrationStates(w, active),
-		Cost:          cost.billed.jsonValue(),
-		CostEstimated: cost.billed.isEstimated(),
+		Integrations: integrationStates(w, active),
 	}
-	// listCost is emitted only when a proven subscription makes it differ; its
-	// estimate flag then qualifies that same value.
-	if lc := listCostJSON(cost); lc != nil {
-		j.ListCost = lc
-		j.ListCostEst = cost.list.isEstimated()
-	}
+	applyCostJSON(&j, w.cost())
 	j.LastUsed = rfc3339Ptr(w.LastUsed)
 	j.AgeSeconds = ageSeconds(w, now)
 	j.InputOutputRatio = inputOutputRatioJSON(w.Usage)
 	applyUsageJSON(&j, w.Usage)
-	// Temp metadata mirrors the table's TEMP cell: the deadline is emitted only
-	// for a temp checkout, so a permanent one serializes temp:false/expiresAt:null.
+	applyTempJSON(&j, w)
+	return j
+}
+
+// applyCostJSON projects the billed/list pair; listCost is emitted only when a
+// proven subscription makes it differ, and its estimate flag qualifies it.
+func applyCostJSON(j *jsonWorktree, cost costPair) {
+	j.Cost = cost.billed.jsonValue()
+	j.CostEstimated = cost.billed.isEstimated()
+	if lc := listCostJSON(cost); lc != nil {
+		j.ListCost = lc
+		j.ListCostEst = cost.list.isEstimated()
+	}
+}
+
+// applyTempJSON mirrors the table's TEMP cell: expiresAt is emitted only for a
+// temp checkout, so a permanent one serializes temp:false/expiresAt:null.
+func applyTempJSON(j *jsonWorktree, w worktree) {
 	j.Temp = w.Temp
 	if w.Temp {
 		s := formatTempDeadline(w.tempExpiresAt())
 		j.ExpiresAt = &s
 	}
-	return j
 }
 
 func rfc3339Ptr(t time.Time) *string {
@@ -1136,24 +1158,34 @@ func (w worktree) cost() costPair {
 func usageJSON(u *worktreeUsage) map[string]jsonHarnessUsage {
 	out := make(map[string]jsonHarnessUsage, len(u.harnesses))
 	for name, h := range u.harnesses {
-		models := make(map[string]jsonModelUsage, len(h.models))
-		for model, m := range h.models {
-			mu := jsonModelUsage{Cost: m.cost.billed.jsonValue(), CostEstimated: m.cost.billed.isEstimated(), ActiveSeconds: seconds(m.active()), Partial: m.partial, Tiers: tiersJSON(m.tokens, m.tiers)}
-			mu.CacheMissTokens, mu.CacheHitRate = cacheJSON(m.tokens)
-			if lc := listCostJSON(m.cost); lc != nil {
-				mu.ListCost = lc
-				mu.ListCostEst = m.cost.list.isEstimated()
-			}
-			models[model] = mu
-		}
-		hu := jsonHarnessUsage{Cost: h.cost.billed.jsonValue(), CostEstimated: h.cost.billed.isEstimated(), ActiveSeconds: seconds(h.active()), Partial: h.partial, Models: models}
-		if lc := listCostJSON(h.cost); lc != nil {
-			hu.ListCost = lc
-			hu.ListCostEst = h.cost.list.isEstimated()
-		}
-		out[name] = hu
+		out[name] = harnessUsageJSON(h)
 	}
 	return out
+}
+
+// harnessUsageJSON projects one harness's totals and its per-model contracts.
+func harnessUsageJSON(h *harnessUsage) jsonHarnessUsage {
+	models := make(map[string]jsonModelUsage, len(h.models))
+	for model, m := range h.models {
+		models[model] = modelUsageJSON(m)
+	}
+	hu := jsonHarnessUsage{Cost: h.cost.billed.jsonValue(), CostEstimated: h.cost.billed.isEstimated(), ActiveSeconds: seconds(h.active()), Partial: h.partial, Models: models}
+	if lc := listCostJSON(h.cost); lc != nil {
+		hu.ListCost = lc
+		hu.ListCostEst = h.cost.list.isEstimated()
+	}
+	return hu
+}
+
+// modelUsageJSON projects one model's totals, derived cache metrics and list price.
+func modelUsageJSON(m *modelUsage) jsonModelUsage {
+	mu := jsonModelUsage{Cost: m.cost.billed.jsonValue(), CostEstimated: m.cost.billed.isEstimated(), ActiveSeconds: seconds(m.active()), Partial: m.partial, Tiers: tiersJSON(m.tokens, m.tiers)}
+	mu.CacheMissTokens, mu.CacheHitRate = cacheJSON(m.tokens)
+	if lc := listCostJSON(m.cost); lc != nil {
+		mu.ListCost = lc
+		mu.ListCostEst = m.cost.list.isEstimated()
+	}
+	return mu
 }
 
 // tiersJSON projects a model's token tiers into the machine contract. It returns
@@ -1314,19 +1346,27 @@ func detailPartial(cur worktree, cols []worktreeColumn, rows [][]string, now tim
 	if cur.Usage == nil || !cur.Usage.partial {
 		return false
 	}
+	if detailSummaryPartial(cur, now, budget) {
+		return true
+	}
+	return detailModelPartial(cur.Usage, cols, rows, budget)
+}
+
+// detailSummaryPartial reports a partial marker in the summary: the ACTIVE value
+// or a ratio row that survives the width fit.
+func detailSummaryPartial(cur worktree, now time.Time, budget int) bool {
 	if _, marked := activeCellValue(cur); marked {
 		return true
 	}
-	if cur.Usage.tokens().ratiosDefined() && !summaryRatioHidden(detailSummaryRows(cur, now), budget) {
-		return true
-	}
+	return cur.Usage.tokens().ratiosDefined() && !summaryRatioHidden(detailSummaryRows(cur, now), budget)
+}
+
+// detailModelPartial reports a partial model row whose TIME or token cell survives.
+func detailModelPartial(u *worktreeUsage, cols []worktreeColumn, rows [][]string, budget int) bool {
 	timeKept := columnKept(cols, rows, colTime.header, budget)
 	tokensKept := tokenGroupKept(cols)
-	for _, m := range cur.Usage.mergedModels() {
-		if !m.partial {
-			continue
-		}
-		if (timeKept && m.active() > 0) || (tokensKept && m.tokens.total() > 0) {
+	for _, m := range u.mergedModels() {
+		if m.partial && ((timeKept && m.active() > 0) || (tokensKept && m.tokens.total() > 0)) {
 			return true
 		}
 	}
@@ -1456,12 +1496,17 @@ func hangWrapped(prefix, text string, width int) []string {
 // The LIST line prints under both blocks when both render the column, so the
 // table scanner never meets an unexplained second price.
 func printCostLegend(l costLegend, colorMode string, budget int) {
-	list := l.list
-	if !l.tableReasons.any() && !list && !l.partial {
+	if !l.tableReasons.any() && !l.list && !l.partial {
 		return
 	}
+	fmt.Println()
+	printLegend(legendLines([]legendGroup{tableCostLegend(l)}, budget), colorMode)
+}
+
+// tableCostLegend builds the untitled cost clauses in display order.
+func tableCostLegend(l costLegend) legendGroup {
 	var group legendGroup
-	if list {
+	if l.list {
 		group.items = append(group.items, listLegend)
 	}
 	if l.partial {
@@ -1473,8 +1518,7 @@ func printCostLegend(l costLegend, colorMode string, budget int) {
 	if l.tableReasons.overage {
 		group.items = append(group.items, legendEntry{estimateLabel, estimateSubscriptionOverage})
 	}
-	fmt.Println()
-	printLegend(legendLines([]legendGroup{group}, budget), colorMode)
+	return group
 }
 
 // detailColumns is the detail block's static table schema: one MODEL row per
@@ -1524,13 +1568,23 @@ func printStatusDetail(wts []worktree, current string, now time.Time, colorMode 
 		return
 	}
 	fmt.Println()
-	printKeyValues(dropElidedSummaryRows(detailSummaryRows(*cur, now), budget), detailTitleRows, colorMode, budget)
+	printDetailSummary(*cur, now, colorMode, budget)
 	if cur.Usage == nil {
 		fmt.Println("no agent usage recorded")
 		return
 	}
 	fmt.Println()
-	f := fitDetailBlock(*cur, now, budget)
+	printDetailTable(*cur, now, colorMode, budget)
+}
+
+// printDetailSummary prints the identity and measure rows above the breakdown.
+func printDetailSummary(cur worktree, now time.Time, colorMode string, budget int) {
+	printKeyValues(dropElidedSummaryRows(detailSummaryRows(cur, now), budget), detailTitleRows, colorMode, budget)
+}
+
+// printDetailTable prints the fitted model rows and their legend.
+func printDetailTable(cur worktree, now time.Time, colorMode string, budget int) {
+	f := fitDetailBlock(cur, now, budget)
 	if f.dropped {
 		warnf("terminal too narrow; hid %s; widen the terminal or use --json", strings.Join(tokenColumnNames(), ", "))
 	}
@@ -1858,30 +1912,22 @@ func printDetailLegend(reasons estimateReasons, list, partial, tokens bool, colo
 	if !reasons.any() && !list && !partial && !tokens {
 		return
 	}
+	// Wrap to the grid's width, so the text that explains the block never widens
+	// it; budget==0 (unbounded output) prints every clause whole.
+	fmt.Println()
+	printLegend(legendLines(detailLegendGroups(costLegend{tableReasons: reasons, list: list, partial: partial}, tokens), budget), colorMode)
+}
+
+// detailLegendGroups builds the cost head then the token group in print order.
+func detailLegendGroups(l costLegend, tokens bool) []legendGroup {
 	var groups []legendGroup
-	var head legendGroup
-	if list {
-		head.items = append(head.items, listLegend)
-	}
-	if partial {
-		head.items = append(head.items, legendEntry{partialLabel, partialLegend})
-	}
-	if reasons.cache {
-		head.items = append(head.items, legendEntry{estimateLabel, estimateCacheWriteLifetime})
-	}
-	if reasons.overage {
-		head.items = append(head.items, legendEntry{estimateLabel, estimateSubscriptionOverage})
-	}
-	if len(head.items) > 0 {
+	if head := tableCostLegend(l); len(head.items) > 0 {
 		groups = append(groups, head)
 	}
 	if tokens {
 		groups = append(groups, legendGroup{title: tokenLegendTitle, items: tokenLegend})
 	}
-	// Wrap to the grid's width, so the text that explains the block never widens
-	// it; budget==0 (unbounded output) prints every clause whole.
-	fmt.Println()
-	printLegend(legendLines(groups, budget), colorMode)
+	return groups
 }
 
 // wrapWords breaks text into lines of at most width display cells on word
@@ -1919,26 +1965,35 @@ func detailRows(u *worktreeUsage, showList bool) [][]string {
 	models := u.mergedModels()
 	var rows [][]string
 	for _, name := range u.sortedModelNames(models) {
-		m := models[name]
-		active := m.active()
-		timeCell := humanDuration(active)
-		if m.partial {
-			if active == 0 {
-				timeCell = "unknown"
-			} else {
-				timeCell = partialValue(timeCell, true)
-			}
-		}
-		row := []string{name, timeCell, m.cost.billed.cell()}
-		if showList {
-			row = append(row, listCell(m.cost))
-		}
-		for _, d := range detailTokenMeta {
-			row = append(row, d.cell(m))
-		}
-		rows = append(rows, row)
+		rows = append(rows, detailRow(name, models[name], showList))
 	}
 	return rows
+}
+
+// detailRow projects one model: name, time, billed cost, optional list price,
+// then one cell per token-group column.
+func detailRow(name string, m *modelUsage, showList bool) []string {
+	row := []string{name, modelTimeCell(m), m.cost.billed.cell()}
+	if showList {
+		row = append(row, listCell(m.cost))
+	}
+	for _, d := range detailTokenMeta {
+		row = append(row, d.cell(m))
+	}
+	return row
+}
+
+// modelTimeCell owns the partial-time grammar: a partial total with no readable
+// span is unknown, otherwise a marked duration.
+func modelTimeCell(m *modelUsage) string {
+	active := m.active()
+	if !m.partial {
+		return humanDuration(active)
+	}
+	if active == 0 {
+		return "unknown"
+	}
+	return partialValue(humanDuration(active), true)
 }
 
 // partialTokenCell renders one token count from a total that may have lost
