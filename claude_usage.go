@@ -57,25 +57,40 @@ func claudeUsageEvents(r *bufio.Reader) ([]usageEvent, int, error) {
 	dropped := 0
 	for {
 		line, oversized, err := sessionRecord(r)
-		if oversized {
-			// Billed relevance is unknowable after the discard, so count it.
-			dropped++
-		} else if len(line) > 0 && bytes.Contains(line, usageKey) {
-			var rec claudeUsageRecord
-			if json.Unmarshal(line, &rec) != nil {
-				dropped++
-			} else if e, ok := claudeEvent(&rec, &dropped); ok {
-				events = append(events, e)
-			}
+		if e, ok := claudeLineEvent(line, oversized, &dropped); ok {
+			events = append(events, e)
 		}
 		if err != nil {
 			if err == io.EOF {
-				sort.Slice(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
+				sortUsageEvents(events)
 				return events, dropped, nil
 			}
 			return nil, dropped, err
 		}
 	}
+}
+
+// claudeLineEvent consumes one session record; a discarded record increments
+// dropped.
+func claudeLineEvent(line []byte, oversized bool, dropped *int) (usageEvent, bool) {
+	if oversized {
+		// Billed relevance is unknowable after the discard, so count it.
+		*dropped++
+		return usageEvent{}, false
+	}
+	if len(line) == 0 || !bytes.Contains(line, usageKey) {
+		return usageEvent{}, false
+	}
+	var rec claudeUsageRecord
+	if json.Unmarshal(line, &rec) != nil {
+		*dropped++
+		return usageEvent{}, false
+	}
+	return claudeEvent(&rec, dropped)
+}
+
+func sortUsageEvents(events []usageEvent) {
+	sort.Slice(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
 }
 
 // claudeEvent turns one assistant record into a candidate event. Only an

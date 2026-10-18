@@ -557,6 +557,33 @@ type parsedSession struct {
 	price   func(usageEvent) pricedEvent
 }
 
+// usageLoss accumulates what a parse walk lost, so folding can taint the total
+// after every readable session has been seen.
+type usageLoss struct {
+	lost     map[string]bool
+	firstErr error
+	dropped  int
+}
+
+func newUsageLoss() usageLoss { return usageLoss{lost: map[string]bool{}} }
+
+func (l *usageLoss) fail(harness string, err error) {
+	l.lost[harness] = true
+	if l.firstErr == nil {
+		l.firstErr = err
+	}
+}
+
+func (l *usageLoss) recordDropped(harness string, n int) {
+	if n == 0 {
+		return
+	}
+	// The readable records still fold; the dropped ones only taint the
+	// total, so a partial sum never reads as exact.
+	l.lost[harness] = true
+	l.dropped += n
+}
+
 // buildUsage parses a worktree's owned sessions once and aggregates cost/time.
 // cat is nil when no catalog is available: a catalog-rated harness then reports
 // unknown cost instead of a wrong number. subs is the run's credential proof; an
@@ -564,35 +591,44 @@ type parsedSession struct {
 // override drops the Claude proof for this worktree alone.
 func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
 	subs = subs.forWorktree(wtPath)
+	sessions, loss := parseWorktreeSessions(idx[canonical(wtPath)], cat, subs)
 	var u worktreeUsage
-	lost := map[string]bool{}
-	var firstErr error
-	dropped := 0
+	foldParsedSessions(&u, sessions)
+	markPartial(&u, loss.lost)
+	return u, usageLossErr(loss.firstErr, loss.dropped)
+}
+
+// parseWorktreeSessions reads every owned session, remembering unreadable files
+// and dropped records so the fold can taint the total.
+func parseWorktreeSessions(refs []sessionRef, cat catalog, subs subscriptions) ([]parsedSession, usageLoss) {
+	loss := newUsageLoss()
 	var sessions []parsedSession
-	for _, ref := range idx[canonical(wtPath)] {
-		a, ok := agentByName(ref.harness)
-		if !ok || a.parseUsage == nil {
-			continue
+	for _, ref := range refs {
+		if s, ok := parseWorktreeSession(ref, cat, subs, &loss); ok {
+			sessions = append(sessions, s)
 		}
-		events, n, err := readUsage(a, ref.path)
-		if err != nil {
-			// A bad file sorts anywhere, so record the loss now and taint the
-			// total after folding, when even a good session listed later in the
-			// walk has folded.
-			lost[ref.harness] = true
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		if n > 0 {
-			// The readable records still fold; the dropped ones only taint the
-			// total, so a partial sum never reads as exact.
-			lost[ref.harness] = true
-			dropped += n
-		}
-		sessions = append(sessions, parsedSession{harness: ref.harness, events: events, price: usagePricer(a, cat, subs)})
 	}
+	return sessions, loss
+}
+
+func parseWorktreeSession(ref sessionRef, cat catalog, subs subscriptions, loss *usageLoss) (parsedSession, bool) {
+	a, ok := agentByName(ref.harness)
+	if !ok || a.parseUsage == nil {
+		return parsedSession{}, false
+	}
+	events, n, err := readUsage(a, ref.path)
+	if err != nil {
+		// A bad file sorts anywhere, so record the loss now and taint the
+		// total after folding, when even a good session listed later in the
+		// walk has folded.
+		loss.fail(ref.harness, err)
+		return parsedSession{}, false
+	}
+	loss.recordDropped(ref.harness, n)
+	return parsedSession{harness: ref.harness, events: events, price: usagePricer(a, cat, subs)}, true
+}
+
+func foldParsedSessions(u *worktreeUsage, sessions []parsedSession) {
 	lists := make([][]usageEvent, len(sessions))
 	for i, s := range sessions {
 		lists[i] = s.events
@@ -604,8 +640,6 @@ func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions
 	for i, s := range sessions {
 		u.addBilledSession(s.harness, s.events, billed[i], s.price)
 	}
-	markPartial(&u, lost)
-	return u, usageLossErr(firstErr, dropped)
 }
 
 // usageLossErr reports the session loss that makes a total partial: an
