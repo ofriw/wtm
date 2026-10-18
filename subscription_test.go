@@ -322,6 +322,39 @@ func TestSubscriptionClaudeCovered(t *testing.T) {
 	}
 }
 
+// TestSubscriptionClaudeAcceptedBillingTypes pins the billing-type allowlist:
+// every paid subscription shape proves coverage, while a metered override still
+// voids it. Unknown shapes stay unproven in the table below.
+func TestSubscriptionClaudeAcceptedBillingTypes(t *testing.T) {
+	for _, billingType := range []string{
+		"stripe_subscription",
+		"stripe_subscription_contracted",
+		"apple_subscription",
+		"google_play_subscription",
+	} {
+		t.Run("covered/"+billingType, func(t *testing.T) {
+			sandbox(t)
+			writeClaudeAccount(t, billingType, "2020-01-01T00:00:00Z")
+			u := claudeUsageWorktree(t)
+			if got := u.cost().cell(); got != "$0.00/$0.10" {
+				t.Fatalf("cost = %q, want $0.00/$0.10", got)
+			}
+			if _, ok := worktreeJSON(t, &u)["listCost"]; !ok {
+				t.Error("covered output must carry listCost")
+			}
+		})
+		t.Run("metered/"+billingType, func(t *testing.T) {
+			sandbox(t)
+			t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+			writeClaudeAccount(t, billingType, "2020-01-01T00:00:00Z")
+			u := claudeUsageWorktree(t)
+			if got := u.cost().cell(); got != "$0.10" {
+				t.Fatalf("cost = %q, want list $0.10", got)
+			}
+		})
+	}
+}
+
 // TestSubscriptionClaudeAccountFollowsSelectedFile pins the resolver: the file
 // under the selected config dir decides the proof, so a stale HOME file can
 // neither grant nor steal it.
@@ -486,8 +519,19 @@ func TestSubscriptionClaudeUnprovenStaysList(t *testing.T) {
 			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
 			writeFile(t, filepath.Join(claudeAgent.configDir(), "settings.local.json"), `{"env":{"CLAUDE_CODE_USE_MANTLE":"1"}}`, 0o600)
 		}},
+		"unix socket override": {func(t *testing.T) {
+			t.Setenv("ANTHROPIC_UNIX_SOCKET", "/tmp/claude.sock")
+			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+		}},
+		"settings unix socket": {func(t *testing.T) {
+			writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+			writeFile(t, filepath.Join(claudeAgent.configDir(), "settings.local.json"), `{"env":{"ANTHROPIC_UNIX_SOCKET":"/tmp/claude.sock"}}`, 0o600)
+		}},
 		"other billing type": {func(t *testing.T) {
 			writeClaudeAccount(t, "invoice", "2020-01-01T00:00:00Z")
+		}},
+		"unknown billing type": {func(t *testing.T) {
+			writeClaudeAccount(t, "future_subscription", "2020-01-01T00:00:00Z")
 		}},
 		"before subscription": {func(t *testing.T) {
 			writeClaudeAccount(t, "stripe_subscription", "2027-01-01T00:00:00Z")

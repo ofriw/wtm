@@ -123,11 +123,33 @@ func claudeAccountSuffix() string {
 	return ""
 }
 
+// claudeSubscriptionBillingTypes is the SSOT for account billing types that
+// prove a paid Claude subscription. Every other value, including an unknown
+// future type, proves nothing and keeps the list price.
+var claudeSubscriptionBillingTypes = map[string]bool{
+	"stripe_subscription":            true,
+	"stripe_subscription_contracted": true,
+	"apple_subscription":             true,
+	"google_play_subscription":       true,
+}
+
+// claudeOAuthAccount is the account fields that decide the Claude proof.
+type claudeOAuthAccount struct {
+	BillingType           string `json:"billingType"`
+	SubscriptionCreatedAt string `json:"subscriptionCreatedAt"`
+	HasExtraUsageEnabled  *bool  `json:"hasExtraUsageEnabled"`
+}
+
+// claudeAccount is Claude Code's global account file.
+type claudeAccount struct {
+	OAuthAccount *claudeOAuthAccount `json:"oauthAccount"`
+}
+
 // readClaudeSubscription proves the Claude Code subscription: the account must
-// bill by stripe_subscription and no metered override may be configured, since
-// an API key, Bedrock or Vertex bills every request outside the subscription.
-// The third result is true only when the account explicitly disables extra
-// usage, which pins a completed request's marginal cost at exactly $0.
+// bill by one of claudeSubscriptionBillingTypes and no metered override may be
+// configured, since an API key, Bedrock or Vertex bills every request outside
+// the subscription. The third result is true only when the account explicitly
+// disables extra usage, which pins a completed request's marginal cost at $0.
 func readClaudeSubscription() (bool, time.Time, bool) {
 	if claudeMeteredOverride() {
 		return false, time.Time{}, false
@@ -136,24 +158,22 @@ func readClaudeSubscription() (bool, time.Time, bool) {
 	if !ok {
 		return false, time.Time{}, false
 	}
-	var acct struct {
-		OAuthAccount *struct {
-			BillingType           string `json:"billingType"`
-			SubscriptionCreatedAt string `json:"subscriptionCreatedAt"`
-			HasExtraUsageEnabled  *bool  `json:"hasExtraUsageEnabled"`
-		} `json:"oauthAccount"`
-	}
+	var acct claudeAccount
 	if readJSON(path, &acct) != nil || acct.OAuthAccount == nil {
 		return false, time.Time{}, false
 	}
-	if acct.OAuthAccount.BillingType != "stripe_subscription" {
+	return claudeAccountProof(acct.OAuthAccount)
+}
+
+// claudeAccountProof decides one account record's coverage. An absent
+// hasExtraUsageEnabled means overage is possible, not disabled, so a legacy
+// file flips a covered $0 to ~$0.00.
+func claudeAccountProof(a *claudeOAuthAccount) (bool, time.Time, bool) {
+	if !claudeSubscriptionBillingTypes[a.BillingType] {
 		return false, time.Time{}, false
 	}
-	allowanceOnly := acct.OAuthAccount.HasExtraUsageEnabled != nil && !*acct.OAuthAccount.HasExtraUsageEnabled
-	// An absent field means overage is possible, not disabled: a legacy account
-	// file (or a future upgrade that writes the field) flips a covered $0 to
-	// ~$0.00, which the overage-possible test pins.
-	return true, parseSubscriptionSince(acct.OAuthAccount.SubscriptionCreatedAt), allowanceOnly
+	allowanceOnly := a.HasExtraUsageEnabled != nil && !*a.HasExtraUsageEnabled
+	return true, parseSubscriptionSince(a.SubscriptionCreatedAt), allowanceOnly
 }
 
 // claudeMeteredRule is one configured value that bills Claude Code outside the
@@ -169,6 +189,7 @@ type claudeMeteredRule struct {
 var claudeMeteredRules = []claudeMeteredRule{
 	{key: "ANTHROPIC_API_KEY", presenceOnly: true},
 	{key: "ANTHROPIC_AUTH_TOKEN", presenceOnly: true},
+	{key: "ANTHROPIC_UNIX_SOCKET", presenceOnly: true},
 	{key: "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", presenceOnly: true},
 	{key: "CLAUDE_CODE_USE_BEDROCK"},
 	{key: "CLAUDE_CODE_USE_VERTEX"},
