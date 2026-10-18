@@ -277,12 +277,14 @@ func appendPiSpawn(events *[]usageEvent, at time.Time, id string, current, provi
 	paired = paired && !start.After(at)
 	for i, child := range piSpawnChildren(current, provider, msg) {
 		e := usageEvent{at: at, model: child.model, provider: child.provider, cost: child.cost, tokens: child.tokens, end: at}
+		// The record id plus child index keeps two identical children of one
+		// batch distinct: the dedupe treats equal identity keys as repeats.
+		// Build the key from the result time before the span replaces it, so a
+		// copied result without its call still matches the paired copy.
+		e.key = piEventKeyN(e, id, fmt.Sprintf("spawn:%d", i))
 		if paired {
 			e.at, e.end = start, at
 		}
-		// The record id plus child index keeps two identical children of one
-		// batch distinct: the dedupe treats equal identity keys as repeats.
-		e.key = piEventKeyN(e, id, fmt.Sprintf("spawn:%d", i))
 		*events = append(*events, e)
 	}
 }

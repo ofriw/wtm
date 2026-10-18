@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -633,6 +634,43 @@ func TestPiIdlessSameTimestampCollisionBillsOnce(t *testing.T) {
 	kept := dedupeOne(a, b)
 	if len(kept) != 1 {
 		t.Fatalf("kept %d events, want 1 (same-timestamp collision bills once)", len(kept))
+	}
+}
+
+// TestPiSpawnCopyPairingBillsOnce pins the copy identity: a spawn result that
+// appears in two sessions must bill once even when only one session holds the
+// call that pairs it with a span. The key must use the result time before the
+// paired copy replaces its activity timestamp with the call time.
+func TestPiSpawnCopyPairingBillsOnce(t *testing.T) {
+	call := `{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"spawn"}]}}`
+	for _, tc := range []struct{ name, idField string }{
+		{"with record id", `"id":"r1",`},
+		{"without record id", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := `{"type":"message",` + tc.idField + `"timestamp":"2026-01-01T00:00:35Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"spawn","details":{"model":"m-child","stats":{"inputTokens":100,"outputTokens":50,"cost":0.3}}}}`
+			dir := t.TempDir()
+			paired, unpaired := filepath.Join(dir, "paired.jsonl"), filepath.Join(dir, "unpaired.jsonl")
+			writeFile(t, paired, call+"\n"+result+"\n", 0o644)
+			writeFile(t, unpaired, result+"\n", 0o644)
+			idx := sessionIndex{canonical(dir): {
+				{path: paired, harness: piAgent.name},
+				{path: unpaired, harness: piAgent.name},
+			}}
+			u, err := buildUsage(dir, idx, nil, subscriptions{})
+			if err != nil {
+				t.Fatalf("buildUsage: %v", err)
+			}
+			if got := u.cost().cell(); got != "$0.30" {
+				t.Fatalf("cost = %q, want $0.30 (the copied child bills once)", got)
+			}
+			if got, want := u.tokens(), (promptTokens{input: 100, output: 50}); got != want {
+				t.Fatalf("tokens = %+v, want %+v (the copied child folds once)", got, want)
+			}
+			if got := u.active(); got != 30*time.Second {
+				t.Fatalf("active = %v, want 30s (paired copy keeps the call-to-result span)", got)
+			}
+		})
 	}
 }
 
