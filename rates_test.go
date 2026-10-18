@@ -198,16 +198,18 @@ func TestLoadCatalogUnreadableOverride(t *testing.T) {
 }
 
 func TestCacheFreshness(t *testing.T) {
+	pinned := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	t.Setenv("WTM_NOW", pinned.Format(time.RFC3339))
 	path := filepath.Join(t.TempDir(), "rates.json")
 	writeFile(t, path, testCatalog, 0o644)
-	old := time.Now().Add(-ratesCacheTTL - time.Hour)
+	old := pinned.Add(-ratesCacheTTL - time.Hour)
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
 	if fresh, err := cacheFresh(path); err != nil || fresh {
 		t.Fatalf("stale cache fresh=%v err=%v, want false", fresh, err)
 	}
-	now := time.Now()
+	now := pinned.Add(-ratesCacheTTL + time.Hour)
 	if err := os.Chtimes(path, now, now); err != nil {
 		t.Fatal(err)
 	}
@@ -255,15 +257,21 @@ func TestLoadCatalogFreshCacheSkipsNetwork(t *testing.T) {
 }
 
 func TestFetchCoolingDown(t *testing.T) {
+	pinned := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	t.Setenv("WTM_NOW", pinned.Format(time.RFC3339))
 	path := filepath.Join(t.TempDir(), "rates.json")
 	if fetchCoolingDown(path) {
 		t.Fatal("no marker must not cool down")
 	}
 	writeFile(t, attemptPath(path), "", 0o644)
+	recent := pinned.Add(-ratesRetryCooldown / 2)
+	if err := os.Chtimes(attemptPath(path), recent, recent); err != nil {
+		t.Fatal(err)
+	}
 	if !fetchCoolingDown(path) {
 		t.Fatal("recent marker must cool down")
 	}
-	old := time.Now().Add(-ratesRetryCooldown - time.Minute)
+	old := pinned.Add(-ratesRetryCooldown - time.Minute)
 	if err := os.Chtimes(attemptPath(path), old, old); err != nil {
 		t.Fatal(err)
 	}

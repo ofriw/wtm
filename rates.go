@@ -63,30 +63,7 @@ func (r modelRate) ratesFor(tier string, context int64) *tokenRates {
 	above := r.hasAbove && context > longContextThreshold
 	switch tier {
 	case "", "standard", "default":
-		if above {
-			// Merge per class: an above-200k field wins when listed, else the
-			// standard rate prices that class. A whole-set switch would turn a
-			// partially-listed catalog (e.g. only the 1h-write above rate) into
-			// unknown for every other class.
-			merged := r.above
-			if merged.input == nil {
-				merged.input = r.standard.input
-			}
-			if merged.output == nil {
-				merged.output = r.standard.output
-			}
-			if merged.cacheRead == nil {
-				merged.cacheRead = r.standard.cacheRead
-			}
-			if merged.cacheWrite5m == nil {
-				merged.cacheWrite5m = r.standard.cacheWrite5m
-			}
-			if merged.cacheWrite1h == nil {
-				merged.cacheWrite1h = r.standard.cacheWrite1h
-			}
-			return &merged
-		}
-		return &r.standard
+		return r.standardRates(above)
 	case "batch":
 		// The catalog has no batch+long-context rate. Combining two rate
 		// adjustments would invent a price, so report unknown.
@@ -96,6 +73,37 @@ func (r modelRate) ratesFor(tier string, context int64) *tokenRates {
 		return &r.batch
 	default:
 		return nil
+	}
+}
+
+// standardRates selects the standard set, or the long-context set merged with
+// it when the prompt exceeds the threshold.
+func (r modelRate) standardRates(above bool) *tokenRates {
+	if !above {
+		return &r.standard
+	}
+	// Merge per class: an above-200k field wins when listed, else the standard
+	// rate prices that class. A whole-set switch would turn a partially-listed
+	// catalog (e.g. only the 1h-write above rate) into unknown for every other
+	// class.
+	merged := r.above
+	mergeRateSet(&merged, r.standard)
+	return &merged
+}
+
+// mergeRateSet fills each unlisted override class from base.
+func mergeRateSet(dst *tokenRates, base tokenRates) {
+	mergeRate(&dst.input, base.input)
+	mergeRate(&dst.output, base.output)
+	mergeRate(&dst.cacheRead, base.cacheRead)
+	mergeRate(&dst.cacheWrite5m, base.cacheWrite5m)
+	mergeRate(&dst.cacheWrite1h, base.cacheWrite1h)
+}
+
+// mergeRate keeps a listed rate and fills an unlisted one from base.
+func mergeRate(dst **float64, base *float64) {
+	if *dst == nil {
+		*dst = base
 	}
 }
 
@@ -385,18 +393,24 @@ func loadCatalogFrom(url string) (catalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	if c, ok := readFreshCache(p); ok {
+	return loadFromCachePath(p, url)
+}
+
+// loadFromCachePath resolves a fresh cache, then a fetch, then the stale cache
+// as the last resort.
+func loadFromCachePath(path, url string) (catalog, error) {
+	if c, ok := readFreshCache(path); ok {
 		return c, nil
 	}
 	// A failed fetch must not stall every run: remember the attempt and retry
 	// only after the cooldown. The stale cache still serves as the fallback.
-	if !fetchCoolingDown(p) {
-		if c, err := fetchAndCache(p, url); err == nil {
+	if !fetchCoolingDown(path) {
+		if c, err := fetchAndCache(path, url); err == nil {
 			return c, nil
 		}
-		_ = markFetchAttempt(p)
+		_ = markFetchAttempt(path)
 	}
-	return parseCatalogFile(p)
+	return parseCatalogFile(path)
 }
 
 // fetchCoolingDown reports a recent failed fetch, so a broken network cannot
@@ -406,7 +420,7 @@ func fetchCoolingDown(path string) bool {
 	if err != nil {
 		return false
 	}
-	return time.Since(info.ModTime()) < ratesRetryCooldown
+	return nowFunc().Sub(info.ModTime()) < ratesRetryCooldown
 }
 
 // markFetchAttempt records a failed fetch. A write failure must not fail the
@@ -467,7 +481,7 @@ func cacheFresh(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return time.Since(info.ModTime()) < ratesCacheTTL, nil
+	return nowFunc().Sub(info.ModTime()) < ratesCacheTTL, nil
 }
 
 func fetchRates(url string) ([]byte, error) {
