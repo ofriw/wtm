@@ -2,7 +2,9 @@ package main
 
 import (
 	"math/rand"
+	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -25,7 +27,7 @@ func TestMoneyCellAndJSON(t *testing.T) {
 	var unknown money
 	unknown.addUnknown()
 	var estimated money
-	estimated.addEstimated(1.23)
+	estimated.addEstimated(1.23, causeCacheWrite)
 	cases := []struct {
 		name    string
 		m       money
@@ -74,7 +76,7 @@ func TestMoneyUnknownIsSticky(t *testing.T) {
 // still dominates an estimate.
 func TestMoneyEstimatedIsStickyAndQualified(t *testing.T) {
 	var m money
-	m.addEstimated(1.0)
+	m.addEstimated(1.0, causeCacheWrite)
 	m.addKnown(0.5)
 	if got := m.cell(); got != "~$1.50" {
 		t.Fatalf("cell = %q, want ~$1.50", got)
@@ -88,11 +90,64 @@ func TestMoneyEstimatedIsStickyAndQualified(t *testing.T) {
 	}
 }
 
+// TestMoneyMixedCausesAndUnknownPrecedence pins the bit-set contract: a fold
+// keeps every cause, and unknown still hides the estimate from the JSON.
+func TestMoneyMixedCausesAndUnknownPrecedence(t *testing.T) {
+	var m money
+	m.addEstimated(1, causeCacheWrite)
+	m.addEstimated(2, causeSubscriptionOverage)
+	for _, cause := range []estimateCause{causeCacheWrite, causeSubscriptionOverage} {
+		if !m.hasCause(cause) {
+			t.Errorf("cause %v missing from %+v", cause, m)
+		}
+	}
+	if got := m.cell(); got != "~$3.00" {
+		t.Errorf("cell = %q, want ~$3.00", got)
+	}
+	if !m.isEstimated() || m.jsonValue() == nil {
+		t.Errorf("mixed estimate lost its number or flag: %+v", m)
+	}
+	m.addUnknown()
+	if got := m.cell(); got != "unknown" {
+		t.Errorf("unknown must dominate causes: %q", got)
+	}
+	if m.isEstimated() || m.jsonValue() != nil {
+		t.Errorf("unknown total must not serialize as an estimate: %+v", m)
+	}
+	if !m.hasCause(causeCacheWrite) || !m.hasCause(causeSubscriptionOverage) {
+		t.Errorf("causes must survive the unknown taint: %+v", m)
+	}
+}
+
+// TestOverageCauseSingleWriter guards the invariant needsOverageLegend rests
+// on: the overage cause marks a proven subscription's allowance risk, so only
+// estimatedZero (usage.go) may set it. A stray writer would print the
+// allowance caveat to users with no behavioral test failing.
+func TestOverageCauseSingleWriter(t *testing.T) {
+	files, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		name := f.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || name == "usage.go" {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(src), "causeSubscriptionOverage") {
+			t.Errorf("%s writes causeSubscriptionOverage; only usage.go's estimatedZero may set it", name)
+		}
+	}
+}
+
 // TestCostPairEstimatedListRendersBesideExactBilled pins the subscription
 // grammar: an exact zero billed beside an estimated list keeps both marks.
 func TestCostPairEstimatedListRendersBesideExactBilled(t *testing.T) {
 	p := costPair{billed: knownZero(), subscription: true}
-	p.list.addEstimated(1.23)
+	p.list.addEstimated(1.23, causeCacheWrite)
 	if got := p.cell(); got != "$0.00/~$1.23" {
 		t.Fatalf("cell = %q, want $0.00/~$1.23", got)
 	}
@@ -104,7 +159,7 @@ func TestCostPairEstimatedListRendersBesideExactBilled(t *testing.T) {
 func TestCostPairShowsListIgnoresEstimateFlag(t *testing.T) {
 	equal := costPair{subscription: true}
 	equal.billed.addKnown(1.23)
-	equal.list.addEstimated(1.23)
+	equal.list.addEstimated(1.23, causeCacheWrite)
 	if equal.showsList() {
 		t.Errorf("equal amounts must not show a list, estimated flag aside: %+v", equal)
 	}
@@ -417,7 +472,7 @@ func TestDedupeEqualScoresElectFirst(t *testing.T) {
 // only its own reason, both merge, and an exact total reports neither.
 func TestCostPairReasons(t *testing.T) {
 	var estM money
-	estM.addEstimated(1)
+	estM.addEstimated(1, causeCacheWrite)
 	knownM := func(v float64) money { var m money; m.addKnown(v); return m }
 	cacheOnly := costPair{list: estM, billed: estM}
 	if !cacheOnly.needsCacheLegend() || cacheOnly.needsOverageLegend() {
@@ -430,6 +485,13 @@ func TestCostPairReasons(t *testing.T) {
 	both := costPair{list: estM, billed: estimatedZero(), subscription: true}
 	if r := both.reasons(); !r.cache || !r.overage {
 		t.Errorf("both reasons = %+v, want cache+overage", r)
+	}
+	// A proven subscription that also carries a cache-write estimate must ask
+	// for the cache line only: the estimate came from the token split, not the
+	// allowance caveat.
+	coveredCache := costPair{list: estM, billed: estM, subscription: true}
+	if r := coveredCache.reasons(); !r.cache || r.overage {
+		t.Errorf("covered cache reasons = %+v, want cache only", r)
 	}
 	// A subscription hides a list whose amount equals the billed one, so its
 	// estimate must not ask for a cache line the cell cannot show.
@@ -599,7 +661,7 @@ func FuzzMoneyFold(f *testing.F) {
 				p.addKnown(float64(b))
 				want += float64(b)
 			case 1:
-				p.addEstimated(float64(b))
+				p.addEstimated(float64(b), causeCacheWrite)
 				want += float64(b)
 				anyEstimated = true
 			default:

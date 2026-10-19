@@ -10,20 +10,32 @@ import (
 )
 
 // usage.go — the cost/active-time domain shared by every harness. Parsers turn
-// session records into usageEvent values; addSession folds those into a
+// session records into usageEvent values; addBilledSession folds those into a
 // worktreeUsage. This file owns the folding, the money/span model, the
 // cross-file dedupe and the display grammar; the session loader that drives
-// addSession (buildUsage) lives with the harness registry in agents.go.
+// addBilledSession (buildUsage) lives with the harness registry in agents.go.
+
+// estimateCause names the documented assumption behind an estimated amount.
+// It is a bit set, so a fold that mixes both assumptions keeps both reasons and
+// the legend can print exactly the ones the rendered cells carry.
+type estimateCause uint8
+
+const (
+	// causeCacheWrite: a record omitted the 5m/1h cache-write split.
+	causeCacheWrite estimateCause = 1 << iota
+	// causeSubscriptionOverage: a covered $0 may still bill overage.
+	causeSubscriptionOverage
+)
 
 // money accumulates a cost while keeping "unknown" sticky: a total is unknown
-// when any contributor has no price. estimated is also sticky: a total is
+// when any contributor has no price. A cause is also sticky: a total is
 // estimated when any contributor rests on an assumption, so the display can
 // mark it and the JSON can flag it. A real zero stays a known, exact zero.
 type money struct {
-	amount    float64
-	unknown   bool
-	estimated bool
-	any       bool
+	amount  float64
+	unknown bool
+	causes  estimateCause
+	any     bool
 }
 
 // addKnown records an exact contribution: a price the harness reported or the
@@ -34,11 +46,12 @@ func (m *money) addKnown(v float64) {
 }
 
 // addEstimated records a contribution derived from a documented assumption
-// rather than a reported price (see estimateCacheWriteLifetime).
-func (m *money) addEstimated(v float64) {
+// rather than a reported price (see estimateCacheWriteLifetime and
+// estimateSubscriptionOverage).
+func (m *money) addEstimated(v float64, cause estimateCause) {
 	m.any = true
 	m.amount += v
-	m.estimated = true
+	m.causes |= cause
 }
 
 func (m *money) addUnknown() {
@@ -52,7 +65,7 @@ func (m *money) add(o money) {
 		return
 	}
 	m.any = true
-	m.estimated = m.estimated || o.estimated
+	m.causes |= o.causes
 	if o.unknown {
 		m.unknown = true
 		return
@@ -78,7 +91,7 @@ func (m money) cell() string {
 		return "-"
 	case m.unknown:
 		return "unknown"
-	case m.estimated:
+	case m.causes != 0:
 		return "~" + formatCost(m.amount)
 	default:
 		return formatCost(m.amount)
@@ -87,7 +100,10 @@ func (m money) cell() string {
 
 // isEstimated reports a numeric total that includes an assumed price, so the
 // JSON contract can flag it beside the amount it qualifies.
-func (m money) isEstimated() bool { return m.known() && m.estimated }
+func (m money) isEstimated() bool { return m.known() && m.causes != 0 }
+
+// hasCause reports one documented assumption among the total's causes.
+func (m money) hasCause(c estimateCause) bool { return m.causes&c != 0 }
 
 // knownZero is a priced $0.00: the marginal cost of a proven subscription turn,
 // distinct from an absent or unknown total.
@@ -99,7 +115,7 @@ func knownZero() money { return money{any: true} }
 // that caveat, and the list price is shown beside it.
 func estimatedZero() money {
 	var m money
-	m.addEstimated(0)
+	m.addEstimated(0, causeSubscriptionOverage)
 	return m
 }
 
@@ -114,7 +130,7 @@ const estimateSubscriptionOverage = "a subscription covers the request inside it
 // can show both. An unproven row keeps billed == list and renders exactly as
 // before, so the fallback never changes output.
 // LIMIT: money's zero value is comparable (every field is a scalar, including
-// the estimated flag). showsList compares only priced-ness and amount, so a
+// the causes bit set). showsList compares only priced-ness and amount, so a
 // future non-comparable field cannot break that test.
 type costPair struct {
 	list         money
@@ -154,14 +170,21 @@ func (p costPair) showsList() bool {
 type estimateReasons struct{ cache, overage bool }
 
 // needsOverageLegend reports the allowance caveat: a proven subscription bills $0
-// on an estimate because extra usage may still bill at list price.
-func (p costPair) needsOverageLegend() bool { return p.subscription && p.billed.isEstimated() }
+// on an estimate because extra usage may still bill at list price. Only the
+// overage cause qualifies; a cache-write guess on a covered total must not ask
+// for the allowance line.
+func (p costPair) needsOverageLegend() bool {
+	return p.billed.known() && p.billed.hasCause(causeSubscriptionOverage)
+}
 
-// needsCacheLegend reports the token-split guess: the list price (or an
-// unproven billed total) rests on the 5-minute cache-write assumption. A list
-// the pair hides (showsList false) carries no "~" cell, so it asks for no line.
+// needsCacheLegend reports the token-split guess: the list price (or a billed
+// total) rests on the 5-minute cache-write assumption. A list the pair hides
+// (showsList false) carries no "~" cell, so it asks for no line.
 func (p costPair) needsCacheLegend() bool {
-	return (p.showsList() && p.list.isEstimated()) || (!p.subscription && p.billed.isEstimated())
+	if p.showsList() && p.list.known() && p.list.hasCause(causeCacheWrite) {
+		return true
+	}
+	return p.billed.known() && p.billed.hasCause(causeCacheWrite)
 }
 
 // reasons resolves the pair to the legend lines its rendered cells need.
@@ -208,7 +231,7 @@ func formatCost(v float64) string { return fmt.Sprintf("$%.2f", roundCost(v)) }
 
 // tier names one accumulator and JSON token class. The order is the index into
 // tokenTiers and the JSON key order; the table's display order is separate (see
-// status.go detailTokenMeta).
+// status_detail.go detailTokenMeta).
 type tier int
 
 const (

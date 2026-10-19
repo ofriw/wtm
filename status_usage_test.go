@@ -98,7 +98,7 @@ func estimatedUsage() *worktreeUsage {
 	var u worktreeUsage
 	u.addSession("claude", []usageEvent{{at: at(0), model: "claude-sonnet-4-6"}}, pairPricer(func(usageEvent) money {
 		var m money
-		m.addEstimated(1.23)
+		m.addEstimated(1.23, causeCacheWrite)
 		return m
 	}))
 	return &u
@@ -206,7 +206,7 @@ func TestCostLegendNeededFollowsRenderedCells(t *testing.T) {
 // total prints one line, an overage-only total prints the other, both print
 // two, and an exact total prints none.
 func TestCostLegendSelectivity(t *testing.T) {
-	cacheEst := func() money { var m money; m.addEstimated(1); return m }()
+	cacheEst := func() money { var m money; m.addEstimated(1, causeCacheWrite); return m }()
 	overageEst := func() costPair {
 		var p costPair
 		p.list.addKnown(1)
@@ -228,6 +228,9 @@ func TestCostLegendSelectivity(t *testing.T) {
 		wantOver  bool
 	}{
 		{"cache-only", costPair{list: cacheEst, billed: cacheEst}, true, false},
+		// A proven subscription may carry the same cache-write guess; it must
+		// still ask for the cache line only, never the allowance caveat.
+		{"covered-cache", costPair{list: cacheEst, billed: cacheEst, subscription: true}, true, false},
 		{"overage-only", overageEst, false, true},
 		{"exact", costPair{list: func() money { var m money; m.addKnown(1); return m }(), billed: func() money { var m money; m.addKnown(0); return m }(), subscription: true}, false, false},
 	}

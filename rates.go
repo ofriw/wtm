@@ -197,7 +197,7 @@ func addEstimatedClass(m *money, rate *float64, n int64) {
 		m.addUnknown()
 		return
 	}
-	m.addEstimated(float64(n) * *rate)
+	m.addEstimated(float64(n)**rate, causeCacheWrite)
 }
 
 // resolveModel finds a rate for a recorded model id. The catalog uses many

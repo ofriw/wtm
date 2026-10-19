@@ -580,7 +580,7 @@ func narrowProvenPairWorktree(t *testing.T, now time.Time, estimated bool) ([]wo
 		list = "~$41.20"
 		u.addSession("pi", []usageEvent{{at: now, model: "m"}}, func(usageEvent) pricedEvent {
 			var l, billed money
-			l.addEstimated(41.20)
+			l.addEstimated(41.20, causeCacheWrite)
 			billed.addKnown(0)
 			return pricedEvent{total: costPair{list: l, billed: billed, subscription: true}}
 		})
