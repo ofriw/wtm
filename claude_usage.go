@@ -65,7 +65,11 @@ func claudeUsageEvents(r *bufio.Reader) ([]usageEvent, int, error) {
 				sortUsageEvents(events)
 				return events, dropped, nil
 			}
-			return nil, dropped, err
+			// A read error must not discard the records already parsed: the
+			// caller drops the session (and taints the total), but the kept
+			// events stay available for diagnostics and tests.
+			sortUsageEvents(events)
+			return events, dropped, err
 		}
 	}
 }

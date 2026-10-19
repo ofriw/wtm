@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -141,6 +143,37 @@ func TestClaudeKeylessRecordsSurviveDedupe(t *testing.T) {
 	}
 	if kept := dedupeOne(events); len(kept) != 2 {
 		t.Fatalf("id-less records deduped to %d, want 2", len(kept))
+	}
+}
+
+// failReader ends a stream with err after the wrapped reader is exhausted.
+type failReader struct{ err error }
+
+func (f failReader) Read([]byte) (int, error) { return 0, f.err }
+
+// TestClaudeUsageKeepsEventsBeforeReadError pins the internal parser contract:
+// when the session read fails mid-file, the records already parsed survive in
+// time order beside the error. buildUsage still drops the session and taints the
+// total, so this is not a user-visible salvage path.
+func TestClaudeUsageKeepsEventsBeforeReadError(t *testing.T) {
+	first := `{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","requestId":"r2","message":{"id":"b","model":"m","usage":{"input_tokens":2}}}`
+	second := `{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"r1","message":{"id":"a","model":"m","usage":{"input_tokens":1}}}`
+	r := bufio.NewReader(io.MultiReader(
+		strings.NewReader(first+"\n"+second+"\n"),
+		failReader{err: io.ErrUnexpectedEOF},
+	))
+	events, dropped, err := claudeUsageEvents(r)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if dropped != 0 {
+		t.Errorf("dropped = %d, want 0", dropped)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want the 2 parsed before the error", len(events))
+	}
+	if !events[0].at.Before(events[1].at) {
+		t.Errorf("events are not time ordered: %v", events)
 	}
 }
 
