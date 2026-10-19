@@ -193,6 +193,24 @@ func readFileShared(path string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
+// readFileLimited reads at most limit bytes and reports overflow. Small
+// control files use it so a corrupted or hostile file cannot exhaust memory.
+func readFileLimited(path string, limit int64) ([]byte, error) {
+	f, err := openShared(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, limit)
+	}
+	return data, nil
+}
+
 // writeFileAtomic replaces path by writing a sibling temp file and renaming it
 // into place. A rename within one directory is atomic, so a concurrent reader
 // sees either the old file or the new one, never a half-written file.

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // rates.go — the public rate catalog. wtm holds no rates: it reads one public
@@ -28,14 +31,47 @@ const (
 	// refresh fails, so a price change degrades to old numbers, never to none.
 	ratesCacheTTL     = 24 * time.Hour
 	ratesFetchTimeout = 15 * time.Second
-	// ratesRetryCooldown bounds how often a failed fetch is retried. Without
-	// it, a broken network would delay every status run by ratesFetchTimeout.
+	// ratesRetryCooldown bounds retries after a failed fetch. Without it, a
+	// broken network would delay every status run by ratesFetchTimeout. A cache
+	// write failure does not start a cooldown: the next run can still fetch and
+	// price, so a broken cache never hides a working network.
 	ratesRetryCooldown = 15 * time.Minute
+	// ratesMaxBytes bounds the network catalog read. The real catalog is a few
+	// MB; a larger body is a wrong endpoint or a hostile response, and parsing a
+	// truncated catalog would silently drop models. The cap+1 read lets the
+	// loader detect the overflow without buffering an unbounded body.
+	ratesMaxBytes = 16 << 20
+	// maxAttemptMarkerBytes bounds a cooldown marker read. A marker is a tiny
+	// JSON object; a larger file is corruption, not a cause worth reading.
+	maxAttemptMarkerBytes = 4 << 10
+	// maxAttemptMessageBytes caps the recorded failure text printed to stderr,
+	// so a corrupted marker cannot flood the terminal.
+	maxAttemptMessageBytes = 512
 	// longContextThreshold matches the catalog's *_above_200k_tokens fields: a
 	// request whose input context exceeds the model's standard window is priced
 	// at the above-200k rate when the catalog lists one.
 	longContextThreshold = 200_000
 )
+
+// errRateCatalogTooLarge marks a catalog body over ratesMaxBytes, so callers and
+// tests can recognise the refusal instead of treating it as a parse failure.
+var errRateCatalogTooLarge = errors.New("rate catalog exceeds size limit")
+
+// errNoPricedModels marks a catalog that decoded but holds no priced model, so
+// a caller can distinguish an empty catalog from a malformed one.
+var errNoPricedModels = errors.New("rate catalog has no priced models")
+
+// errRateCatalogCoolingDown marks a skipped refresh whose last failure is too
+// recent. The marker carries the cause, so a cooled-down run never mistakes the
+// cooldown for a missing cache.
+var errRateCatalogCoolingDown = errors.New("rate catalog refresh is cooling down after a recent failure")
+
+// rateAttemptRecord is the cooldown marker's body. It carries the failure cause
+// across process boundaries, so the next run can report why the refresh stopped.
+type rateAttemptRecord struct {
+	Message  string `json:"message"`
+	TooLarge bool   `json:"tooLarge,omitempty"`
+}
 
 // tokenRates is one price set. Missing fields are nil, not zero: a catalog that
 // lists no rate must read as unknown, while a listed 0 is a real free class.
@@ -337,7 +373,8 @@ func (e litellmEntry) toRate() modelRate {
 }
 
 // searchRate picks a per-query price. Anthropic lists one price for every
-// context size; a split catalog falls back deterministically to medium.
+// context size, so a split catalog resolves in a fixed order (medium, low,
+// high) and returns nil when none is listed, which reads as unknown.
 func searchRate(m map[string]float64) *float64 {
 	for _, key := range []string{"search_context_size_medium", "search_context_size_low", "search_context_size_high"} {
 		if v, ok := m[key]; ok {
@@ -361,7 +398,7 @@ func parseCatalog(r io.Reader) (catalog, error) {
 		}
 	}
 	if len(c) == 0 {
-		return nil, fmt.Errorf("rate catalog has no priced models")
+		return nil, errNoPricedModels
 	}
 	return c, nil
 }
@@ -397,42 +434,213 @@ func loadCatalogFrom(url string) (catalog, error) {
 }
 
 // loadFromCachePath resolves a fresh cache, then a fetch, then the stale cache
-// as the last resort.
+// as the last resort. When the refresh fails, now or inside a cooldown, and no
+// fallback catalog exists, the recorded cause is returned: it names the real
+// failure (status, size, network), where the missing cache would only report
+// ENOENT.
 func loadFromCachePath(path, url string) (catalog, error) {
 	if c, ok := readFreshCache(path); ok {
 		return c, nil
 	}
-	// A failed fetch must not stall every run: remember the attempt and retry
-	// only after the cooldown. The stale cache still serves as the fallback.
-	if !fetchCoolingDown(path) {
+	// A failed fetch starts a cooldown to avoid repeated stalls. The stale cache
+	// still serves as the fallback.
+	var fetchErr error
+	if cooling, cause := fetchCoolingDown(path); cooling {
+		fetchErr = cause
+		if !errors.Is(cause, errRateCatalogCoolingDown) {
+			fetchErr = fmt.Errorf("%w: %w", errRateCatalogCoolingDown, cause)
+		}
+	} else {
 		if c, err := fetchAndCache(path, url); err == nil {
 			return c, nil
+		} else {
+			fetchErr = err
 		}
-		_ = markFetchAttempt(path)
+		_ = markFetchAttempt(path, fetchErr)
 	}
-	return parseCatalogFile(path)
+	c, err := parseCatalogFile(path)
+	if err == nil {
+		return c, nil
+	}
+	if fetchErr != nil {
+		return nil, fetchErr
+	}
+	return nil, err
 }
 
-// fetchCoolingDown reports a recent failed fetch, so a broken network cannot
-// delay every status run.
-func fetchCoolingDown(path string) bool {
-	info, err := os.Stat(attemptPath(path))
+// fetchCoolingDown reports a recent failed fetch and its recorded cause. Both
+// marker locations count: the primary beside the cache and the fallback for a
+// run whose cache directory is unwritable. ensureFallbackDir validates the
+// fallback directory before its marker is read.
+func fetchCoolingDown(path string) (bool, error) {
+	if cooling, cause := recentAttemptCause(attemptPath(path)); cooling {
+		return true, cause
+	}
+	fallback := fallbackAttemptPath(path)
+	// Avoid creating the private directory on the common path where no fallback
+	// marker exists.
+	if _, err := os.Lstat(fallback); err != nil {
+		return false, nil
+	}
+	dir, err := ensureFallbackDir()
 	if err != nil {
-		return false
+		return false, nil
 	}
-	return nowFunc().Sub(info.ModTime()) < ratesRetryCooldown
+	return recentAttemptCause(filepath.Join(dir, fallbackAttemptName(path)))
 }
 
-// markFetchAttempt records a failed fetch. A write failure must not fail the
-// command, so the caller ignores the error.
-func markFetchAttempt(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+// recentAttemptCause reports a fresh marker and its cause. A future mtime is
+// invalid, not a long cooldown; a non-regular file is never opened. Expired or
+// invalid markers are removed so they cannot leak forever.
+func recentAttemptCause(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, nil
+	}
+	if !info.Mode().IsRegular() {
+		_ = os.Remove(path)
+		return false, nil
+	}
+	age := nowFunc().Sub(info.ModTime())
+	if age < 0 || age >= ratesRetryCooldown {
+		_ = os.Remove(path)
+		return false, nil
+	}
+	return true, readAttemptCause(path)
+}
+
+// readAttemptCause reconstructs the failure a marker recorded. A missing,
+// unreadable, or oversized body is still a cooldown, so callers never fall
+// through to ENOENT.
+func readAttemptCause(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return errRateCatalogCoolingDown
+	}
+	data, err := readFileLimited(path, maxAttemptMarkerBytes)
+	if err != nil {
+		return errRateCatalogCoolingDown
+	}
+	var rec rateAttemptRecord
+	if json.Unmarshal(data, &rec) != nil || rec.Message == "" {
+		return errRateCatalogCoolingDown
+	}
+	if rec.TooLarge {
+		return errRateCatalogTooLarge
+	}
+	return errors.New(sanitizeAttemptMessage(rec.Message))
+}
+
+// sanitizeAttemptMessage strips terminal control bytes and caps the length, so
+// a corrupted marker cannot inject escapes into stderr.
+func sanitizeAttemptMessage(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			continue
+		}
+		// Skip runes that do not fit whole, so the cap is exact and no rune splits.
+		if n := utf8.RuneLen(r); n < 0 || b.Len()+n > maxAttemptMessageBytes {
+			break
+		}
+		b.WriteRune(r)
+	}
+	if b.Len() == 0 {
+		return errRateCatalogCoolingDown.Error()
+	}
+	return b.String()
+}
+
+// markFetchAttempt records a fetch failure and its cause. A marker-write
+// failure must not prevent pricing, so callers ignore the error. When the cache
+// directory is unwritable (a file named .wtm, a read-only home), a marker in the
+// fallback directory still arms the cooldown after ensureFallbackDir validates
+// the directory.
+func markFetchAttempt(path string, cause error) error {
+	rec := rateAttemptRecord{Message: cause.Error(), TooLarge: errors.Is(cause, errRateCatalogTooLarge)}
+	data, err := json.Marshal(rec)
+	if err != nil {
 		return err
 	}
-	return os.WriteFile(attemptPath(path), nil, 0o644)
+	err = writeFileAtomic(attemptPath(path), data, 0o600)
+	if err == nil {
+		return nil
+	}
+	dir, dirErr := ensureFallbackDir()
+	if dirErr != nil {
+		return fmt.Errorf("attempt marker: %w (fallback: %v)", err, dirErr)
+	}
+	if fallbackErr := writeFileAtomic(filepath.Join(dir, fallbackAttemptName(path)), data, 0o600); fallbackErr != nil {
+		return fmt.Errorf("attempt marker: %w (fallback: %v)", err, fallbackErr)
+	}
+	return nil
 }
 
 func attemptPath(path string) string { return path + ".attempt" }
+
+// fallbackAttemptDir locates cooldown markers when the cache directory is
+// unwritable. userTempDirName provides the platform-specific path component;
+// callers use ensureFallbackDir to validate the directory before use.
+func fallbackAttemptDir() string {
+	return filepath.Join(os.TempDir(), userTempDirName())
+}
+
+// ensureFallbackDir creates or validates the fallback directory. It rejects
+// non-directories and symlinks without chmodding existing paths. Unix requires
+// mode 0700 owned by the current user (privateFallbackDir); Windows relies on
+// the temp directory ACL.
+func ensureFallbackDir() (string, error) {
+	dir := fallbackAttemptDir()
+	info, err := os.Lstat(dir)
+	if err == nil {
+		return validateFallbackDir(dir, info)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", err
+	}
+	info, err = os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	return validateFallbackDir(dir, info)
+}
+
+func validateFallbackDir(dir string, info os.FileInfo) (string, error) {
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !privateFallbackDir(info) {
+		return "", fmt.Errorf("rate marker dir is not a private directory")
+	}
+	return dir, nil
+}
+
+// fallbackAttemptPath returns the fallback marker path for a cache path. The
+// hash keeps the name short and unique per cache path.
+func fallbackAttemptPath(path string) string {
+	return filepath.Join(fallbackAttemptDir(), fallbackAttemptName(path))
+}
+
+func fallbackAttemptName(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	return fmt.Sprintf("wtm-rates-attempt-%x", sum[:8])
+}
+
+// clearAttemptMarkers removes both cooldown markers after a successful fetch,
+// so a marker file cannot outlive the failure it records. The fallback marker
+// is removed only after ensureFallbackDir validates its directory.
+func clearAttemptMarkers(path string) {
+	_ = os.Remove(attemptPath(path))
+	fallback := fallbackAttemptPath(path)
+	if _, err := os.Lstat(fallback); err != nil {
+		return
+	}
+	dir, err := ensureFallbackDir()
+	if err != nil {
+		return
+	}
+	_ = os.Remove(filepath.Join(dir, fallbackAttemptName(path)))
+}
 
 func readFreshCache(path string) (catalog, bool) {
 	fresh, err := cacheFresh(path)
@@ -452,8 +660,14 @@ func fetchAndCache(path, url string) (catalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A failed cache write must not fail the command, so the error is dropped.
-	_ = writeFileAtomic(path, raw, 0o644)
+	// A failed cache write must not hide prices: keep the fetched catalog for
+	// this run and retry the fetch next run instead of serving unknown costs.
+	if err := writeFileAtomic(path, raw, 0o644); err != nil {
+		warnf("rate cache write failed: %s; prices will be fetched again next run", err)
+	}
+	// The fetch succeeded, so any prior failure marker is obsolete even when the
+	// cache write failed.
+	clearAttemptMarkers(path)
 	return c, nil
 }
 
@@ -494,5 +708,12 @@ func fetchRates(url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("rate catalog: HTTP %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, ratesMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > ratesMaxBytes {
+		return nil, fmt.Errorf("rate catalog: response exceeds %d bytes: %w", ratesMaxBytes, errRateCatalogTooLarge)
+	}
+	return data, nil
 }

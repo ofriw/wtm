@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -13,6 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // rates_test.go — the catalog and pricing contracts: missing rates are unknown,
@@ -65,6 +68,32 @@ func TestParseCatalogSkipsUnpricedEntries(t *testing.T) {
 	}
 	if _, ok := c["m1"]; !ok {
 		t.Fatal("m1 missing")
+	}
+}
+
+// TestParseCatalogNoPricedModels pins the empty-catalog sentinel: a document
+// with only the sample spec and comment rows is a recognised failure, not a
+// generic parse error.
+func TestParseCatalogNoPricedModels(t *testing.T) {
+	_, err := parseCatalog(strings.NewReader(`{"sample_spec":{"input_cost_per_token":"float"},"#comment":{"note":"ignore"}}`))
+	if !errors.Is(err, errNoPricedModels) {
+		t.Fatalf("err = %v, want errNoPricedModels", err)
+	}
+}
+
+// TestPriceWebSearchWithoutSearchRateIsUnknown pins the missing-rate rule: a
+// query the model entry cannot price taints the total instead of adding zero.
+func TestPriceWebSearchWithoutSearchRateIsUnknown(t *testing.T) {
+	c := catalog{"m": {standard: tokenRates{input: fptr(0.000001)}}}
+	p := c.price(usageEvent{model: "m", tier: "standard", tokens: promptTokens{input: 1}, webSearch: 1})
+	if !p.total.bothUnpriced() {
+		t.Fatalf("price = %+v, want both sides unknown: the search rate is absent", p.total)
+	}
+	if got := p.total.cell(); got != "unknown" {
+		t.Errorf("cell = %q, want unknown", got)
+	}
+	if got := p.total.list.jsonValue(); got != nil {
+		t.Errorf("json = %v, want null", *got)
 	}
 }
 
@@ -260,22 +289,38 @@ func TestFetchCoolingDown(t *testing.T) {
 	pinned := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 	t.Setenv("WTM_NOW", pinned.Format(time.RFC3339))
 	path := filepath.Join(t.TempDir(), "rates.json")
-	if fetchCoolingDown(path) {
+	if cooling, _ := fetchCoolingDown(path); cooling {
 		t.Fatal("no marker must not cool down")
 	}
-	writeFile(t, attemptPath(path), "", 0o644)
+	cause := errors.New("rate catalog: HTTP 500")
+	if err := markFetchAttempt(path, cause); err != nil {
+		t.Fatal(err)
+	}
 	recent := pinned.Add(-ratesRetryCooldown / 2)
 	if err := os.Chtimes(attemptPath(path), recent, recent); err != nil {
 		t.Fatal(err)
 	}
-	if !fetchCoolingDown(path) {
+	cooling, got := fetchCoolingDown(path)
+	if !cooling {
 		t.Fatal("recent marker must cool down")
+	}
+	if got == nil || got.Error() != cause.Error() {
+		t.Fatalf("cause = %v, want %v", got, cause)
+	}
+	// An empty marker from an older build still cools down, with a generic cause.
+	writeFile(t, attemptPath(path), "", 0o644)
+	if err := os.Chtimes(attemptPath(path), recent, recent); err != nil {
+		t.Fatal(err)
+	}
+	cooling, got = fetchCoolingDown(path)
+	if !cooling || !errors.Is(got, errRateCatalogCoolingDown) {
+		t.Fatalf("empty marker cause = %v, want errRateCatalogCoolingDown", got)
 	}
 	old := pinned.Add(-ratesRetryCooldown - time.Minute)
 	if err := os.Chtimes(attemptPath(path), old, old); err != nil {
 		t.Fatal(err)
 	}
-	if fetchCoolingDown(path) {
+	if cooling, _ := fetchCoolingDown(path); cooling {
 		t.Fatal("expired marker must not cool down")
 	}
 }
@@ -303,9 +348,33 @@ func serveRatesCounting(t *testing.T, status int, body string) (string, *atomic.
 func isolatedRatesCache(t *testing.T) string {
 	t.Helper()
 	t.Setenv(ratesEnv, "") // A local override would bypass the fetch under test.
+	// pinStaleCatalog stamps mtimes with the wall clock; a host-pinned WTM_NOW
+	// would make a deliberately stale cache look fresh.
+	t.Setenv("WTM_NOW", "")
 	home := t.TempDir()
 	setHomeEnv(t, home)
 	return filepath.Join(home, ".wtm", "rates.json")
+}
+
+// writeFallbackMarker seeds a fallback cooldown marker and removes it after the
+// test, so the private fallback directory never accumulates test state.
+func writeFallbackMarker(t *testing.T, path string, rec rateAttemptRecord, mtime time.Time) string {
+	t.Helper()
+	dir, err := ensureFallbackDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, fallbackAttemptName(path))
+	writeFile(t, marker, string(data), 0o600)
+	if err := os.Chtimes(marker, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(marker) })
+	return marker
 }
 
 // pinStaleCatalog leaves a stale cache so the loader attempts a refresh.
@@ -359,8 +428,8 @@ func TestRatesFetchErrorWithoutCache(t *testing.T) {
 	if _, err := loadCatalogFrom(url); err == nil {
 		t.Fatal("HTTP 500 with no cache must fail the load")
 	}
-	if _, err := loadCatalogFrom(url); err == nil {
-		t.Fatal("second load with no cache must fail the load")
+	if _, err := loadCatalogFrom(url); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("second load = %v, want the recorded HTTP 500 cause", err)
 	}
 	if hits.Load() != 1 {
 		t.Errorf("fetches = %d, want 1: the retry must cool down", hits.Load())
@@ -477,20 +546,251 @@ func TestRatesRefreshReplacesHeldSnapshot(t *testing.T) {
 }
 
 // TestRatesCacheWriteFailureStillPrices pins that a failed cache write is
-// non-fatal: the loader still prices the fetched catalog, and the blocked path
-// is left untouched with no temp file behind.
+// non-fatal: the loader prices the fetched catalog, warns, and leaves no
+// cooldown marker, so the next run can fetch and price again.
 func TestRatesCacheWriteFailureStillPrices(t *testing.T) {
 	path := isolatedRatesCache(t)
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	c, err := loadCatalogFrom(serveRates(t, http.StatusOK, testCatalog))
-	assertFetchedCatalog(t, c, err)
+	url, hits := serveRatesCounting(t, http.StatusOK, testCatalog)
+	errOut := captureStderr(t, func() {
+		c, err := loadCatalogFrom(url)
+		assertFetchedCatalog(t, c, err)
+	})
+	if !strings.Contains(errOut, "rate cache write failed") {
+		t.Errorf("stderr must disclose the cache-write failure:\n%s", errOut)
+	}
 	info, err := os.Stat(path)
 	if err != nil || !info.IsDir() {
 		t.Fatalf("cache directory replaced or missing: info=%v err=%v", info, err)
 	}
 	assertNoRatesTempLeak(t, path)
+	if _, err := os.Stat(attemptPath(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cache-write failure must not arm a cooldown: %v", err)
+	}
+	// The next run refetches and prices; storage failure must not hide costs.
+	captureStderr(t, func() {
+		c, err := loadCatalogFrom(url)
+		assertFetchedCatalog(t, c, err)
+	})
+	assertRatesFetchCount(t, hits, 2)
+}
+
+// TestRatesCacheWriteFailureRefetchesEveryRun pins both blocked-cache shapes:
+// a working network keeps pricing, and no cooldown marker suppresses the next
+// fetch.
+func TestRatesCacheWriteFailureRefetchesEveryRun(t *testing.T) {
+	for _, blockedParent := range []bool{false, true} {
+		name := "cache path is directory"
+		if blockedParent {
+			name = "cache parent is file"
+		}
+		t.Run(name, func(t *testing.T) {
+			path, marker := blockRatesCacheWrite(t, blockedParent)
+			url, hits := serveRatesCounting(t, http.StatusOK, testCatalog)
+			for i := int32(1); i <= 2; i++ {
+				errOut := captureStderr(t, func() {
+					c, err := loadCatalogFrom(url)
+					assertFetchedCatalog(t, c, err)
+				})
+				if !strings.Contains(errOut, "rate cache write failed") {
+					t.Errorf("run %d stderr must disclose the cache-write failure:\n%s", i, errOut)
+				}
+				assertRatesFetchCount(t, hits, i)
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("run %d must not leave a cooldown marker: %v", i, err)
+				}
+			}
+			assertNoRatesTempLeak(t, path)
+		})
+	}
+}
+
+func blockRatesCacheWrite(t *testing.T, blockedParent bool) (string, string) {
+	t.Helper()
+	path := isolatedRatesCache(t)
+	if !blockedParent {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return path, attemptPath(path)
+	}
+	writeFile(t, filepath.Dir(path), "block", 0o644)
+	marker := fallbackAttemptPath(path)
+	t.Cleanup(func() {
+		if err := os.Remove(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove fallback marker: %v", err)
+		}
+	})
+	return path, marker
+}
+
+func assertRatesFetchCount(t *testing.T, hits *atomic.Int32, want int32) {
+	t.Helper()
+	if got := hits.Load(); got != want {
+		t.Fatalf("fetches = %d, want %d", got, want)
+	}
+}
+
+// TestMarkFetchAttemptFallsBackWhenCacheDirUnwritable pins the marker fallback:
+// when HOME/.wtm cannot be created (it is a file), a per-cache marker under the
+// OS temp directory still arms the cooldown.
+func TestMarkFetchAttemptFallsBackWhenCacheDirUnwritable(t *testing.T) {
+	path := isolatedRatesCache(t)
+	t.Cleanup(func() { _ = os.Remove(fallbackAttemptPath(path)) })
+	if err := os.WriteFile(filepath.Dir(path), []byte("block"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	url, hits := serveRatesCounting(t, http.StatusInternalServerError, "boom")
+	if _, err := loadCatalogFrom(url); err == nil {
+		t.Fatal("a cold outage with an unwritable cache directory must fail")
+	}
+	if _, err := loadCatalogFrom(url); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("second load = %v, want the recorded HTTP 500 cause", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("fetches = %d, want 1: the fallback marker must arm the cooldown", hits.Load())
+	}
+}
+
+// TestFetchCoolingDownIgnoresFutureMarker pins the clock guard: a marker with a
+// future mtime is invalid, not an arbitrarily long cooldown.
+func TestFetchCoolingDownIgnoresFutureMarker(t *testing.T) {
+	path := isolatedRatesCache(t)
+	marker := writeFallbackMarker(t, path, rateAttemptRecord{Message: "future"}, time.Now().Add(time.Hour))
+	if cooling, _ := fetchCoolingDown(path); cooling {
+		t.Fatal("a future marker must not cool down")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("future marker must be removed: %v", err)
+	}
+}
+
+// TestFetchCoolingDownRejectsNonRegularMarker pins the file-type guard: a
+// directory at the marker path is never opened as a marker.
+func TestFetchCoolingDownRejectsNonRegularMarker(t *testing.T) {
+	path := isolatedRatesCache(t)
+	marker := fallbackAttemptPath(path)
+	if err := os.MkdirAll(marker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(marker) })
+	if cooling, _ := fetchCoolingDown(path); cooling {
+		t.Fatal("a non-regular marker must not cool down")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid marker must be removed: %v", err)
+	}
+}
+
+// TestFetchCoolingDownRemovesExpiredMarker pins cleanup: an expired marker
+// cannot leak in the fallback directory forever.
+func TestFetchCoolingDownRemovesExpiredMarker(t *testing.T) {
+	path := isolatedRatesCache(t)
+	marker := writeFallbackMarker(t, path, rateAttemptRecord{Message: "old"}, time.Now().Add(-ratesRetryCooldown-time.Minute))
+	if cooling, _ := fetchCoolingDown(path); cooling {
+		t.Fatal("an expired marker must not cool down")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired marker must be removed: %v", err)
+	}
+}
+
+// TestReadAttemptCauseSanitizesControlCharacters pins the terminal-injection
+// guard: marker text is stripped of control bytes before it reaches stderr.
+func TestReadAttemptCauseSanitizesControlCharacters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "marker")
+	writeFile(t, path, `{"message":"a\u001b[31mb\nc"}`, 0o600)
+	err := readAttemptCause(path)
+	if err == nil {
+		t.Fatal("marker must produce a cause")
+	}
+	if got := err.Error(); got != "a[31mbc" {
+		t.Fatalf("cause = %q, want control bytes stripped", got)
+	}
+}
+
+// TestSanitizeAttemptMessageExactCap pins the length cap: output never exceeds
+// maxAttemptMessageBytes and never splits a multi-byte rune to fit.
+func TestSanitizeAttemptMessageExactCap(t *testing.T) {
+	msg := strings.Repeat("x", maxAttemptMessageBytes-1) + "\U0001F600" + strings.Repeat("y", 16)
+	got := sanitizeAttemptMessage(msg)
+	if len(got) > maxAttemptMessageBytes {
+		t.Fatalf("len = %d, want <= %d", len(got), maxAttemptMessageBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("cause %q is not valid UTF-8: a rune was split", got)
+	}
+}
+
+// TestClearAttemptMarkersRemovesBoth pins cleanup after a successful fetch.
+func TestClearAttemptMarkersRemovesBoth(t *testing.T) {
+	path := isolatedRatesCache(t)
+	writeFile(t, attemptPath(path), `{"message":"old"}`, 0o600)
+	fallback := writeFallbackMarker(t, path, rateAttemptRecord{Message: "old"}, time.Now())
+	clearAttemptMarkers(path)
+	for _, marker := range []string{attemptPath(path), fallback} {
+		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("marker %s survived cleanup: %v", marker, err)
+		}
+	}
+}
+
+// TestFetchRatesRejectsOversizedBody pins the read cap: a body over the limit
+// is refused with the size sentinel and never returned for parsing.
+func TestFetchRatesRejectsOversizedBody(t *testing.T) {
+	url, _ := serveRatesCounting(t, http.StatusOK, strings.Repeat("x", ratesMaxBytes+1))
+	data, err := fetchRates(url)
+	if data != nil || !errors.Is(err, errRateCatalogTooLarge) {
+		t.Fatalf("fetchRates = %d bytes, %v; want nil, errRateCatalogTooLarge", len(data), err)
+	}
+}
+
+// TestFetchRatesAcceptsExactSizeLimit pins the boundary: the cap rejects only
+// a body larger than the limit, never exactly the limit.
+func TestFetchRatesAcceptsExactSizeLimit(t *testing.T) {
+	url, _ := serveRatesCounting(t, http.StatusOK, strings.Repeat("x", ratesMaxBytes))
+	data, err := fetchRates(url)
+	if err != nil || len(data) != ratesMaxBytes {
+		t.Fatalf("fetchRates = %d bytes, %v; want the exact cap accepted", len(data), err)
+	}
+}
+
+// TestRatesOversizedWithoutCacheFails pins the cold path: an oversized body
+// with no fallback catalog reports the size error, not a missing-file error.
+func TestRatesOversizedWithoutCacheFails(t *testing.T) {
+	isolatedRatesCache(t)
+	url, hits := serveRatesCounting(t, http.StatusOK, strings.Repeat("x", ratesMaxBytes+1))
+	if _, err := loadCatalogFrom(url); !errors.Is(err, errRateCatalogTooLarge) {
+		t.Fatalf("err = %v, want errRateCatalogTooLarge", err)
+	}
+	if _, err := loadCatalogFrom(url); !errors.Is(err, errRateCatalogTooLarge) {
+		t.Fatalf("cooled-down err = %v, want the recorded size cause", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("fetches = %d, want 1: the retry must cool down", hits.Load())
+	}
+}
+
+// TestRatesOversizedFallsBackToStale pins the fallback order: a stale cache
+// still prices when the fetched body breaks the size cap.
+func TestRatesOversizedFallsBackToStale(t *testing.T) {
+	pinStaleCatalog(t, testCatalog)
+	url, hits := serveRatesCounting(t, http.StatusOK, strings.Repeat("x", ratesMaxBytes+1))
+	c, err := loadCatalogFrom(url)
+	if err != nil {
+		t.Fatalf("stale fallback: %v", err)
+	}
+	if _, ok := c["m1"]; !ok {
+		t.Fatal("stale cache was not used")
+	}
+	if _, err := loadCatalogFrom(url); err != nil {
+		t.Fatalf("second load: %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("fetches = %d, want 1: the retry must cool down", hits.Load())
+	}
 }
 
 // releaseBarrier bounds how long the server holds a response, so a change in
