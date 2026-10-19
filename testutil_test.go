@@ -194,6 +194,11 @@ func sandbox(t *testing.T) sandboxEnv {
 	for _, k := range claudeMeteredKeys() {
 		t.Setenv(k, "")
 	}
+	// Clear every host override that changes a price, a proof, or the clock:
+	// a developer's pinned catalog or fake time must never leak into a test.
+	for _, k := range []string{"WTM_NOW", ratesEnv, "WTM_CLAUDE_PARENT_SCOPE", "CLAUDE_CODE_CUSTOM_OAUTH_URL"} {
+		t.Setenv(k, "")
+	}
 	// Replace the managed-settings path list with none, so a host's real
 	// /etc or /Library file cannot change a covered-cost test.
 	t.Setenv("WTM_MANAGED_SETTINGS", "")
