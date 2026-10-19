@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// status_test.go — Tier-1 contracts for status.go. Discovery runs against a
-// real repo with linked worktrees; time-based helpers pin RELATIVE mtimes so
-// assertions never race the wall clock.
+// status_test.go — Tier-1 contracts for status, workspace and activity.
+// Discovery runs against a real repo with linked worktrees; time-based helpers
+// pin RELATIVE mtimes so assertions never race the wall clock.
 
 func setMtime(t *testing.T, path string, when time.Time) {
 	t.Helper()
