@@ -315,10 +315,10 @@ type piSpawnChild struct {
 }
 
 // appendPiSpawn records one event per child Pi reports on the parent's spawn
-// result. The child runs in memory, so this is its only record. A failed spawn
-// that reports neither a child nor a cost is a known-zero event, so it cannot
-// poison the total; a non-error child with no cost stays unknown-cost. A batch
-// that mixed models prices each child on its own model.
+// result. The child runs in memory, so this is its only record. The cost rules
+// match piModernSpawnChild: a failed costless spawn is a known zero, while a
+// costless non-error child stays unknown. A batch that mixed models prices each
+// child on its own model.
 func appendPiSpawn(events *[]usageEvent, at time.Time, id string, current, provider string, msg *piMessage, spawnAt map[string]time.Time) {
 	// Pair every child with its tool call so its running time counts. A missing
 	// call (older session) or a result before the call degrades to a point event.
