@@ -691,6 +691,43 @@ func TestSubscriptionClaudeParentSettingsIgnored(t *testing.T) {
 	}
 }
 
+// TestSubscriptionClaudeGrandparentSettingsVoidProof pins the full ancestor
+// walk: a metered settings file above the immediate parent still voids the
+// proof, so a nested checkout cannot hide a helper one level up. The disabled
+// subtest proves the grandparent, not ambient host state, caused the verdict.
+func TestSubscriptionClaudeGrandparentSettingsVoidProof(t *testing.T) {
+	seed := func(t *testing.T) (string, sessionIndex) {
+		t.Helper()
+		sandbox(t)
+		writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+		grand := t.TempDir()
+		writeFile(t, filepath.Join(grand, claudeSettingsFile), `{"apiKeyHelper":"/bin/fetch"}`, 0o600)
+		dir := filepath.Join(grand, "mid", "child")
+		return dir, usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{"input_tokens":100000}`))
+	}
+	t.Run("grandparent voids", func(t *testing.T) {
+		dir, idx := seed(t)
+		u := buildClaudeUsage(t, dir, idx)
+		if got := u.cost().cell(); got != "$0.10" {
+			t.Fatalf("cost = %q, want the list price $0.10: a grandparent helper voids the proof", got)
+		}
+		if _, ok := worktreeJSON(t, &u)["listCost"]; ok {
+			t.Error("unproven output must omit listCost")
+		}
+	})
+	t.Run("scope disabled", func(t *testing.T) {
+		dir, idx := seed(t)
+		t.Setenv("WTM_CLAUDE_PARENT_SCOPE", "0")
+		u := buildClaudeUsage(t, dir, idx)
+		if got := u.cost().cell(); got != "$0.00/$0.10" {
+			t.Fatalf("cost = %q, want $0.00/$0.10: disabling the walk keeps the proof", got)
+		}
+		if _, ok := worktreeJSON(t, &u)["listCost"]; !ok {
+			t.Error("covered output must carry listCost")
+		}
+	})
+}
+
 // TestSubscriptionClaudeManagedOverrideStaysList pins the enterprise rule: a
 // managed-settings.json with a helper or metered env key voids every
 // worktree's proof at once, since IT owns that file.
