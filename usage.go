@@ -493,12 +493,6 @@ func (u *worktreeUsage) harness(name string) *harnessUsage {
 	return h
 }
 
-// addSession folds one session's events into the worktree: the session span for
-// the harness, each model's span inside the session, and every cost.
-func (u *worktreeUsage) addSession(harness string, events []usageEvent, price func(usageEvent) pricedEvent) {
-	u.addBilledSession(harness, events, nil, price)
-}
-
 // addBilledSession folds one session where billed[i] marks the events that
 // contribute cost. Every event still folds into the spans, so dedupe never
 // changes activity time; only the billed subset contributes money. A nil mask

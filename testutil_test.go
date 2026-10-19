@@ -352,3 +352,10 @@ func runWTM(t *testing.T, dir string, env []string, args ...string) (string, str
 	}
 	return out.String(), errOut.String(), rc
 }
+
+// addSession folds one fully billed session. Production folds through
+// addBilledSession with dedupe masks; tests that need no dedupe use this
+// shorthand, so the shipped code carries no test-only wrapper.
+func (u *worktreeUsage) addSession(harness string, events []usageEvent, price func(usageEvent) pricedEvent) {
+	u.addBilledSession(harness, events, nil, price)
+}
