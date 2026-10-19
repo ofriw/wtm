@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // usage_integration_test.go — loader→pricer→cell contracts the unit tables do
@@ -392,6 +394,149 @@ func TestBuildUsageOversizedUnbilledRecordStillDiscloses(t *testing.T) {
 	}
 	if h := u.harnesses[piAgent.name]; h == nil || len(h.models) == 0 {
 		t.Fatalf("the good record after the loss must still fold: %+v", u)
+	}
+}
+
+// TestBuildUsageProvenPiPlusEstimatedClaudeAsksNoOverageLegend pins B1 end to
+// end: an exact proven Pi charge beside an unproven Claude cache-write estimate
+// carries the cache cause only, so the allowance caveat must not print.
+func TestBuildUsageProvenPiPlusEstimatedClaudeAsksNoOverageLegend(t *testing.T) {
+	sandbox(t)
+	dir := t.TempDir()
+	piPath := filepath.Join(dir, "p.jsonl")
+	claudePath := filepath.Join(dir, "c.jsonl")
+	writeFile(t, piPath, piProviderLine("openai-codex", 1)+"\n", 0o644)
+	writeFile(t, claudePath, claudeUsageLine(`{"input_tokens":1000,"cache_creation_input_tokens":100}`)+"\n", 0o644)
+	idx := sessionIndex{canonical(dir): {
+		{path: piPath, harness: piAgent.name},
+		{path: claudePath, harness: claudeAgent.name},
+	}}
+	u, err := buildUsage(dir, idx, testRates(t), loadSubscriptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := u.cost().reasons()
+	if !r.cache {
+		t.Errorf("reasons = %+v, want the cache-write caveat", r)
+	}
+	if r.overage {
+		t.Errorf("reasons = %+v, want no allowance caveat: the estimate is a token split", r)
+	}
+}
+
+// TestLoadUsagePiOnlyNeedsNoRatesCatalog pins T1: a repo with only Pi sessions
+// resolves cost from the harness record without loading the catalog, so a
+// missing WTM_RATES and an offline host change nothing.
+func TestLoadUsagePiOnlyNeedsNoRatesCatalog(t *testing.T) {
+	sandbox(t)
+	// A missing pinned catalog makes any catalog load fail and warn, so this test
+	// proves the loader is never reached instead of depending on network state.
+	t.Setenv(ratesEnv, filepath.Join(t.TempDir(), "missing.json"))
+	t.Setenv("WTM_NOW", "2026-01-01T01:00:00Z")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.jsonl")
+	writeFile(t, path, piProviderLine("", 1.5)+"\n", 0o644)
+	ws := workspace{
+		wts: []worktree{{Path: dir}},
+		idx: sessionIndex{canonical(dir): {{path: path, harness: piAgent.name}}},
+	}
+	errOut := captureStderr(t, func() { ws.loadUsage() })
+	if strings.Contains(errOut, "claude cost unavailable") {
+		t.Fatalf("a Pi-only repo must not load the catalog:\n%s", errOut)
+	}
+	u := ws.wts[0].Usage
+	if u == nil || !u.cost().billed.known() {
+		t.Fatalf("Pi cost = %+v, want a resolved price", u)
+	}
+	if got := u.cost().cell(); got != "$1.50" {
+		t.Errorf("cost = %q, want $1.50", got)
+	}
+}
+
+// TestStatusClaudeCatalogOutageWarnsAndReportsUnknown pins the user-visible
+// outage path: a missing catalog keeps status alive, warns, and reports unknown
+// cost in both the table and the JSON contract.
+func TestStatusClaudeCatalogOutageWarnsAndReportsUnknown(t *testing.T) {
+	sandbox(t)
+	t.Setenv(ratesEnv, filepath.Join(t.TempDir(), "missing.json"))
+	t.Setenv("WTM_NOW", "2026-01-01T01:00:00Z")
+	repo := nativeRepo(t)
+	path := mkClaudeSession(t, repo, "outage", time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC))
+	writeFile(t, path, claudeTranscript(repo)+claudeUsageLine(`{"input_tokens":1000}`)+"\n", 0o644)
+
+	out, errOut, rc := runWTM(t, repo, []string{"COLUMNS=200"}, "status", "--color=never")
+	if rc != 0 {
+		t.Fatalf("status exit %d: %s", rc, errOut)
+	}
+	if !strings.Contains(errOut, "claude cost unavailable") {
+		t.Errorf("stderr must disclose the missing catalog:\n%s", errOut)
+	}
+	if !strings.Contains(out, "unknown") {
+		t.Errorf("table must report unknown cost:\n%s", out)
+	}
+
+	jsonOut, jsonErr, rc := runWTM(t, repo, nil, "status", "--json")
+	if rc != 0 {
+		t.Fatalf("status --json exit %d: %s", rc, jsonErr)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(jsonOut), &rows); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, jsonOut)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if v, present := rows[0]["cost"]; !present || v != nil {
+		t.Errorf("cost = %v (present %v), want null", v, present)
+	}
+}
+
+// TestStatusDisclosesPartialPiUsage pins T5 through the real binary: one
+// dropped record taints the total, so the table marks ACTIVE with "~", COST
+// reads unknown, the partial legend prints, and JSON carries the flag.
+func TestStatusDisclosesPartialPiUsage(t *testing.T) {
+	sandbox(t)
+	t.Setenv(ratesEnv, "")
+	t.Setenv("WTM_NOW", "2026-01-01T01:00:00Z")
+	repo := nativeRepo(t)
+	path := mkSession(t, repo, "partial", time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC))
+	body := fmt.Sprintf("{\"type\":\"session\",\"cwd\":%q}\n", repo)
+	body += `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}
+`
+	body += `{"type":"message","timestamp":"2026-01-01T00:00:10Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":0}}}}
+`
+	body += `{"type":"message","timestamp":"bad","message":{"role":"assistant","model":"m","usage":` + "\n"
+	writeFile(t, path, body, 0o644)
+
+	out, errOut, rc := runWTM(t, repo, []string{"COLUMNS=200"}, "status", "--color=never")
+	if rc != 0 {
+		t.Fatalf("status exit %d: %s", rc, errOut)
+	}
+	for _, want := range []string{"~10s", "unknown", partialLegend} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(errOut, "session record") {
+		t.Errorf("stderr must disclose the dropped record:\n%s", errOut)
+	}
+
+	jsonOut, jsonErr, rc := runWTM(t, repo, nil, "status", "--json")
+	if rc != 0 {
+		t.Fatalf("status --json exit %d: %s", rc, jsonErr)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(jsonOut), &rows); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, jsonOut)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if rows[0]["partial"] != true {
+		t.Errorf("partial = %v, want true", rows[0]["partial"])
+	}
+	if v, present := rows[0]["cost"]; !present || v != nil {
+		t.Errorf("cost = %v (present %v), want null", v, present)
 	}
 }
 
