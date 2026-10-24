@@ -67,13 +67,19 @@ type progressEvent struct {
 type progress struct {
 	ctx    context.Context
 	events chan<- progressEvent
+	// queued captures a parallel worker's disclosures. The batch owner replays
+	// them in input order after the join, so scheduling cannot reorder output.
+	queued *[]string
 }
 
 // send is the only write path. It never waits on the renderer because
 // relayProgress absorbs the backlog; ctx.Done() remains the release valve for a
 // send that outlives the renderer's cancel.
 func (p *progress) send(ev progressEvent) {
-	if p == nil {
+	// A worker from a nil parent has no renderer stream; its only write is the
+	// queued notice path, so live events must no-op instead of blocking on nil
+	// channels.
+	if p == nil || p.events == nil {
 		return
 	}
 	select {
@@ -98,7 +104,27 @@ func (p *progress) detail(text string) {
 // A plain stderr write during the renderer would be overwritten by the next
 // frame, which would silently drop a destructive-action disclosure.
 func (p *progress) notice(text string) {
+	if p == nil {
+		return
+	}
+	if p.queued != nil {
+		*p.queued = append(*p.queued, text)
+		return
+	}
 	p.send(progressEvent{kind: evNotice, text: text})
+}
+
+// worker returns a handle for use inside a mapParallel batch. It queues
+// disclosures in sink instead of the shared stream, so the batch owner can
+// emit them in input order. Live progress events still reach the renderer. A
+// nil parent yields a queue-only handle: live events no-op, but notices still
+// queue, keeping warnings ordered when progress is disabled.
+func (p *progress) worker(sink *[]string) *progress {
+	w := &progress{queued: sink}
+	if p != nil {
+		w.ctx, w.events = p.ctx, p.events
+	}
+	return w
 }
 
 // emitProgress writes one persistent line: as a renderer notice while one runs

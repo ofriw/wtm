@@ -104,12 +104,9 @@ func warnNowEnv() {
 // reaches the network. An unreadable session degrades to a warning: status is
 // read-only and must still report what it knows.
 func (ws *workspace) loadUsage(p *progress) {
-	cat := ws.loadCatalog(p)
 	subs := loadSubscriptions()
 	warnParentScopeDisabled(subs, p)
-	for i := range ws.wts {
-		ws.attachUsage(i, cat, subs, p)
-	}
+	ws.parseUsage(ws.loadCatalog(p), subs, p)
 }
 
 // loadCatalog resolves the price catalog, naming its source in the progress
@@ -129,15 +126,39 @@ func (ws *workspace) loadCatalog(p *progress) catalog {
 	return cat
 }
 
-// attachUsage stores one worktree's usage, keeping a total loss so the loss
-// reads as unknown, never as no usage.
-func (ws *workspace) attachUsage(i int, cat catalog, subs subscriptions, p *progress) {
-	u, err := buildUsage(ws.wts[i].Path, ws.idx, cat, subs)
-	if err != nil {
-		warnProgress(p, "usage for %s: %s", displayPath(ws.wts[i].Path), err)
+// usageResult carries one worker's outcome, so warnings emit from the parent in
+// worktree order after the join (a worker must not write stderr; parallel.go).
+type usageResult struct {
+	usage *worktreeUsage
+	err   error
+}
+
+// parseUsage reads every worktree's sessions concurrently: each worktree owns
+// disjoint session files, and the shared proof is read-only, so the folds stay
+// independent. The label follows the worktree a worker picked up; results
+// attach by index after the join, keeping the render order tied to git's order,
+// not to completion order.
+func (ws *workspace) parseUsage(cat catalog, subs subscriptions, p *progress) {
+	p.phase("parsing sessions", len(ws.wts))
+	if len(ws.wts) == 0 {
+		return
 	}
-	if u.hasEvents() || u.partial {
-		ws.wts[i].Usage = &u
+	usages := mapParallel(len(ws.wts), scanWorkers, func(i int) usageResult {
+		path := ws.wts[i].Path
+		p.detail(displayPath(path))
+		u, err := buildUsage(path, ws.idx, cat, subs)
+		p.advance(1)
+		// Keep a total loss so the loss reads as unknown, never as no usage.
+		if u.hasEvents() || u.partial {
+			return usageResult{usage: &u, err: err}
+		}
+		return usageResult{err: err}
+	})
+	for i, r := range usages {
+		ws.wts[i].Usage = r.usage
+		if r.err != nil {
+			warnProgress(p, "usage for %s: %s", displayPath(ws.wts[i].Path), r.err)
+		}
 	}
 }
 

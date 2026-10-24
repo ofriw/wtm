@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -195,8 +196,8 @@ func discoverWithSessions(root string, p *progress, sessions sessionDiscovery) (
 }
 
 // discoverUpstreams returns the configured tracking branches, or the warning
-// that explains their absence. It reports upward because discovery emits
-// warnings through one shared path, which keeps their order stable.
+// that explains their absence. It reports upward because the caller emits
+// warnings after the parallel batch joins, which keeps their order stable.
 func discoverUpstreams(root string) (map[string]upstream, string) {
 	ups, err := branchUpstreams(root)
 	if err != nil {
@@ -215,23 +216,32 @@ type discoveryInputs struct {
 	temps   tempStore
 }
 
-// discoverInputs reads each shared source once. The label names the session
-// walk because it dominates the batch; the other three finish in tens of
-// milliseconds. Warnings are emitted in a fixed order.
+// discoverInputs reads each shared source once, concurrently: worktrees,
+// sessions, upstreams and temp records are independent. The label names the
+// session walk because it dominates the batch; the other three finish in tens
+// of milliseconds. Warnings are emitted after the join, in a fixed order.
 func discoverInputs(root string, p *progress, sessions sessionDiscovery) (discoveryInputs, error) {
-	var in discoveryInputs
+	var (
+		in          discoveryInputs
+		rawErr      error
+		sessionsErr error
+		upsWarn     string
+		tempWarn    string
+		wg          sync.WaitGroup
+	)
 	p.phase("indexing sessions", 0)
-	raw, err := worktrees(root)
-	if err != nil {
-		return discoveryInputs{}, err
+	wg.Add(4)
+	go func() { defer wg.Done(); in.raw, rawErr = worktrees(root) }()
+	go func() { defer wg.Done(); in.idx, in.unknown, sessionsErr = sessions(p) }()
+	go func() { defer wg.Done(); in.ups, upsWarn = discoverUpstreams(root) }()
+	go func() { defer wg.Done(); in.temps, tempWarn = readTempStoreLenient() }()
+	wg.Wait()
+	if rawErr != nil {
+		return discoveryInputs{}, rawErr
 	}
-	idx, unknown, err := sessions(p)
-	if err != nil {
-		return discoveryInputs{}, err
+	if sessionsErr != nil {
+		return discoveryInputs{}, sessionsErr
 	}
-	ups, upsWarn := discoverUpstreams(root)
-	temps, tempWarn := readTempStoreLenient()
-	in.raw, in.idx, in.unknown, in.ups, in.temps = raw, idx, unknown, ups, temps
 	emitWarning(p, upsWarn)
 	emitWarning(p, tempWarn)
 	return in, nil
@@ -262,15 +272,34 @@ func readTempStoreLenient() (tempStore, string) {
 	return temps, ""
 }
 
-// scanWorktrees builds the inventory and reports per-worktree progress; the
-// loop is split out so discover stays a readable sequence of phases.
+// inventoryResult carries one worker's worktree and its disclosures, so
+// warnings emit from the parent in input order after the join.
+type inventoryResult struct {
+	w        worktree
+	warnings []string
+}
+
+// scanWorktrees builds the inventory concurrently: each worktree reads its own
+// mcp configs, capabilities and creation mark, so the per-worktree cost is
+// independent. The label follows the worktree a worker picked up, which is the
+// live "what is being processed" answer; results stay in git's order, and so do
+// the warnings they carry.
 func scanWorktrees(in discoveryInputs, p *progress) []worktree {
 	p.phase("scanning worktrees", len(in.raw))
-	wts := make([]worktree, 0, len(in.raw))
-	for _, g := range in.raw {
+	results := mapParallel(len(in.raw), scanWorkers, func(i int) inventoryResult {
+		g := in.raw[i]
 		p.detail(displayPath(g.Path))
-		wts = append(wts, buildWorktree(g, in.idx, in.ups, in.temps, p))
+		var warnings []string
+		w := buildWorktree(g, in.idx, in.ups, in.temps, p.worker(&warnings))
 		p.advance(1)
+		return inventoryResult{w: w, warnings: warnings}
+	})
+	wts := make([]worktree, len(results))
+	for i, r := range results {
+		wts[i] = r.w
+		for _, text := range r.warnings {
+			emitProgress(p, text)
+		}
 	}
 	return wts
 }

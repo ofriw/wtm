@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -416,20 +417,114 @@ func (s *sessionScan) walk(a agent) error {
 	if base == "" {
 		return nil
 	}
-	return s.walkRoot(a, base)
-}
-
-func (s *sessionScan) walkRoot(a agent, base string) error {
 	target, err := filepath.EvalSymlinks(base)
 	if err != nil {
 		return s.pol.sessionErr(fmt.Errorf("resolve sessions %s: %w", base, err))
 	}
-	return filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return s.pol.sessionErr(fmt.Errorf("walk sessions %s: %w", p, err))
+	s.pol.p.detail(a.name)
+	cands, unverified, walkErrs := collectSessions(a, base, target)
+	for _, walkErr := range walkErrs {
+		if perr := s.pol.sessionErr(walkErr); perr != nil {
+			return perr
 		}
-		return s.add(a, base, target, p, d)
+	}
+	for _, u := range unverified {
+		if err := s.unknown(u.path, u.err); err != nil {
+			return err
+		}
+	}
+	return s.resolve(a, cands)
+}
+
+// sessionCandidate is one regular session file awaiting an owner read. The walk
+// collects candidates first so the reads can run in a bounded pool.
+type sessionCandidate struct {
+	path       string
+	group      string
+	root       string
+	rootTarget string
+}
+
+// unverifiedFile is one path whose ownership cannot be read, with the cause.
+type unverifiedFile struct {
+	path string
+	err  error
+}
+
+// collectSessions lists regular session files under base without reading them.
+// Walk and classification errors are returned, not applied: the caller owns the
+// error policy, so a lenient run reports and continues while a strict run
+// aborts. Order is WalkDir's, which keeps the index deterministic.
+func collectSessions(a agent, base, target string) ([]sessionCandidate, []unverifiedFile, []error) {
+	var (
+		cands      []sessionCandidate
+		unverified []unverifiedFile
+		errs       []error
+	)
+	_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			errs = append(errs, fmt.Errorf("walk sessions %s: %w", p, err))
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			unverified = append(unverified, unverifiedFile{path: p})
+			return nil
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			unverified = append(unverified, unverifiedFile{path: p})
+			return nil
+		}
+		cands = append(cands, sessionCandidate{path: p, group: sessionGroup(base, p), root: base, rootTarget: target})
+		return nil
 	})
+	return cands, unverified, errs
+}
+
+// sessionProgressEvery bounds progress chatter: one label update per chunk of
+// owner reads, not one per file. A real machine walks 15k session files.
+const sessionProgressEvery = 128
+
+// ownerRead is one pooled owner lookup. cwd is empty when the file is not
+// attributable, with err naming the cause for the caller's error policy.
+type ownerRead struct {
+	candidate sessionCandidate
+	cwd       string
+	err       error
+}
+
+// resolve reads owners in a bounded pool: the kernel and the disk, not the CPU,
+// bound this walk. Reads merge in candidate order, so the index and its
+// warnings never depend on completion order.
+func (s *sessionScan) resolve(a agent, cands []sessionCandidate) error {
+	var processed atomic.Int64
+	reads := mapParallel(len(cands), scanWorkers, func(i int) ownerRead {
+		c := cands[i]
+		cwd, err := a.readSessionOwner(c.path)
+		n := processed.Add(1)
+		if n%sessionProgressEvery == 0 {
+			s.pol.p.detail(fmt.Sprintf("%s · %d files", a.name, n))
+		}
+		if err != nil || !filepath.IsAbs(cwd) {
+			return ownerRead{candidate: c, err: err}
+		}
+		return ownerRead{candidate: c, cwd: canonical(cwd)}
+	})
+	for _, r := range reads {
+		if r.cwd == "" {
+			if err := s.unknown(r.candidate.path, r.err); err != nil {
+				return err
+			}
+			continue
+		}
+		c := r.candidate
+		s.idx[r.cwd] = append(s.idx[r.cwd], sessionRef{
+			path: c.path, group: c.group, harness: a.name, root: c.root, rootTarget: c.rootTarget, owner: a.sessionOwner,
+		})
+	}
+	return nil
 }
 
 // Resolve only the root symlink; resolving ancestors rewrites macOS /var paths.
@@ -460,27 +555,6 @@ func sessionDirectory(base string) (string, error) {
 		return "", fmt.Errorf("sessions path is not a directory: %s", base)
 	}
 	return base, nil
-}
-
-func (s *sessionScan) add(a agent, base, target, p string, d fs.DirEntry) error {
-	if d.Type()&os.ModeSymlink != 0 {
-		return s.unknown(p, nil)
-	}
-	if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
-		return nil
-	}
-	if !d.Type().IsRegular() {
-		return s.unknown(p, nil)
-	}
-	cwd, err := a.readSessionOwner(p)
-	if err != nil || !filepath.IsAbs(cwd) {
-		return s.unknown(p, err)
-	}
-	key := canonical(cwd)
-	s.idx[key] = append(s.idx[key], sessionRef{
-		path: p, group: sessionGroup(base, p), harness: a.name, root: base, rootTarget: target, owner: a.sessionOwner,
-	})
-	return nil
 }
 
 func (s *sessionScan) unknown(p string, err error) error {
