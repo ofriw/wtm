@@ -96,10 +96,10 @@ func TestSharedSessionSafetyMissingIndexedFile(t *testing.T) {
 		if err := os.Remove(p); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := sessionLastUsed(owner, idx, true); err == nil {
+		if _, err := sessionLastUsed(owner, idx, true, nil); err == nil {
 			t.Fatal("missing indexed session accepted by removal check")
 		}
-		warning := captureStderr(t, func() { lastUsed(owner, idx) })
+		warning := captureStderr(t, func() { lastUsed(owner, idx, nil) })
 		if !strings.Contains(warning, p) {
 			t.Fatalf("display did not disclose missing activity: %q", warning)
 		}

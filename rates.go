@@ -415,22 +415,44 @@ func pricedEntry(raw json.RawMessage) (modelRate, bool) {
 	return e.toRate(), true
 }
 
+// catalogSource names where a resolved catalog came from, so progress can say
+// whether the run waited on the network. It is a label, not a decision input.
+type catalogSource string
+
+const (
+	catalogEnv      catalogSource = "file"
+	catalogCache    catalogSource = "cache"
+	catalogFetching catalogSource = "fetching over network"
+	catalogFetched  catalogSource = "fetched"
+	catalogStale    catalogSource = "stale cache"
+)
+
 // loadCatalog resolves the catalog: env override, fresh cache, network fetch,
 // then a stale cache as the last resort. The returned error means no catalog is
 // available at all, so callers report unknown costs.
 func loadCatalog() (catalog, error) { return loadCatalogFrom(ratesURL) }
 
+// loadCatalogReporting is loadCatalog that announces each resolution point, so
+// a long network fetch is visible instead of looking like a hang. The handle is
+// also the warning sink: fetch failures inside the renderer must ride it.
+func loadCatalogReporting(p *progress) (catalog, error) {
+	return loadCatalogFromNotify(ratesURL, p)
+}
+
 // loadCatalogFrom is loadCatalog with an injectable source URL, so tests drive
 // the real fetch chain against a local server instead of the network.
-func loadCatalogFrom(url string) (catalog, error) {
-	if p := os.Getenv(ratesEnv); p != "" {
-		return parseCatalogFile(p)
+func loadCatalogFrom(url string) (catalog, error) { return loadCatalogFromNotify(url, nil) }
+
+func loadCatalogFromNotify(url string, p *progress) (catalog, error) {
+	if path := os.Getenv(ratesEnv); path != "" {
+		p.detail(string(catalogEnv))
+		return parseCatalogFile(path)
 	}
-	p, err := ratesCachePath()
+	path, err := ratesCachePath()
 	if err != nil {
 		return nil, err
 	}
-	return loadFromCachePath(p, url)
+	return loadFromCachePath(path, url, p)
 }
 
 // loadFromCachePath resolves a fresh cache, then a fetch, then the stale cache
@@ -438,8 +460,9 @@ func loadCatalogFrom(url string) (catalog, error) {
 // fallback catalog exists, the recorded cause is returned: it names the real
 // failure (status, size, network), where the missing cache would only report
 // ENOENT.
-func loadFromCachePath(path, url string) (catalog, error) {
+func loadFromCachePath(path, url string, p *progress) (catalog, error) {
 	if c, ok := readFreshCache(path); ok {
+		p.detail(string(catalogCache))
 		return c, nil
 	}
 	// A failed fetch starts a cooldown to avoid repeated stalls. The stale cache
@@ -451,7 +474,9 @@ func loadFromCachePath(path, url string) (catalog, error) {
 			fetchErr = fmt.Errorf("%w: %w", errRateCatalogCoolingDown, cause)
 		}
 	} else {
-		if c, err := fetchAndCache(path, url); err == nil {
+		p.detail(string(catalogFetching))
+		if c, err := fetchAndCache(path, url, p); err == nil {
+			p.detail(string(catalogFetched))
 			return c, nil
 		} else {
 			fetchErr = err
@@ -460,6 +485,7 @@ func loadFromCachePath(path, url string) (catalog, error) {
 	}
 	c, err := parseCatalogFile(path)
 	if err == nil {
+		p.detail(string(catalogStale))
 		return c, nil
 	}
 	if fetchErr != nil {
@@ -651,7 +677,7 @@ func readFreshCache(path string) (catalog, bool) {
 	return c, err == nil
 }
 
-func fetchAndCache(path, url string) (catalog, error) {
+func fetchAndCache(path, url string, p *progress) (catalog, error) {
 	raw, err := fetchRates(url)
 	if err != nil {
 		return nil, err
@@ -663,7 +689,7 @@ func fetchAndCache(path, url string) (catalog, error) {
 	// A failed cache write must not hide prices: keep the fetched catalog for
 	// this run and retry the fetch next run instead of serving unknown costs.
 	if err := writeFileAtomic(path, raw, 0o644); err != nil {
-		warnf("rate cache write failed: %s; prices will be fetched again next run", err)
+		warnProgress(p, "rate cache write failed: %s; prices will be fetched again next run", err)
 	}
 	// The fetch succeeded, so any prior failure marker is obsolete even when the
 	// cache write failed.

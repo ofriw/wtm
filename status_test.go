@@ -174,7 +174,7 @@ func TestWorktreeLastUsed(t *testing.T) {
 			want := tc.setup(t, repo, now)
 			backdateActivityIndex(t, repo, now.Add(-6*time.Hour))
 			idx := mustIndexSessions(t)
-			if got := worktreeLastUsed(repo, idx); !got.Equal(want) {
+			if got := worktreeLastUsed(repo, idx, nil); !got.Equal(want) {
 				t.Fatalf("worktreeLastUsed = %v, want %v", got, want)
 			}
 		})
@@ -184,7 +184,7 @@ func TestWorktreeLastUsed(t *testing.T) {
 		gitTestCommit(t, repo)
 		mkSession(t, repo, "future", now.Add(48*time.Hour))
 		idx := mustIndexSessions(t)
-		got := worktreeLastUsed(repo, idx)
+		got := worktreeLastUsed(repo, idx, nil)
 		if got.After(now.Add(time.Minute)) {
 			t.Fatalf("future timestamp not clamped: %v", got)
 		}

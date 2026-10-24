@@ -71,26 +71,48 @@ type workspace struct {
 	idx  sessionIndex
 }
 
-// loadWorkspace resolves the repo, TTL and inventory. discovery — the slow
-// path — uses the renderer when showProgress or --progress always requests it.
-// Discovery reads but never reconciles the temp registry. Explicit removal
-// passes failClosed to reject unreadable sessions before any destructive action.
-func loadWorkspace(g *globals, showProgress, failClosed bool) (workspace, error) {
-	return loadWorkspaceWithSessions(g, showProgress, discoverySessions(failClosed))
+// loadWorkspace resolves the repo, TTL and inventory against the caller's
+// progress handle: the command entry owns the renderer, so a single session can
+// span discovery, pricing and parsing. A nil p is a no-op handle. Discovery
+// reads but never reconciles the temp registry. Explicit removal passes
+// failClosed to reject unreadable sessions before any destructive action.
+func loadWorkspace(g *globals, p *progress, failClosed bool) (workspace, error) {
+	return loadWorkspaceWithSessions(g, p, discoverySessions(failClosed))
+}
+
+// loadWorkspaceProgress opens a discovery-only progress session. Commands whose
+// slow work is discovery alone (delete, promote) use it; status opens its own
+// session so pricing and parsing share the same line.
+func loadWorkspaceProgress(g *globals, failClosed bool) (workspace, error) {
+	var ws workspace
+	err := withProgress(g, progressOptions{}, func(p *progress) error {
+		var derr error
+		ws, derr = loadWorkspace(g, p, failClosed)
+		return derr
+	})
+	return ws, err
 }
 
 // Idle GC collects file evidence for fresh candidate checks; explicit --path
-// removal bypasses idleness, not strict session-read safety.
+// removal bypasses idleness, not strict session-read safety. gc owns its
+// renderer because the interactive picker must not run underneath one.
 func loadGCWorkspace(g *globals, paths []string) (workspace, error) {
+	sessions := sessionDiscovery(indexSessionsStrict)
 	if len(paths) > 0 {
-		return loadWorkspace(g, true, true)
+		sessions = discoverySessions(true)
 	}
-	return loadWorkspaceWithSessions(g, true, indexSessionsStrict)
+	var ws workspace
+	err := withProgress(g, progressOptions{}, func(p *progress) error {
+		var derr error
+		ws, derr = loadWorkspaceWithSessions(g, p, sessions)
+		return derr
+	})
+	return ws, err
 }
 
 type sessionDiscovery func(*progress) (sessionIndex, []unverifiedSession, error)
 
-func loadWorkspaceWithSessions(g *globals, showProgress bool, sessions sessionDiscovery) (workspace, error) {
+func loadWorkspaceWithSessions(g *globals, p *progress, sessions sessionDiscovery) (workspace, error) {
 	var ws workspace
 	root, err := resolveRoot(g)
 	if err != nil {
@@ -100,11 +122,7 @@ func loadWorkspaceWithSessions(g *globals, showProgress bool, sessions sessionDi
 	if err != nil {
 		return ws, err
 	}
-	err = withProgress(g, showProgress, func(p *progress) error {
-		var derr error
-		ws.wts, ws.idx, derr = discoverWithSessions(root, p, sessions)
-		return derr
-	})
+	ws.wts, ws.idx, err = discoverWithSessions(root, p, sessions)
 	ws.root, ws.ttl = root, ttl
 	return ws, err
 }
@@ -121,7 +139,7 @@ func worktreeInventory(g gworktree, idx sessionIndex, ups map[string]upstream, p
 	return worktree{
 		Path: pth, Branch: g.Branch, Upstream: ups[g.Branch], Main: g.Main,
 		// Dirty is set lazily by the gc picker; status does not use it.
-		LastUsed: worktreeLastUsed(pth, idx),
+		LastUsed: worktreeLastUsed(pth, idx, p),
 		Caps:     capabilityStates(capInput{root: pth, mcp: configs}),
 		Created:  worktreeCreated(pth),
 	}
@@ -166,40 +184,64 @@ func discover(root string, p *progress, failClosed bool) ([]worktree, sessionInd
 }
 
 func discoverWithSessions(root string, p *progress, sessions sessionDiscovery) ([]worktree, sessionIndex, error) {
-	raw, idx, unknown, ups, temps, err := discoverInputs(root, p, sessions)
+	in, err := discoverInputs(root, p, sessions)
 	if err != nil {
 		return nil, nil, err
 	}
-	wts := scanWorktrees(raw, idx, ups, temps, p)
-	guardPermanentActivity(wts, unknown, nowFunc(), p)
+	wts := scanWorktrees(in, p)
+	guardPermanentActivity(wts, in.unknown, nowFunc(), p)
 	sortWorktrees(wts)
-	return wts, idx, nil
+	return wts, in.idx, nil
 }
 
-func discoverUpstreams(root string, p *progress) map[string]upstream {
-	p.phase("reading upstreams", 0)
+// discoverUpstreams returns the configured tracking branches, or the warning
+// that explains their absence. It reports upward because discovery emits
+// warnings through one shared path, which keeps their order stable.
+func discoverUpstreams(root string) (map[string]upstream, string) {
 	ups, err := branchUpstreams(root)
 	if err != nil {
-		warnProgress(p, "upstreams unavailable: %s", err)
-		return map[string]upstream{}
+		return map[string]upstream{}, fmt.Sprintf("upstreams unavailable: %s", err)
 	}
-	return ups
+	return ups, ""
 }
 
-// discoverInputs reads each shared source once: worktrees, sessions, upstreams
-// and temp records. Reclamation retains unknown files for candidate-level checks.
-func discoverInputs(root string, p *progress, sessions sessionDiscovery) ([]gworktree, sessionIndex, []unverifiedSession, map[string]upstream, tempStore, error) {
-	p.phase("reading worktrees", 0)
+// discoveryInputs is one batch of shared reads. Every source is read exactly
+// once and reused by inventory, activity and reclamation.
+type discoveryInputs struct {
+	raw     []gworktree
+	idx     sessionIndex
+	unknown []unverifiedSession
+	ups     map[string]upstream
+	temps   tempStore
+}
+
+// discoverInputs reads each shared source once. The label names the session
+// walk because it dominates the batch; the other three finish in tens of
+// milliseconds. Warnings are emitted in a fixed order.
+func discoverInputs(root string, p *progress, sessions sessionDiscovery) (discoveryInputs, error) {
+	var in discoveryInputs
+	p.phase("indexing sessions", 0)
 	raw, err := worktrees(root)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return discoveryInputs{}, err
 	}
-	p.phase("indexing sessions", 0)
 	idx, unknown, err := sessions(p)
 	if err != nil {
-		return nil, nil, nil, nil, nil, err
+		return discoveryInputs{}, err
 	}
-	return raw, idx, unknown, discoverUpstreams(root, p), readTempStoreLenient(p), nil
+	ups, upsWarn := discoverUpstreams(root)
+	temps, tempWarn := readTempStoreLenient()
+	in.raw, in.idx, in.unknown, in.ups, in.temps = raw, idx, unknown, ups, temps
+	emitWarning(p, upsWarn)
+	emitWarning(p, tempWarn)
+	return in, nil
+}
+
+// emitWarning writes a deferred warning through the one disclosure path.
+func emitWarning(p *progress, text string) {
+	if text != "" {
+		emitProgress(p, warnPrefix+text)
+	}
 }
 
 func discoverySessions(failClosed bool) sessionDiscovery {
@@ -212,24 +254,23 @@ func discoverySessions(failClosed bool) sessionDiscovery {
 // readTempStoreLenient reads the temp store for read-only commands. A corrupt
 // store only loses temp metadata (the checkouts stay durable), so it must never
 // break status: warn and proceed with no temp records.
-func readTempStoreLenient(p *progress) tempStore {
+func readTempStoreLenient() (tempStore, string) {
 	temps, err := readTempStoreUnlocked()
 	if err != nil {
-		warnProgress(p, "temp store: %s; no temp worktrees tracked", err)
-		return tempStore{}
+		return tempStore{}, fmt.Sprintf("temp store: %s; no temp worktrees tracked", err)
 	}
-	return temps
+	return temps, ""
 }
 
 // scanWorktrees builds the inventory and reports per-worktree progress; the
 // loop is split out so discover stays a readable sequence of phases.
-func scanWorktrees(raw []gworktree, idx sessionIndex, ups map[string]upstream, temps tempStore, p *progress) []worktree {
-	p.phase("scanning worktrees", len(raw))
-	wts := make([]worktree, 0, len(raw))
-	for _, g := range raw {
-		wts = append(wts, buildWorktree(g, idx, ups, temps, p))
-		p.advance(1)
+func scanWorktrees(in discoveryInputs, p *progress) []worktree {
+	p.phase("scanning worktrees", len(in.raw))
+	wts := make([]worktree, 0, len(in.raw))
+	for _, g := range in.raw {
 		p.detail(displayPath(g.Path))
+		wts = append(wts, buildWorktree(g, in.idx, in.ups, in.temps, p))
+		p.advance(1)
 	}
 	return wts
 }

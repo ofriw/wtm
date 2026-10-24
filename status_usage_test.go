@@ -655,7 +655,7 @@ func TestLoadUsageKeepsAllUnreadable(t *testing.T) {
 	ws := workspace{wts: []worktree{{Path: dir}}, idx: sessionIndex{canonical(dir): {
 		{path: filepath.Join(dir, "missing.jsonl"), harness: "pi"},
 	}}}
-	captureStderr(t, func() { ws.loadUsage() })
+	captureStderr(t, func() { ws.loadUsage(nil) })
 	u := ws.wts[0].Usage
 	if u == nil {
 		t.Fatal("partial usage dropped: total loss reads as no usage")

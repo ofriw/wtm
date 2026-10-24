@@ -514,14 +514,16 @@ func sessionGroup(base, p string) string {
 
 // lastUsed is the newest mtime among the worktree's session files (looked up
 // in idx); zero when the worktree has never hosted a session.
-func lastUsed(wtPath string, idx sessionIndex) time.Time {
-	newest, _ := sessionLastUsed(wtPath, idx, false)
+func lastUsed(wtPath string, idx sessionIndex, p *progress) time.Time {
+	newest, _ := sessionLastUsed(wtPath, idx, false, p)
 	return newest
 }
 
 // sessionLastUsed fails closed for fresh removal checks. Display can retain
-// known activity, but must disclose every file it could not inspect.
-func sessionLastUsed(wtPath string, idx sessionIndex, strict bool) (time.Time, error) {
+// known activity, but must disclose every file it could not inspect. The
+// warning rides p because discovery workers run under the renderer and a raw
+// stderr write would be overwritten by the next frame.
+func sessionLastUsed(wtPath string, idx sessionIndex, strict bool, p *progress) (time.Time, error) {
 	var newest time.Time
 	for _, r := range idx[canonical(wtPath)] {
 		mtime, err := sessionMtime(r.path)
@@ -529,7 +531,7 @@ func sessionLastUsed(wtPath string, idx sessionIndex, strict bool) (time.Time, e
 			if strict {
 				return newest, err
 			}
-			warnProgress(nil, "%v", err)
+			warnProgress(p, "%v", err)
 		} else if mtime.After(newest) {
 			newest = mtime
 		}

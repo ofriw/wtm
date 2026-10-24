@@ -334,7 +334,7 @@ func TestBuildUsageBadTimestampWarnsAndPartials(t *testing.T) {
 		wts: []worktree{{Path: dir}},
 		idx: sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}},
 	}
-	errOut := captureStderr(t, func() { ws.loadUsage() })
+	errOut := captureStderr(t, func() { ws.loadUsage(nil) })
 	if got := strings.Count(errOut, warnPrefix); got != 1 {
 		t.Fatalf("warnings = %d, want 1:\n%s", got, errOut)
 	}
@@ -359,7 +359,7 @@ func TestBuildUsageOversizedRecordWarnsAndPartials(t *testing.T) {
 		wts: []worktree{{Path: dir}},
 		idx: sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}},
 	}
-	errOut := captureStderr(t, func() { ws.loadUsage() })
+	errOut := captureStderr(t, func() { ws.loadUsage(nil) })
 	if !strings.Contains(errOut, "oversized") {
 		t.Fatalf("warning must name the oversized loss:\n%s", errOut)
 	}
@@ -384,7 +384,7 @@ func TestBuildUsageOversizedUnbilledRecordStillDiscloses(t *testing.T) {
 		wts: []worktree{{Path: dir}},
 		idx: sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}},
 	}
-	errOut := captureStderr(t, func() { ws.loadUsage() })
+	errOut := captureStderr(t, func() { ws.loadUsage(nil) })
 	if !strings.Contains(errOut, "oversized") {
 		t.Fatalf("warning must name the oversized loss:\n%s", errOut)
 	}
@@ -440,7 +440,7 @@ func TestLoadUsagePiOnlyNeedsNoRatesCatalog(t *testing.T) {
 		wts: []worktree{{Path: dir}},
 		idx: sessionIndex{canonical(dir): {{path: path, harness: piAgent.name}}},
 	}
-	errOut := captureStderr(t, func() { ws.loadUsage() })
+	errOut := captureStderr(t, func() { ws.loadUsage(nil) })
 	if strings.Contains(errOut, "claude cost unavailable") {
 		t.Fatalf("a Pi-only repo must not load the catalog:\n%s", errOut)
 	}

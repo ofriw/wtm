@@ -66,7 +66,8 @@ func (p *ttyPoll) raw() string {
 }
 
 // waitContains polls until sub appears or the child exits, so a hung TUI is a
-// diagnosable timeout instead of a stuck test.
+// diagnosable timeout instead of a stuck test. childDone may be nil for
+// in-process work that cannot exit before the observed text appears.
 func (p *ttyPoll) waitContains(sub string, timeout time.Duration, childDone <-chan struct{}) error {
 	deadline := time.After(timeout)
 	for {
@@ -287,7 +288,7 @@ func TestGCTUIToggleAcceptRemoves(t *testing.T) {
 	stdout, stderr, rc := runGCTTY(t, repo, gcTTYWidth, []gcTUIStep{
 		{want: "Select worktrees to remove", send: " \r"},
 		{want: "Remove 1 worktree(s)?", send: "y"},
-	})
+	}, "--progress", "always")
 	if rc != 0 {
 		t.Fatalf("rc = %d, want 0\nstdout: %s\nstderr: %s", rc, stdout, stderr)
 	}
@@ -300,10 +301,11 @@ func TestGCTUIToggleAcceptRemoves(t *testing.T) {
 	if _, err := os.Stat(session); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("session %s must be purged on accept (stat err %v)", session, err)
 	}
-	for _, want := range []string{"removing worktrees", "pruning", "✓ done"} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("stderr missing removal progress %q; stderr:\n%s", want, stderr)
-		}
+	// One line means a fast phase can pass between frames; the terminal summary
+	// is the stable contract. The destructive phases themselves are pinned by
+	// TestGCPlainProgressPhases.
+	if !strings.Contains(stderr, "✓ done") {
+		t.Errorf("stderr missing the terminal progress line; stderr:\n%s", stderr)
 	}
 	assertWorktreeNotListed(t, repo, wt1)
 }
@@ -336,9 +338,11 @@ func TestGCTUIDeclineAborts(t *testing.T) {
 func TestGCPickerNarrowWidth(t *testing.T) {
 	repo, _, _ := gcTUIFixture(t)
 
+	// Progress off: the picker's fit contract is the subject here, and the
+	// renderer's single-line redraws cannot be separated after escape stripping.
 	_, stderr, rc := runGCTTY(t, repo, 80, []gcTUIStep{
 		{want: "Select worktrees to remove", send: "\r"},
-	})
+	}, "--progress", "never")
 	if rc != 0 {
 		t.Fatalf("rc = %d, want 0; stderr:\n%s", rc, stderr)
 	}

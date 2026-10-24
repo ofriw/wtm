@@ -14,11 +14,18 @@ func cmdStatus(g *globals, args []string) error {
 	if err != nil {
 		return err
 	}
-	ws, err := loadWorkspace(g, false, false)
+	var ws workspace
+	err = withProgress(g, statusProgressOptions(g), func(p *progress) error {
+		var lerr error
+		if ws, lerr = loadWorkspace(g, p, false); lerr != nil {
+			return lerr
+		}
+		ws.loadUsage(p)
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	ws.loadUsage()
 	now := nowFunc()
 	current := currentWorktreePath(ws)
 	if g.json {
@@ -26,6 +33,13 @@ func cmdStatus(g *globals, args []string) error {
 	}
 	renderStatus(ws, wide, now, current, g.color)
 	return nil
+}
+
+// statusProgressOptions erases the line before the table renders: the table is
+// the product, and a leftover frame above it is noise. An explicit
+// --progress always keeps the line, because the user asked for the record.
+func statusProgressOptions(g *globals) progressOptions {
+	return progressOptions{transient: g.progress != progressAlways}
 }
 
 // renderStatus prints the table, its legend then the detail block in that order.
@@ -77,24 +91,24 @@ func nowFunc() time.Time {
 // loaded only when the repo owns a Claude session, so a Pi-only repo never
 // reaches the network. An unreadable session degrades to a warning: status is
 // read-only and must still report what it knows.
-func (ws *workspace) loadUsage() {
-	cat := ws.usageCatalog()
-	// Read the credential proof once: it is a per-run snapshot, not per-worktree.
+func (ws *workspace) loadUsage(p *progress) {
+	cat := ws.loadCatalog(p)
 	subs := loadSubscriptions()
 	for i := range ws.wts {
-		ws.attachUsage(i, cat, subs)
+		ws.attachUsage(i, cat, subs, p)
 	}
 }
 
-// usageCatalog loads the price catalog only for a repo with Claude sessions, so
-// a Pi-only repo never reaches the network.
-func (ws *workspace) usageCatalog() catalog {
+// loadCatalog resolves the price catalog, naming its source in the progress
+// label so a network wait reads as work, not as a hang.
+func (ws *workspace) loadCatalog(p *progress) catalog {
 	if !ws.idx.hasHarness(ws.wts, claudeAgent.name) {
 		return nil
 	}
-	cat, err := loadCatalog()
+	p.phase("loading rate catalog", 0)
+	cat, err := loadCatalogReporting(p)
 	if err != nil {
-		warnf("claude cost unavailable: %s", err)
+		warnProgress(p, "claude cost unavailable: %s", err)
 		// A nil catalog makes every harness report unknown, which is the honest
 		// answer when no catalog is available at all.
 		return nil
@@ -104,10 +118,10 @@ func (ws *workspace) usageCatalog() catalog {
 
 // attachUsage stores one worktree's usage, keeping a total loss so the loss
 // reads as unknown, never as no usage.
-func (ws *workspace) attachUsage(i int, cat catalog, subs subscriptions) {
+func (ws *workspace) attachUsage(i int, cat catalog, subs subscriptions, p *progress) {
 	u, err := buildUsage(ws.wts[i].Path, ws.idx, cat, subs)
 	if err != nil {
-		warnf("usage for %s: %s", displayPath(ws.wts[i].Path), err)
+		warnProgress(p, "usage for %s: %s", displayPath(ws.wts[i].Path), err)
 	}
 	if u.hasEvents() || u.partial {
 		ws.wts[i].Usage = &u

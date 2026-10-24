@@ -193,28 +193,29 @@ func freshWorktreeActivity(path string, now time.Time) (time.Time, []unverifiedS
 // nowFunc() is the WTM_NOW test seam: in the container harness it is pinned to a
 // fixed time so goldens stay byte-stable. Future mtimes are clamped to that same
 // now so a session newer than the test clock cannot break determinism.
-func worktreeLastUsed(path string, idx sessionIndex) time.Time {
-	newest, _ := readWorktreeActivityLenient(path, idx, nowFunc())
+func worktreeLastUsed(path string, idx sessionIndex, p *progress) time.Time {
+	newest, _ := readWorktreeActivityLenient(path, idx, nowFunc(), p)
 	return newest
 }
 
 // readWorktreeActivityLenient collects activity timestamps relative to now,
 // ignoring errors. Used for display where failure must not block output.
-func readWorktreeActivityLenient(path string, idx sessionIndex, now time.Time) (time.Time, error) {
-	return collectActivity(path, idx, now, false)
+func readWorktreeActivityLenient(path string, idx sessionIndex, now time.Time, p *progress) (time.Time, error) {
+	return collectActivity(path, idx, now, false, p)
 }
 
 // readWorktreeActivityStrict collects activity timestamps relative to now,
 // failing on any error. Used immediately before idle-based removal where
-// unreadable activity must prevent reclamation.
+// unreadable activity must prevent reclamation. Strict never warns, so it
+// needs no progress handle.
 func readWorktreeActivityStrict(path string, idx sessionIndex, now time.Time) (time.Time, error) {
-	return collectActivity(path, idx, now, true)
+	return collectActivity(path, idx, now, true, nil)
 }
 
 // collectActivity merges agent sessions, the checkout backlink and Git
 // modification times, clamping any future timestamp to now.
-func collectActivity(path string, idx sessionIndex, now time.Time, strict bool) (time.Time, error) {
-	newest, err := sessionLastUsed(path, idx, strict)
+func collectActivity(path string, idx sessionIndex, now time.Time, strict bool, p *progress) (time.Time, error) {
+	newest, err := sessionLastUsed(path, idx, strict, p)
 	if err != nil {
 		return newest, err
 	}

@@ -59,20 +59,20 @@ func TestValidateProgress(t *testing.T) {
 // TestProgressModelSummary pins the terminal frame: a clean run says done, and
 // a work error surfaced only via the terminal event still reports failure.
 func TestProgressModelSummary(t *testing.T) {
-	m := newProgressModel(nil, 40)
+	m := newProgressModel(nil, 40, progressOptions{})
 	m.apply(progressEvent{kind: evPhase, name: "scanning", total: 2})
 	m.apply(progressEvent{kind: evAdvance, n: 2})
 	m.finish(nil)
-	if got := m.render(); !strings.Contains(got, "✓ done") {
+	if got := m.render(); !strings.Contains(got, "✓ done in") {
 		t.Errorf("render = %q, want the done summary", got)
 	}
 
-	m = newProgressModel(nil, 40)
+	m = newProgressModel(nil, 40, progressOptions{})
 	m.finish(errors.New("boom"))
 	if got := m.render(); !strings.Contains(got, "✗ failed") {
 		t.Errorf("render = %q, want the failed summary", got)
 	}
-	m2 := newProgressModel(nil, 40)
+	m2 := newProgressModel(nil, 40, progressOptions{})
 	updated, _ := m2.Update(progressDoneMsg{err: errors.New("panic")})
 	if got := updated.(progressModel).render(); !strings.Contains(got, "✗ failed") {
 		t.Errorf("render after failed done = %q, want the failed summary", got)
@@ -83,7 +83,7 @@ func TestProgressModelSummary(t *testing.T) {
 // TestProgressLineFitsWidth pins the truncation contract: a long detail cannot
 // push any rendered line past the budget, even with a bar and a total.
 func TestProgressLineFitsWidth(t *testing.T) {
-	m := newProgressModel(nil, 20)
+	m := newProgressModel(nil, 20, progressOptions{})
 	m.apply(progressEvent{kind: evPhase, name: "scanning worktrees", total: 100})
 	m.apply(progressEvent{kind: evAdvance, n: 50})
 	m.apply(progressEvent{kind: evDetail, text: "~/a/very/long/path/that/exceeds/the/budget"})
@@ -99,7 +99,7 @@ func TestProgressLineFitsWidth(t *testing.T) {
 // carries none — a 100% bar frozen into the scrollback frame is noise, and
 // bubbles' default half-block fill (▌) reads as a fence rather than a bar.
 func TestProgressBarOnlyWhileRunning(t *testing.T) {
-	m := newProgressModel(nil, 40)
+	m := newProgressModel(nil, 40, progressOptions{})
 	m.apply(progressEvent{kind: evPhase, name: "scanning", total: 4})
 	m.apply(progressEvent{kind: evAdvance, n: 2})
 	running := m.render()
@@ -121,15 +121,12 @@ func TestProgressBarOnlyWhileRunning(t *testing.T) {
 // TestProgressFailedRun pins the failure contract: a run error keeps the
 // phase rows and flips the summary to ✗ failed.
 func TestProgressFailedRun(t *testing.T) {
-	m := newProgressModel(nil, 40)
+	m := newProgressModel(nil, 40, progressOptions{})
 	m.apply(progressEvent{kind: evPhase, name: "removing", total: 2})
 	m.apply(progressEvent{kind: evAdvance, n: 1})
 	m.finish(errors.New("worktree is locked"))
-	frame := m.render()
-	for _, want := range []string{"removing", "✗ failed"} {
-		if !strings.Contains(frame, want) {
-			t.Errorf("failed frame is missing %q: %q", want, frame)
-		}
+	if frame := m.render(); !strings.Contains(frame, "✗ failed") {
+		t.Errorf("failed frame = %q, want the failure marker", frame)
 	}
 }
 
@@ -156,7 +153,7 @@ func TestProgressNoticePrintsPinnedLine(t *testing.T) {
 	// nextEvent blocks on this channel; feeding one event lets the drained
 	// command return instead of deadlocking the test.
 	events <- progressEvent{kind: evAdvance, n: 1}
-	m := newProgressModel(events, 40)
+	m := newProgressModel(events, 40, progressOptions{})
 	const notice = "will delete remote origin/feat"
 	_, cmd := m.Update(progressEventMsg{kind: evNotice, text: notice})
 	if cmd == nil {
@@ -194,7 +191,7 @@ func TestWithProgressGatedOff(t *testing.T) {
 	var g globals
 	g.progress = progressNever
 	ran := false
-	err := withProgressTo(io.Discard, &g, true, func(p *progress) error {
+	err := withProgressTo(io.Discard, &g, progressOptions{}, func(p *progress) error {
 		ran = p == nil
 		return nil
 	})

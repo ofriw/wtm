@@ -18,7 +18,7 @@ func TestClaudeMetadataBeforeOwner(t *testing.T) {
 	stamp := time.Now().Add(-time.Hour).Truncate(time.Second)
 	path := mkClaudeSession(t, owner, "metadata-first", stamp)
 	idx := mustIndexSessions(t)
-	if !idxContains(idx, owner, path) || !lastUsed(owner, idx).Equal(stamp) {
+	if !idxContains(idx, owner, path) || !lastUsed(owner, idx, nil).Equal(stamp) {
 		t.Fatalf("metadata-first transcript not attributed to %s at %s", owner, stamp)
 	}
 }

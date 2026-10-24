@@ -18,8 +18,9 @@ import (
 
 // runStatusTTY runs `wtm status` behind ptys and returns its streams, the raw
 // (unstripped) stderr, and its exit code. text() erases escape sequences, so
-// escape-level assertions must read rawErr.
-func runStatusTTY(t *testing.T, repo string, cols int, args ...string) (stdout, stderr, rawErr string, rc int) {
+// escape-level assertions must read rawErr. env passes the timing seams that
+// keep the renderer deterministic on a loaded runner.
+func runStatusTTY(t *testing.T, repo string, cols int, env, args []string) (stdout, stderr, rawErr string, rc int) {
 	t.Helper()
 
 	masterIn, slaveIn := openTTY(t, cols)
@@ -27,7 +28,7 @@ func runStatusTTY(t *testing.T, repo string, cols int, args ...string) (stdout, 
 	cmd := exec.Command(buildWTM(t), append([]string{"status"}, args...)...)
 	cmd.Dir = repo
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slaveIn, slaveIn, slaveErr
-	cmd.Env = gcTTYEnv()
+	cmd.Env = childTerminalEnv(append(gcTTYEnv(), env...))
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start wtm status: %v", err)
 	}
@@ -61,40 +62,40 @@ func awaitStatus(t *testing.T, cmd *exec.Cmd, waitCh <-chan error, out, errS *tt
 	}
 }
 
-// Status stays silent by default even on a TTY; explicit progress renders all
-// phases without terminal queries or overflowing lines.
+// Status stays silent when it is fast, and on an explicit --progress always it
+// keeps a truthful summary on stderr without terminal queries. Animated frames
+// coalesce at 60 FPS, so a short phase may never be painted; phase coverage
+// belongs to TestStatusPlainProgressPhases, and frame width to
+// TestProgressLineFitsWidth. Asserting either on the diff-rendered stream would
+// splice fragments of successive frames. The default mode pins the silence
+// window far past the fixture's work, so silence is a contract instead of a
+// race against 200 ms.
 func TestStatusProgressTTY(t *testing.T) {
 	repo, _, _ := gcTUIFixture(t)
 	for _, mode := range []string{"default", "always"} {
 		t.Run(mode, func(t *testing.T) {
-			var args []string
+			var args, env []string
 			if mode == "always" {
 				args = []string{"--progress", "always"}
+			} else {
+				env = []string{progressDelayEnv + "=1h"}
 			}
-			stdout, stderr, rawErr, rc := runStatusTTY(t, repo, 80, args...)
+			stdout, stderr, rawErr, rc := runStatusTTY(t, repo, 80, env, args)
 			if rc != 0 {
 				t.Fatalf("rc = %d, want 0\nstdout: %s\nstderr: %s", rc, stdout, stderr)
 			}
-			assertStatusProgress(t, stderr, mode == "always")
+			if mode == "default" {
+				if stderr != "" {
+					t.Errorf("default status must be silent on stderr: %q", stderr)
+				}
+				assertNoTerminalQueries(t, rawErr)
+				return
+			}
+			if !strings.Contains(stderr, "✓ done") {
+				t.Errorf("stderr missing the done summary: %q", stderr)
+			}
 			assertNoTerminalQueries(t, rawErr)
-			assertLinesFit(t, stderr, 80)
 		})
-	}
-}
-
-// assertStatusProgress pins the stderr contract for status.
-func assertStatusProgress(t *testing.T, stderr string, enabled bool) {
-	t.Helper()
-	if !enabled {
-		if stderr != "" {
-			t.Errorf("default status must be silent on stderr: %q", stderr)
-		}
-		return
-	}
-	for _, want := range []string{"reading worktrees", "indexing sessions", "reading upstreams", "scanning worktrees", "✓ done"} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("stderr missing progress %q; stderr:\n%s", want, stderr)
-		}
 	}
 }
 
@@ -113,14 +114,26 @@ func TestWithProgressRendererPTY(t *testing.T) {
 	wg.Add(1)
 	go drainPTY(masterErr, outStream.append, &wg)
 
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	// A failed observation must not leave the work goroutine blocked.
+	t.Cleanup(releaseOnce)
+
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- withProgressTo(slaveErr, &g, true, func(p *progress) error {
+		errCh <- withProgressTo(slaveErr, &g, progressOptions{}, func(p *progress) error {
 			p.phase("demo", 1)
 			p.advance(1)
+			// Hold the phase until a frame carries it: a phase that ends between
+			// frames is never visible, and a sleep would only guess the cadence.
+			<-release
 			return workErr
 		})
 	}()
+	if err := outStream.waitContains("demo", 15*time.Second, nil); err != nil {
+		t.Fatal(err)
+	}
+	releaseOnce()
 	err := <-errCh
 	// Closing the slave ends the drain: the renderer has exited by the time
 	// withProgressTo returns.
