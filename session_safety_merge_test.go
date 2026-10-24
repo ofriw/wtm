@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -102,6 +103,27 @@ func TestSharedSessionSafetyMissingIndexedFile(t *testing.T) {
 		warning := captureStderr(t, func() { lastUsed(owner, idx, nil) })
 		if !strings.Contains(warning, p) {
 			t.Fatalf("display did not disclose missing activity: %q", warning)
+		}
+		// Under the renderer the loss must ride the progress handle: a raw stderr
+		// write would be erased by the next frame.
+		events := make(chan progressEvent, 4)
+		display := &progress{ctx: context.Background(), events: events}
+		if stderr := captureStderr(t, func() { lastUsed(owner, idx, display) }); stderr != "" {
+			t.Fatalf("warning bypassed the progress handle: %q", stderr)
+		}
+		close(events)
+		notices := 0
+		for ev := range events {
+			if ev.kind != evNotice {
+				continue
+			}
+			notices++
+			if !strings.Contains(ev.text, p) {
+				t.Fatalf("notice lost the missing path: %q", ev.text)
+			}
+		}
+		if notices != 1 {
+			t.Fatalf("notices = %d, want 1 routed warning", notices)
 		}
 	})
 }

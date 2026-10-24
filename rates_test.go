@@ -577,6 +577,33 @@ func TestRatesCacheWriteFailureStillPrices(t *testing.T) {
 	assertRatesFetchCount(t, hits, 2)
 }
 
+// TestRatesCacheWriteFailureRidesProgressHandle pins that a renderer window
+// receives the disclosure as a notice: a raw stderr write would be erased by
+// the next frame.
+func TestRatesCacheWriteFailureRidesProgressHandle(t *testing.T) {
+	path, _ := blockRatesCacheWrite(t, false)
+	url := serveRates(t, http.StatusOK, testCatalog)
+	events := make(chan progressEvent, 16)
+	p := &progress{ctx: context.Background(), events: events}
+	errOut := captureStderr(t, func() {
+		c, err := fetchAndCache(path, url, p)
+		assertFetchedCatalog(t, c, err)
+	})
+	if errOut != "" {
+		t.Errorf("renderer window leaked raw stderr: %q", errOut)
+	}
+	close(events)
+	var notices []string
+	for ev := range events {
+		if ev.kind == evNotice {
+			notices = append(notices, ev.text)
+		}
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "rate cache write failed") {
+		t.Fatalf("notices = %q, want one cache-write warning", notices)
+	}
+}
+
 // TestRatesCacheWriteFailureRefetchesEveryRun pins both blocked-cache shapes:
 // a working network keeps pricing, and no cooldown marker suppresses the next
 // fetch.

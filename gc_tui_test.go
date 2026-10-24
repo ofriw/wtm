@@ -310,6 +310,21 @@ func TestGCTUIToggleAcceptRemoves(t *testing.T) {
 	assertWorktreeNotListed(t, repo, wt1)
 }
 
+// TestGCPlainProgressPhases pins the destructive-phase labels on the plain
+// renderer: a redirected --progress always emits one line per transition, so
+// frame cadence cannot hide the removal or pruning feedback.
+func TestGCPlainProgressPhases(t *testing.T) {
+	repo, wt1, _ := gcTUIFixture(t)
+	_, stderr, rc := runWTM(t, repo, nil, "gc", "--path", wt1, "--yes", "--progress", "always")
+	if rc != 0 {
+		t.Fatalf("rc = %d, want 0\nstderr: %s", rc, stderr)
+	}
+	if strings.Contains(stderr, "\x1b") {
+		t.Errorf("plain progress carries escape bytes: %q", stderr)
+	}
+	assertOrdered(t, stderr, "start removing worktrees", "start pruning", "✓ done in")
+}
+
 // TestGCTUIDeclineAborts pins Fix A end to end: declining prints "aborted" on
 // stderr, exits 0 with nothing on stdout, and keeps the worktree.
 func TestGCTUIDeclineAborts(t *testing.T) {

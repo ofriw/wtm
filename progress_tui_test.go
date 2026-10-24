@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"sync"
@@ -99,6 +100,35 @@ func TestStatusProgressTTY(t *testing.T) {
 	}
 }
 
+// TestStatusPlainProgressPhases pins phase coverage on the renderer's non-TTY
+// sibling: a redirected --progress always writes one plain line per transition,
+// so a fast phase cannot be hidden by frame cadence. This is the phase-content
+// contract; TestStatusProgressTTY owns the animated wiring and summary.
+func TestStatusPlainProgressPhases(t *testing.T) {
+	repo, _, _ := gcTUIFixture(t)
+	_, stderr, rc := runWTM(t, repo, nil, "status", "--progress", "always")
+	if rc != 0 {
+		t.Fatalf("rc = %d, want 0\nstderr: %s", rc, stderr)
+	}
+	if strings.Contains(stderr, "\x1b") {
+		t.Errorf("plain progress carries escape bytes: %q", stderr)
+	}
+	assertOrdered(t, stderr, "start indexing sessions", "start scanning worktrees", "✓ done in")
+}
+
+// assertOrdered pins that every want appears in s, in the given order.
+func assertOrdered(t *testing.T, s string, want ...string) {
+	t.Helper()
+	rest := s
+	for _, w := range want {
+		i := strings.Index(rest, w)
+		if i < 0 {
+			t.Fatalf("%q missing or out of order; want %q in:\n%s", w, strings.Join(want, " -> "), s)
+		}
+		rest = rest[i+len(w):]
+	}
+}
+
 // TestWithProgressRendererPTY pins the in-process orchestration on a real
 // terminal: under an explicit --progress always, work runs against a live
 // renderer on the injected writer, the work error surfaces as withProgressTo's
@@ -149,4 +179,86 @@ func TestWithProgressRendererPTY(t *testing.T) {
 			t.Errorf("renderer output missing %q; stderr:\n%s", want, stderr)
 		}
 	}
+}
+
+// TestProgressFastTransientSilentPTY pins the delay contract on a real
+// terminal: a transient run that finishes inside the silence window writes no
+// frame at all, so a fast status leaves stderr clean. The window is explicit so
+// the assertion cannot race the product default.
+func TestProgressFastTransientSilentPTY(t *testing.T) {
+	var g globals
+	g.progress = progressAlways
+	masterErr, slaveErr := openTTY(t, 80)
+	outStream := &ttyPoll{}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go drainPTY(masterErr, outStream.append, &wg)
+
+	err := withProgressTo(slaveErr, &g, progressOptions{transient: true, delay: time.Hour}, func(p *progress) error {
+		// A backlog past any fixed hand-off buffer: status emits ~4 events per
+		// worktree, so this is ~100 worktrees' worth. Buffering used to strand
+		// the worker here until the window expired.
+		p.phase("indexing sessions", 200)
+		for i := range 200 {
+			p.detail(fmt.Sprintf("worktree-%d", i))
+			p.advance(1)
+		}
+		p.notice("warning: broken session")
+		return nil
+	})
+	_ = slaveErr.Close()
+	wg.Wait()
+	if err != nil {
+		t.Fatalf("withProgressTo: %v", err)
+	}
+	// Frames stay silent, but a disclosure must still print.
+	text := outStream.text()
+	if !strings.Contains(text, "warning: broken session") {
+		t.Errorf("fast transient run dropped its notice; stderr text %q", text)
+	}
+	if strings.Contains(text, "indexing sessions") || strings.Contains(outStream.raw(), "\x1b") {
+		t.Errorf("fast transient run painted a frame: %q", outStream.raw())
+	}
+}
+
+// TestProgressFastTransientVisiblePTY pins the other side of the same window:
+// with an explicit tiny delay the renderer takes over and the phase reaches the
+// terminal, so the silent test above cannot pass by never rendering at all.
+func TestProgressFastTransientVisiblePTY(t *testing.T) {
+	var g globals
+	g.progress = progressAlways
+	masterErr, slaveErr := openTTY(t, 80)
+	outStream := &ttyPoll{}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go drainPTY(masterErr, outStream.append, &wg)
+
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- withProgressTo(slaveErr, &g, progressOptions{transient: true, delay: time.Nanosecond}, func(p *progress) error {
+			p.phase("indexing sessions", 0)
+			// Outlast the renderer's first frame by holding the phase until the
+			// test observes it: no sleep, no frame-cadence guess.
+			<-release
+			return nil
+		})
+	}()
+	if err := outStream.waitContains("indexing sessions", 15*time.Second, nil); err != nil {
+		t.Fatal(err)
+	}
+	releaseOnce()
+	if err := <-errCh; err != nil {
+		t.Fatalf("withProgressTo: %v", err)
+	}
+	_ = slaveErr.Close()
+	wg.Wait()
+	rawErr := outStream.raw()
+	if !strings.Contains(crToLF(outStream.text()), "indexing sessions") {
+		t.Errorf("visible transient run never rendered its phase; raw stderr:\n%s", rawErr)
+	}
+	assertNoTerminalQueries(t, rawErr)
 }
