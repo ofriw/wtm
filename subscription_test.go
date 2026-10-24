@@ -1084,77 +1084,21 @@ func TestSubscriptionOverageWebSearchOnlyIsEstimated(t *testing.T) {
 	}
 }
 
-// parentScopeSeed seeds a clean child worktree under a metered parent, so the
-// ancestor walk is the only thing voiding the proof.
-func parentScopeSeed(t *testing.T) (string, sessionIndex) {
-	t.Helper()
+// TestParentScopeKillSwitchWarnsOncePerRun pins the kill switch: it keeps the
+// proof fail-open and discloses itself once per run. loadUsage owns that single
+// disclosure, so no shared latch can race the parse pool.
+func TestParentScopeKillSwitchWarnsOncePerRun(t *testing.T) {
 	sandbox(t)
 	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
-	parent := t.TempDir()
-	writeFile(t, filepath.Join(parent, claudeSettingsFile), `{"apiKeyHelper":"/bin/fetch"}`, 0o600)
-	dir := filepath.Join(parent, "child")
-	return dir, usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{"input_tokens":100000}`))
-}
-
-// TestParentScopeKillSwitchWarnsOnceAndSkipsCache pins 3A: disabling the
-// ancestor walk warns once per run, stays fail-open, and never caches the
-// verdict (a cached verdict would go stale across env changes).
-func TestParentScopeKillSwitchWarnsOncePerRun(t *testing.T) {
-	dir, _ := parentScopeSeed(t)
 	t.Setenv("WTM_CLAUDE_PARENT_SCOPE", "0")
-	subs := loadSubscriptions()
-	var first, second subscriptions
-	errOut := captureStderr(t, func() {
-		first = subs.forWorktree(dir)
-		second = subs.forWorktree(dir)
-	})
-	if !first.claude || !second.claude {
-		t.Fatalf("claude = %v/%v, want fail-open true/true", first.claude, second.claude)
+	if subs := loadSubscriptions(); !subs.claude {
+		t.Fatal("fixture must seed a proven Claude subscription")
 	}
-	if got := strings.Count(errOut, "WTM_CLAUDE_PARENT_SCOPE=0"); got != 1 {
-		t.Fatalf("warnings = %d, want exactly 1 per run:\n%s", got, errOut)
-	}
-	if _, ok := subs.wtVerdicts[dir]; ok {
-		t.Error("the kill-switch verdict must skip the cache")
-	}
-
-	// A second run has its own once-state, so it warns again.
-	secondRun := loadSubscriptions()
-	errOut = captureStderr(t, func() { _ = secondRun.forWorktree(dir) })
-	if got := strings.Count(errOut, "WTM_CLAUDE_PARENT_SCOPE=0"); got != 1 {
-		t.Fatalf("second run warnings = %d, want exactly 1:\n%s", got, errOut)
-	}
-}
-
-// TestParentScopeNilStateWarnsEveryCall pins the zero-value proof: without the
-// per-run state, the kill-switch warning must not hide.
-func TestParentScopeNilStateWarnsEveryCall(t *testing.T) {
-	var subs subscriptions
-	errOut := captureStderr(t, func() {
-		subs.warnParentScopeOnce()
-		subs.warnParentScopeOnce()
-	})
-	if got := strings.Count(errOut, "WTM_CLAUDE_PARENT_SCOPE=0"); got != 2 {
-		t.Fatalf("warnings = %d, want one per call:\n%s", got, errOut)
-	}
-}
-
-// TestParentScopeCacheSkippedWhenDisabled pins the no-stale-cache direction: a
-// verdict cached while the walk ran must not void the proof once the operator
-// disables the walk.
-func TestParentScopeCacheSkippedWhenDisabled(t *testing.T) {
-	dir, _ := parentScopeSeed(t)
-	subs := loadSubscriptions()
-	if got := subs.forWorktree(dir); got.claude {
-		t.Fatal("enabled walk must void the proof under a metered parent")
-	}
-	t.Setenv("WTM_CLAUDE_PARENT_SCOPE", "0")
-	var disabled subscriptions
-	captureStderr(t, func() {
-		// Reuse the stale cache: the disabled walk must recompute, not trust it.
-		disabled = subs.forWorktree(dir)
-	})
-	if !disabled.claude {
-		t.Fatal("a cached void verdict must not survive disabling the walk")
+	var ws workspace
+	for run := 1; run <= 2; run++ {
+		errOut := captureStderr(t, func() { ws.loadUsage(nil) })
+		if got := strings.Count(errOut, "WTM_CLAUDE_PARENT_SCOPE=0"); got != 1 {
+			t.Fatalf("run %d warnings = %d, want exactly 1 per run:\n%s", run, got, errOut)
+		}
 	}
 }

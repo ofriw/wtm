@@ -41,21 +41,12 @@ type subscriptions struct {
 	claudeAllowanceOnly bool
 	managed             bool      // cached managed-settings metered verdict (machine-global)
 	since               time.Time // subscription start; zero when unknown
-	// wtVerdicts caches the per-worktree Claude verdict, so the settings walk
-	// runs once per worktree per run. The map is shared by every forWorktree
-	// copy; a nil map skips the cache (zero-value proof in tests).
-	wtVerdicts map[string]bool
-	// parentScope holds the kill-switch warning's once-state. It is shared by
-	// every forWorktree copy and initialized per run, so two runs warn twice.
-	parentScope *parentScopeState
 }
-
-type parentScopeState struct{ warned bool }
 
 // loadSubscriptions reads both credential sources once per status run. It never
 // fails: an absent or malformed file yields an empty proof.
 func loadSubscriptions() subscriptions {
-	s := subscriptions{piOAuth: map[string]bool{}, wtVerdicts: map[string]bool{}, parentScope: &parentScopeState{}}
+	s := subscriptions{piOAuth: map[string]bool{}}
 	if dir := piAgent.configDir(); dir != "" {
 		s.piOAuth = readPiOAuth(filepath.Join(dir, "auth.json"))
 	}
@@ -425,66 +416,36 @@ func (s subscriptions) piProven(provider string) bool {
 	return s.piOAuth[provider]
 }
 
-// warnParentScopeOnce keeps the kill-switch disclosure to one line per run.
-// forWorktree runs once per worktree, but the operator needs the warning once.
-// A nil state is a zero-value proof; warn rather than hide the risk.
-func (s subscriptions) warnParentScopeOnce() {
-	if s.parentScope == nil {
-		warnf("WTM_CLAUDE_PARENT_SCOPE=0 disables ancestor settings check")
-		return
+// warnParentScopeDisabled discloses the kill switch. loadUsage calls it once
+// per run, so the disclosure needs no state of its own: a latch shared with
+// workers would be the same unsynchronized write forWorktree used to make.
+func warnParentScopeDisabled(s subscriptions, p *progress) {
+	if s.claude && !claudeParentScopeEnabled() {
+		warnProgress(p, "WTM_CLAUDE_PARENT_SCOPE=0 disables ancestor settings check")
 	}
-	if s.parentScope.warned {
-		return
-	}
-	s.parentScope.warned = true
-	warnf("WTM_CLAUDE_PARENT_SCOPE=0 disables ancestor settings check")
 }
 
 // forWorktree drops a proof that a worktree setting invalidates: a per-repo
 // metered override bills outside the subscription even when the process env and
 // user account are clean. Ancestor settings void the proof the same way unless
 // WTM_CLAUDE_PARENT_SCOPE=0 disables the walk; the cached machine-global
-// managed verdict voids it too. A copy per worktree keeps one repo's override
-// from leaking into its neighbor. The verdict is cached per root, so a
-// multi-worktree run walks each chain once.
+// managed verdict voids it too.
+//
+// The returned value is independent: it replaces value fields only and never
+// writes the shared snapshot. status parses worktrees in a pool, so a write
+// here would race every sibling worker (see parallel.go's contract).
 func (s subscriptions) forWorktree(root string) subscriptions {
 	if !s.claude {
 		return s
 	}
 	if !claudeParentScopeEnabled() {
-		// Fail-open and uncached: the kill-switch proves the harness never
-		// merges parent settings, so the ancestor walk is skipped and no
-		// verdict is cached (a cached verdict would go stale across env changes).
-		s.warnParentScopeOnce()
+		// Fail-open: the kill switch proves the harness never merges parent
+		// settings, so the ancestor walk is skipped.
 		s.claude = !s.managed && !claudeProjectMetered(root)
 		return s
 	}
-	if v, ok := s.cachedWorktreeVerdict(root); ok {
-		s.claude = v
-		return s
-	}
-	s.claude = s.cleanWorktreeVerdict(root)
+	s.claude = !s.managed && !claudeProjectMetered(root) && !claudeParentsMetered(root)
 	return s
-}
-
-// cachedWorktreeVerdict returns a verdict already computed for root this run.
-// A nil cache is a zero-value proof and reports a miss.
-func (s subscriptions) cachedWorktreeVerdict(root string) (bool, bool) {
-	if s.wtVerdicts == nil {
-		return false, false
-	}
-	v, ok := s.wtVerdicts[root]
-	return v, ok
-}
-
-// cleanWorktreeVerdict walks the repo and ancestor settings once and caches the
-// result, so a multi-worktree run pays for each chain only once.
-func (s subscriptions) cleanWorktreeVerdict(root string) bool {
-	v := !s.managed && !claudeProjectMetered(root) && !claudeParentsMetered(root)
-	if s.wtVerdicts != nil {
-		s.wtVerdicts[root] = v
-	}
-	return v
 }
 
 // claudeProven bounds the account proof by the subscription start: an event

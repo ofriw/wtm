@@ -73,18 +73,30 @@ func parseStatusFlags(g *globals, args []string) (bool, error) {
 // nowFunc is the clock seam. Production reads the wall clock; the container
 // harness pins WTM_NOW so every clock read is deterministic in goldens: status
 // ages, worktreeLastUsed and the gc TTL decision all draw from this one seam.
-// A malformed value is a test-setup error, so disclose it instead of hiding it.
+// A malformed value is a test-setup error, so warnNowEnv discloses it once
+// before any renderer starts: a raw warning inside the frame is erased.
 func nowFunc() time.Time {
-	s := os.Getenv("WTM_NOW")
-	if s == "" {
-		return time.Now()
+	if t, err := parseNowEnv(); err == nil {
+		return t
 	}
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		warnf("WTM_NOW %q is not RFC3339: using the wall clock", s)
-		return time.Now()
+	return time.Now()
+}
+
+// parseNowEnv parses the WTM_NOW seam. An absent value is a parse error, so
+// nowFunc falls back to the wall clock without special-casing it.
+func parseNowEnv() (time.Time, error) {
+	return time.Parse(time.RFC3339, os.Getenv("WTM_NOW"))
+}
+
+// warnNowEnv runs at dispatch, before any subcommand can open a renderer.
+func warnNowEnv() {
+	raw := os.Getenv("WTM_NOW")
+	if raw == "" {
+		return
 	}
-	return t
+	if _, err := parseNowEnv(); err != nil {
+		warnf("WTM_NOW %q is not RFC3339: using the wall clock", raw)
+	}
 }
 
 // loadUsage attaches every worktree's cost/active-time summary. The catalog is
@@ -94,6 +106,7 @@ func nowFunc() time.Time {
 func (ws *workspace) loadUsage(p *progress) {
 	cat := ws.loadCatalog(p)
 	subs := loadSubscriptions()
+	warnParentScopeDisabled(subs, p)
 	for i := range ws.wts {
 		ws.attachUsage(i, cat, subs, p)
 	}

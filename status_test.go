@@ -195,8 +195,8 @@ func TestWorktreeLastUsed(t *testing.T) {
 }
 
 // TestNowFunc pins the clock seam: absent env reads the wall clock, a valid
-// RFC3339 value is honored, and a malformed value discloses itself and falls
-// back to the wall clock.
+// RFC3339 value is honored, and a malformed value falls back silently because
+// warnNowEnv discloses it once at dispatch, outside any renderer window.
 func TestNowFunc(t *testing.T) {
 	// t.Setenv restores the original value at cleanup; unset here to hit the
 	// true absent-env path, not just the empty-value one.
@@ -209,14 +209,26 @@ func TestNowFunc(t *testing.T) {
 	if got := nowFunc(); !got.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Errorf("valid env = %v, want 2026-01-01T00:00:00Z", got)
 	}
+}
+
+// TestMalformedNowDisclosedOnceAtDispatch pins the placement: the clock warning
+// must land before any renderer starts, so dispatch owns it and nowFunc stays
+// silent (a raw write inside a frame would be erased by the next frame).
+func TestMalformedNowDisclosedOnceAtDispatch(t *testing.T) {
 	t.Setenv("WTM_NOW", "nope")
+	warned := captureStderr(t, func() {
+		_ = dispatch("bogus", &globals{color: colorAuto, progress: progressAuto}, nil)
+	})
+	if n := strings.Count(warned, `WTM_NOW "nope"`); n != 1 {
+		t.Errorf("disclosures = %d, want 1: %q", n, warned)
+	}
 	var got time.Time
-	warned := captureStderr(t, func() { got = nowFunc() })
+	silent := captureStderr(t, func() { got = nowFunc() })
 	if got.Before(time.Now().Add(-time.Minute)) {
 		t.Errorf("malformed env = %v, want the wall clock", got)
 	}
-	if !strings.Contains(warned, `WTM_NOW "nope"`) {
-		t.Errorf("malformed env not disclosed: %q", warned)
+	if silent != "" {
+		t.Errorf("nowFunc must not write inside a renderer window: %q", silent)
 	}
 }
 
