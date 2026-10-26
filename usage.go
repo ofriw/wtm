@@ -450,8 +450,8 @@ func unionDuration(spans []span) time.Duration {
 	return total + cur.end.Sub(cur.start)
 }
 
-// modelUsage is one model's totals inside a harness; spans are per-session
-// model spans, merged for the active time.
+// modelUsage is one model's totals inside a harness; spans are its usage
+// spans clipped to the session's causal turns, merged for the active time.
 type modelUsage struct {
 	cost    costPair
 	tiers   tokenTiers
@@ -465,7 +465,7 @@ func (m *modelUsage) active() time.Duration { return unionDuration(m.spans) }
 // harnessUsage is one harness's totals for a worktree.
 type harnessUsage struct {
 	cost    costPair
-	spans   []span // session spans (all events)
+	spans   []span // causal turn spans
 	models  map[string]*modelUsage
 	partial bool // an unreadable session or dropped record may belong here
 }
@@ -517,40 +517,43 @@ func (u *worktreeUsage) harness(name string) *harnessUsage {
 }
 
 // addBilledSession folds one session where billed[i] marks the events that
-// contribute cost. Every event still folds into the spans, so dedupe never
-// changes activity time; only the billed subset contributes money. A nil mask
-// bills every event, which is the no-dedupe case.
-func (u *worktreeUsage) addBilledSession(harness string, events []usageEvent, billed []bool, price func(usageEvent) pricedEvent) {
+// contribute cost. Activity folds every event's causal turns, so dedupe never
+// changes active time; only the billed subset contributes money. A nil mask
+// bills every event, which is the no-dedupe case. A nil activity slice is the
+// test/older-parse fallback: it treats the usage event range as one turn.
+func (u *worktreeUsage) addBilledSession(harness string, events []usageEvent, activity []activityEvent, billed []bool, price func(usageEvent) pricedEvent) {
 	if len(events) == 0 {
 		return
 	}
 	h := u.harness(harness)
-	session, perModel := foldSession(events, h, billed, price)
-	h.spans = append(h.spans, session)
+	blocks := sessionActivity(activity, events)
+	h.spans = append(h.spans, blocks...)
+	perModel := foldSession(events, h, billed, price)
 	for name, m := range perModel {
+		m.spans = clipSpans(m.spans, blocks)
 		h.model(name).absorb(m)
 	}
 }
 
-// foldSession accumulates one session's harness cost and returns the session
-// span plus each model's per-session spans and cost.
-func foldSession(events []usageEvent, h *harnessUsage, billed []bool, price func(usageEvent) pricedEvent) (span, map[string]*modelUsage) {
-	session := span{start: events[0].at, end: events[0].at}
+// foldSession accumulates one session's harness cost and returns each model's
+// raw usage spans and cost. The caller clips those spans to the session's
+// causal turns, so model TIME excludes idle between turns without losing a
+// spawn child's call-to-result attribution.
+func foldSession(events []usageEvent, h *harnessUsage, billed []bool, price func(usageEvent) pricedEvent) map[string]*modelUsage {
 	perModel := map[string]*modelUsage{}
 	prev := ""
 	for i, e := range events {
-		session.start = minTime(session.start, e.at)
-		session.end = maxTime(session.end, e.endAt())
 		prev = foldEvent(perModel, h, e, billed == nil || i >= len(billed) || billed[i], prev, price)
 	}
-	return session, perModel
+	return perModel
 }
 
 // foldEvent extends one model's open run and both cost accumulators. prev is
-// the previous event's model: consecutive same-model events chain into one run
-// (first→last event), a different model closes the run, so an interleaved
-// model never inherits another model's idle time. An isolated event is a point.
-// A non-billed event still chains spans; only its money is skipped.
+// the previous event's model: consecutive same-model events chain into one raw
+// run (first→last event), a different model closes the run. The caller later
+// clips the raw runs to the session's causal turns, so idle never reaches a
+// model's TIME. An isolated event is a point. A non-billed event still chains
+// spans; only its money is skipped.
 func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, bill bool, prev string, price func(usageEvent) pricedEvent) string {
 	m := modelFor(perModel, e.model)
 	extendRun(m, e, prev)
@@ -570,8 +573,9 @@ func modelFor(perModel map[string]*modelUsage, name string) *modelUsage {
 	return m
 }
 
-// extendRun chains consecutive same-model events into one run; a different
-// model or an empty run starts a new span.
+// extendRun chains consecutive same-model events into one raw run; a different
+// model or an empty run starts a new span. Raw spans may include idle between
+// turns; addBilledSession clips them to the causal turns.
 func extendRun(m *modelUsage, e usageEvent, prev string) {
 	if prev == e.model && len(m.spans) > 0 {
 		last := &m.spans[len(m.spans)-1]

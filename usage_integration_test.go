@@ -308,9 +308,9 @@ func TestBuildUsageActiveTimeSurvivesDedupe(t *testing.T) {
 		return m
 	})
 	var whole, deduped worktreeUsage
-	whole.addBilledSession("pi", []usageEvent{a, b}, nil, price)
+	whole.addBilledSession("pi", []usageEvent{a, b}, nil, nil, price)
 	masks := dedupeKeyedEvents([][]usageEvent{{a, b}})
-	deduped.addBilledSession("pi", []usageEvent{a, b}, masks[0], price)
+	deduped.addBilledSession("pi", []usageEvent{a, b}, nil, masks[0], price)
 	if whole.active() != deduped.active() {
 		t.Fatalf("active = %v after dedupe, want %v (dedupe never changes time)", deduped.active(), whole.active())
 	}

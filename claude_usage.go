@@ -14,7 +14,9 @@ import (
 // per assistant record and tags it with the turn's identity; the worktree-level
 // dedupe (dedupeKeyedEvents) keeps the occurrence with the best score (tokens,
 // then web-search count, then self-priced cost), so a turn counts once even when
-// a resumed or forked session file repeats it.
+// a resumed or forked session file repeats it. The same walk reconstructs the
+// causal turn for ACTIVE: a human prompt opens it, tool use/results keep it
+// open, and end_turn/error closes it.
 
 type claudeUsageRecord struct {
 	Type      string         `json:"type"`
@@ -24,9 +26,24 @@ type claudeUsageRecord struct {
 }
 
 type claudeMessage struct {
-	ID    string       `json:"id"`
-	Model string       `json:"model"`
-	Usage *claudeUsage `json:"usage"`
+	ID         string       `json:"id"`
+	Model      string       `json:"model"`
+	StopReason string       `json:"stop_reason"`
+	Usage      *claudeUsage `json:"usage"`
+}
+
+// claudeActivityRecord is the lightweight shape for records with a turn
+// boundary but no billable usage. Content stays raw; isMeta is top-level.
+type claudeActivityRecord struct {
+	Type      string                 `json:"type"`
+	Timestamp string                 `json:"timestamp"`
+	IsMeta    bool                   `json:"isMeta"`
+	Message   *claudeActivityMessage `json:"message"`
+}
+
+type claudeActivityMessage struct {
+	StopReason string          `json:"stop_reason"`
+	Content    json.RawMessage `json:"content"`
 }
 
 type claudeUsage struct {
@@ -48,49 +65,68 @@ type claudeServerToolUse struct {
 	WebSearchRequests *int64 `json:"web_search_requests"`
 }
 
-// claudeUsageEvents parses one Claude session into candidate events, one per
-// assistant record, sorted by time. Turn dedupe happens at the worktree level.
-// It reports how many records it could not read, so the caller can warn instead
-// of silently shrinking the total.
-func claudeUsageEvents(r *bufio.Reader) ([]usageEvent, int, error) {
-	var events []usageEvent
-	dropped := 0
+// claudeUsageEvents parses one Claude session into cost events and causal turn
+// activity. Unreadable records are counted so the caller can warn.
+func claudeUsageEvents(r *bufio.Reader) (sessionParse, error) {
+	var out sessionParse
 	for {
 		line, oversized, err := sessionRecord(r)
-		if e, ok := claudeLineEvent(line, oversized, &dropped); ok {
-			events = append(events, e)
-		}
+		out.consumeClaudeLine(line, oversized)
 		if err != nil {
 			if err == io.EOF {
-				sortUsageEvents(events)
-				return events, dropped, nil
+				out.sortClaude()
+				return out, nil
 			}
 			// A read error must not discard the records already parsed: the
 			// caller drops the session (and taints the total), but the kept
 			// events stay available for diagnostics and tests.
-			sortUsageEvents(events)
-			return events, dropped, err
+			out.sortClaude()
+			return out, err
 		}
 	}
 }
 
-// claudeLineEvent consumes one session record; a discarded record increments
-// dropped.
-func claudeLineEvent(line []byte, oversized bool, dropped *int) (usageEvent, bool) {
+func (p *sessionParse) sortClaude() {
+	sortUsageEvents(p.events)
+	sort.SliceStable(p.activity, func(i, j int) bool { return p.activity[i].at.Before(p.activity[j].at) })
+}
+
+// consumeClaudeLine folds one record: a billed assistant drives cost, and any
+// user/assistant record drives the turn state.
+func (p *sessionParse) consumeClaudeLine(line []byte, oversized bool) {
 	if oversized {
-		// Billed relevance is unknowable after the discard, so count it.
-		*dropped++
-		return usageEvent{}, false
+		p.dropped++
+		return
 	}
-	if len(line) == 0 || !bytes.Contains(line, usageKey) {
-		return usageEvent{}, false
+	if len(line) == 0 {
+		return
 	}
-	var rec claudeUsageRecord
-	if json.Unmarshal(line, &rec) != nil {
-		*dropped++
-		return usageEvent{}, false
+	// recordType reads the top-level type, so whitespace in a re-serialized
+	// transcript cannot hide a user or assistant record.
+	switch t, ok := recordType(line); {
+	case !ok && bytes.Contains(line, usageKey):
+		p.dropped++
+	case ok && t == "assistant" && bytes.Contains(line, usageKey):
+		var rec claudeUsageRecord
+		if json.Unmarshal(line, &rec) != nil {
+			p.dropped++
+			return
+		}
+		if e, ok := claudeEvent(&rec, &p.dropped); ok {
+			p.events = append(p.events, e)
+		}
+		if a, ok := claudeActivityFromUsage(&rec); ok {
+			p.activity = append(p.activity, a)
+		}
+	case ok && (t == "user" || t == "assistant"):
+		var rec claudeActivityRecord
+		if json.Unmarshal(line, &rec) != nil {
+			return
+		}
+		if a, ok := claudeActivityFromRecord(&rec); ok {
+			p.activity = append(p.activity, a)
+		}
 	}
-	return claudeEvent(&rec, dropped)
 }
 
 func sortUsageEvents(events []usageEvent) {
@@ -118,6 +154,70 @@ func claudeEvent(rec *claudeUsageRecord, dropped *int) (usageEvent, bool) {
 		at: at, key: claudeTurnKey(msg.ID, rec.RequestID), model: msg.Model,
 		tokens: tokens, tier: tier, webSearch: web,
 	}, true
+}
+
+// claudeActivityFromUsage derives the turn boundary from a billed assistant
+// record. A tool_use (or a streaming record with no stop reason yet) keeps the
+// turn open; any terminal stop reason closes it.
+func claudeActivityFromUsage(rec *claudeUsageRecord) (activityEvent, bool) {
+	msg := rec.Message
+	if rec.Type != "assistant" || msg == nil {
+		return activityEvent{}, false
+	}
+	at, ok := parseUsageTime(rec.Timestamp)
+	if !ok {
+		return activityEvent{}, false
+	}
+	return activityEvent{at: at, kind: claudeStopKind(msg.StopReason)}, true
+}
+
+// claudeActivityFromRecord derives the turn boundary from a record that carries
+// no billable usage: an assistant record (streaming fragment or empty turn) and
+// a user record (human prompt or tool result).
+func claudeActivityFromRecord(rec *claudeActivityRecord) (activityEvent, bool) {
+	at, ok := parseUsageTime(rec.Timestamp)
+	if !ok {
+		return activityEvent{}, false
+	}
+	switch rec.Type {
+	case "assistant":
+		if rec.Message == nil {
+			return activityEvent{}, false
+		}
+		return activityEvent{at: at, kind: claudeStopKind(rec.Message.StopReason)}, true
+	case "user":
+		if rec.Message == nil || rec.IsMeta {
+			return activityEvent{}, false
+		}
+		return activityEvent{at: at, kind: claudeUserKind(rec.Message.Content)}, true
+	}
+	return activityEvent{}, false
+}
+
+// claudeStopKind maps Claude's stop reason to the turn state. Null is a
+// streaming fragment, so it stays open; only tool_use keeps working, and every
+// terminal reason closes the turn.
+func claudeStopKind(stop string) activityKind {
+	switch stop {
+	case "", "tool_use":
+		return activityWork
+	default:
+		return activityEnd
+	}
+}
+
+// claudeUserKind distinguishes a human prompt (a string or a content block
+// without tool_result) from a tool result. The content is raw so a large tool
+// result is never decoded into blocks.
+func claudeUserKind(content json.RawMessage) activityKind {
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return activityHuman
+	}
+	if bytes.Contains(trimmed, []byte(`"tool_result"`)) {
+		return activityWork
+	}
+	return activityHuman
 }
 
 // claudeTurnKey is the billed-turn identity. Both ids absent is an empty key,

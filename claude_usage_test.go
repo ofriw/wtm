@@ -6,16 +6,18 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // claude_usage_test.go — the Claude parser contract: every assistant record
 // becomes a candidate event tagged with its turn identity, cache classes stay
 // apart, the synthetic model is skipped, an omitted cache-write lifetime is
 // kept as unclassified so pricing can report it unknown, and the worktree-level
-// dedupe keeps the largest record of a turn across session files.
+// dedupe keeps the largest record of a turn across session files. One record is
+// space-separated so a re-serialized transcript still bills.
 
 const claudeFixture = `{"type":"queue-operation","operation":"dequeue","cwd":null}
-{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"r1","message":{"id":"x","model":"claude-opus-4-6","usage":{"input_tokens":3,"output_tokens":1,"cache_read_input_tokens":10,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":0},"service_tier":"standard"}}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:01Z", "requestId": "r1", "message": {"id": "x", "model": "claude-opus-4-6", "usage": {"input_tokens": 3, "output_tokens": 1, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 20, "cache_creation": {"ephemeral_5m_input_tokens": 20, "ephemeral_1h_input_tokens": 0}, "service_tier": "standard"}}}
 {"type":"assistant","timestamp":"2026-01-01T00:00:02Z","requestId":"r1","message":{"id":"x","model":"claude-opus-4-6","usage":{"input_tokens":3,"output_tokens":400,"cache_read_input_tokens":10,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":0},"service_tier":"standard","server_tool_use":{"web_search_requests":2}}}}
 {"type":"assistant","timestamp":"2026-01-01T00:00:03Z","requestId":"r2","message":{"id":"y","model":"claude-opus-4-6","usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":50,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"service_tier":"standard"}}}
 {"type":"assistant","timestamp":"2026-01-01T00:00:04Z","requestId":"r3","message":{"id":"z","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}
@@ -24,11 +26,11 @@ const claudeFixture = `{"type":"queue-operation","operation":"dequeue","cwd":nul
 
 func parseClaudeFixture(t *testing.T) []usageEvent {
 	t.Helper()
-	events, _, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(claudeFixture)))
+	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(claudeFixture)))
 	if err != nil {
 		t.Fatalf("claudeUsageEvents: %v", err)
 	}
-	return events
+	return parsed.events
 }
 
 // keptBilled returns the events a billed mask marks, so a test can inspect the
@@ -129,10 +131,11 @@ func TestClaudeDedupeWebSearchBreaksTokenTie(t *testing.T) {
 // records both bill instead of collapsing to one winner.
 func TestClaudeKeylessRecordsSurviveDedupe(t *testing.T) {
 	line := `{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"model":"m","usage":{"input_tokens":1}}}`
-	events, _, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(line + "\n" + line + "\n")))
+	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(line + "\n" + line + "\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
+	events := parsed.events
 	if len(events) != 2 {
 		t.Fatalf("got %d events, want 2", len(events))
 	}
@@ -162,18 +165,18 @@ func TestClaudeUsageKeepsEventsBeforeReadError(t *testing.T) {
 		strings.NewReader(first+"\n"+second+"\n"),
 		failReader{err: io.ErrUnexpectedEOF},
 	))
-	events, dropped, err := claudeUsageEvents(r)
+	parsed, err := claudeUsageEvents(r)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
 	}
-	if dropped != 0 {
-		t.Errorf("dropped = %d, want 0", dropped)
+	if parsed.dropped != 0 {
+		t.Errorf("dropped = %d, want 0", parsed.dropped)
 	}
-	if len(events) != 2 {
-		t.Fatalf("got %d events, want the 2 parsed before the error", len(events))
+	if len(parsed.events) != 2 {
+		t.Fatalf("got %d events, want the 2 parsed before the error", len(parsed.events))
 	}
-	if !events[0].at.Before(events[1].at) {
-		t.Errorf("events are not time ordered: %v", events)
+	if !parsed.events[0].at.Before(parsed.events[1].at) {
+		t.Errorf("events are not time ordered: %v", parsed.events)
 	}
 }
 
@@ -186,12 +189,13 @@ func TestClaudeUsageUnclassifiedCacheWrite(t *testing.T) {
 }
 
 func TestClaudeUsageSkipsUntimestamped(t *testing.T) {
-	events, dropped, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(
+	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(
 		`{"type":"assistant","message":{"id":"x","model":"m","usage":{"input_tokens":1}}}`,
 	)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	events, dropped := parsed.events, parsed.dropped
 	if len(events) != 0 {
 		t.Fatalf("untimestamped record produced %d events, want 0", len(events))
 	}
@@ -206,10 +210,11 @@ func TestClaudeUsageSkipsUntimestamped(t *testing.T) {
 func TestClaudeUsageOversizedRecordIsDropped(t *testing.T) {
 	big := `{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","requestId":"big","message":{"id":"big","model":"m","usage":{"input_tokens":999999},"pad":"` + strings.Repeat("a", maxSessionHeader) + `"}}`
 	good := `{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"good","message":{"id":"good","model":"m","usage":{"input_tokens":100,"output_tokens":10}}}`
-	events, dropped, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(big + "\n" + good + "\n")))
+	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(big + "\n" + good + "\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
+	events, dropped := parsed.events, parsed.dropped
 	if dropped != 1 {
 		t.Errorf("dropped = %d, want 1", dropped)
 	}
@@ -225,12 +230,13 @@ func TestClaudeUsageOversizedRecordIsDropped(t *testing.T) {
 // record carries billed usage, so a user record with a usage object is not an
 // event.
 func TestClaudeUsageSkipsNonAssistant(t *testing.T) {
-	events, dropped, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(
+	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(
 		`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"id":"x","model":"m","usage":{"input_tokens":1}}}`,
 	)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	events, dropped := parsed.events, parsed.dropped
 	if len(events) != 0 {
 		t.Fatalf("non-assistant record produced %d events, want 0", len(events))
 	}
@@ -255,10 +261,11 @@ func TestClaudeUsageSkipsCorruptLines(t *testing.T) {
 		good[3], good[4],
 		`{"type":"assistant","timestamp":"2026-01-01T00:00:0`,
 	}
-	events, dropped, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(mixed, "\n") + "\n")))
+	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(mixed, "\n") + "\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
+	events, dropped := parsed.events, parsed.dropped
 	if len(events) != 3 {
 		t.Fatalf("got %d candidate events, want 3: %+v", len(events), events)
 	}
@@ -272,5 +279,31 @@ func TestClaudeUsageSkipsCorruptLines(t *testing.T) {
 	}
 	if second := deduped[1]; second.tokens.unclassifiedCacheWrite != 50 {
 		t.Errorf("unclassifiedCacheWrite = %d, want 50", second.tokens.unclassifiedCacheWrite)
+	}
+}
+
+// TestClaudeActivityCausalTurns pins the Claude turn state: a human prompt, a
+// tool_use, its tool_result, and an end_turn stay one turn; a later prompt is a
+// new turn, so the idle between them is excluded.
+func TestClaudeActivityCausalTurns(t *testing.T) {
+	lines := []string{
+		`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}`,
+		`{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"r1","message":{"id":"m1","model":"claude","stop_reason":"tool_use","content":[],"usage":{"input_tokens":1}}}`,
+		`{"type":"user","isMeta":true,"timestamp":"2026-01-01T00:00:30Z","message":{"role":"user","content":"meta"}}`,
+		`{"type":"user","timestamp":"2026-01-01T00:01:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}`,
+		`{"type":"assistant","timestamp":"2026-01-01T00:01:05Z","requestId":"r2","message":{"id":"m2","model":"claude","stop_reason":"end_turn","content":[],"usage":{"output_tokens":1}}}`,
+		`{"type":"user","timestamp":"2026-01-01T02:00:00Z","message":{"role":"user","content":"again"}}`,
+		`{"type":"assistant","timestamp":"2026-01-01T02:00:05Z","requestId":"r3","message":{"id":"m3","model":"claude","stop_reason":"end_turn","content":[],"usage":{"output_tokens":1}}}`,
+	}
+	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := sessionBlocks(parsed.activity)
+	if got := unionDuration(blocks); got != 70*time.Second {
+		t.Fatalf("active = %v, want 70s", got)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %v, want two turns", blocks)
 	}
 }

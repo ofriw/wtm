@@ -125,10 +125,11 @@ func TestPiProviderCapture(t *testing.T) {
 {"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","provider":"anthropic","model":"claude","usage":{"cost":{"total":2}}}}
 {"type":"message","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","model":"claude","usage":{"cost":{"total":3}}}}
 `
-	events, _, err := piUsageEvents(bufio.NewReader(strings.NewReader(session)))
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(session)))
 	if err != nil {
 		t.Fatalf("piUsageEvents: %v", err)
 	}
+	events := parsed.events
 	want := []string{"openai-codex", "anthropic", "anthropic"}
 	if len(events) != len(want) {
 		t.Fatalf("events = %d, want %d", len(events), len(want))

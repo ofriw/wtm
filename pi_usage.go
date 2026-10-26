@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 )
 
@@ -50,12 +51,29 @@ type piMessage struct {
 	Provider      string           `json:"provider"`
 	Model         string           `json:"model"`
 	ResponseModel string           `json:"responseModel"`
+	StopReason    string           `json:"stopReason"`
 	ToolName      string           `json:"toolName"`
 	ToolCallID    string           `json:"toolCallId"`
 	IsError       bool             `json:"isError"`
 	Content       []piContentBlock `json:"content"`
 	Usage         *piUsage         `json:"usage"`
 	Details       *piSpawnDetails  `json:"details"`
+}
+
+// piActivityRecord is the lightweight shape for a message that carries no
+// billable usage. It keeps the turn role and stop reason without decoding a
+// content-heavy tool result.
+type piActivityRecord struct {
+	Type      string             `json:"type"`
+	Timestamp string             `json:"timestamp"`
+	Message   *piActivityMessage `json:"message"`
+}
+
+type piActivityMessage struct {
+	Role          string `json:"role"`
+	Model         string `json:"model"`
+	ResponseModel string `json:"responseModel"`
+	StopReason    string `json:"stopReason"`
 }
 
 // piContentBlock is the subset of an assistant content block the parser needs:
@@ -109,29 +127,34 @@ type piSpawnUsage struct {
 	CacheWrite *int64   `json:"cacheWrite"`
 }
 
-// piUsageEvents parses one Pi session into cost/time events, reporting how many
-// records it could not read. Malformed lines are skipped, matching the session
-// index's tolerant owner scan, but the count lets the caller warn instead of
-// silently shrinking the total.
-func piUsageEvents(r *bufio.Reader) ([]usageEvent, int, error) {
+// piUsageEvents parses one Pi session into cost events and causal turn
+// activity. Malformed lines are skipped, matching the session index's tolerant
+// owner scan; the count still lets the caller warn about the loss.
+func piUsageEvents(r *bufio.Reader) (sessionParse, error) {
 	s := piParseState{spawnAt: map[string]time.Time{}}
 	for {
 		line, oversized, err := sessionRecord(r)
 		s.consume(line, oversized)
 		if err == io.EOF {
-			return s.events, s.dropped, nil
+			return s.result(), nil
 		}
 		if err != nil {
-			return s.events, s.dropped, err
+			return s.result(), err
 		}
 	}
 }
 
+func (s *piParseState) result() sessionParse {
+	sort.SliceStable(s.activity, func(i, j int) bool { return s.activity[i].at.Before(s.activity[j].at) })
+	return sessionParse{events: s.events, activity: s.activity, dropped: s.dropped}
+}
+
 // piParseState is the running state of one session parse: the events collected,
-// the count of unread records, the spawn-call start map, and the running
-// model/provider attribution.
+// the causal turn markers, the count of unread records, the spawn-call start
+// map, and the running model/provider attribution.
 type piParseState struct {
 	events   []usageEvent
+	activity []activityEvent
 	dropped  int
 	spawnAt  map[string]time.Time
 	current  string
@@ -145,7 +168,13 @@ func (s *piParseState) consume(line []byte, oversized bool) {
 		s.dropped++
 		return
 	}
-	if len(line) == 0 || !piInteresting(line) {
+	if len(line) == 0 {
+		return
+	}
+	if !piInteresting(line) {
+		if bytes.Contains(line, piMessageKey) {
+			s.consumePiActivity(line)
+		}
 		return
 	}
 	var rec piUsageRecord
@@ -153,7 +182,68 @@ func (s *piParseState) consume(line []byte, oversized bool) {
 		s.dropped++
 		return
 	}
+	at, atOK := parseUsageTime(rec.Timestamp)
 	s.current, s.provider = appendPiRecord(&s.events, &rec, s.current, s.provider, s.spawnAt, &s.dropped)
+	if atOK {
+		if a, ok := piActivityFromRecord(&rec, at); ok {
+			s.activity = append(s.activity, a)
+		}
+	}
+}
+
+// consumePiActivity decodes only the small activity shape, so a content-heavy
+// tool result never allocates its blocks.
+func (s *piParseState) consumePiActivity(line []byte) {
+	var rec piActivityRecord
+	if json.Unmarshal(line, &rec) != nil || rec.Type != "message" || rec.Message == nil {
+		return
+	}
+	at, ok := parseUsageTime(rec.Timestamp)
+	if !ok {
+		return
+	}
+	if a, ok := piActivityFromMessage(rec.Message.Role, rec.Message.StopReason, at); ok {
+		s.activity = append(s.activity, a)
+	}
+}
+
+// piActivityFromRecord maps a fully decoded record to its turn state. Only
+// message and usage-bearing agent records move the turn.
+func piActivityFromRecord(rec *piUsageRecord, at time.Time) (activityEvent, bool) {
+	switch rec.Type {
+	case "message":
+		if rec.Message == nil {
+			return activityEvent{}, false
+		}
+		return piActivityFromMessage(rec.Message.Role, rec.Message.StopReason, at)
+	case "usage", "compaction", "branch_summary":
+		return activityEvent{at: at, kind: activityWork}, true
+	}
+	return activityEvent{}, false
+}
+
+func piActivityFromMessage(role, stop string, at time.Time) (activityEvent, bool) {
+	switch role {
+	case "user":
+		return activityEvent{at: at, kind: activityHuman}, true
+	case "assistant":
+		return activityEvent{at: at, kind: piStopKind(stop)}, true
+	case "toolResult":
+		return activityEvent{at: at, kind: activityWork}, true
+	}
+	return activityEvent{}, false
+}
+
+// piStopKind maps Pi's stop reason to the turn state. A tool call keeps the
+// turn open; stop/error/aborted closes it. A missing reason (older record)
+// stays open, and EOF closes at the last work record.
+func piStopKind(stop string) activityKind {
+	switch stop {
+	case "stop", "error", "aborted":
+		return activityEnd
+	default:
+		return activityWork
+	}
 }
 
 // piBillsTime reports whether a record type carries billed cost/time, so it
@@ -568,6 +658,7 @@ var (
 	piDetailsKey     = []byte("\"details\"")
 	piToolCallKey    = []byte("\"toolCall\"")
 	piIsErrorKey     = []byte("\"isError\"")
+	piMessageKey     = []byte("\"message\":")
 )
 
 func piInteresting(line []byte) bool {

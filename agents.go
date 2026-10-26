@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,12 +36,13 @@ type agent struct {
 	configDirRel  []string // under home
 	sessionSubdir string
 	sessionOwner  func(*bufio.Reader) (string, error)
-	// parseUsage reads one session file into cost/time events, plus the count of
-	// records it could not read (bad JSON, timestamp, or oversized). A nonzero
-	// count lets the caller warn and taint the total partial. catalogRated marks a harness whose
-	// records carry tokens but no cost, so the public catalog must price them
-	// (Claude Code); a self-pricing harness (Pi) adds cost to each event.
-	parseUsage   func(*bufio.Reader) ([]usageEvent, int, error)
+	// parseUsage reads one session file into cost events, causal turn
+	// activity, and the count of records it could not read (bad JSON,
+	// timestamp, or oversized). A nonzero count lets the caller warn and taint
+	// the total partial. catalogRated marks a harness whose records carry tokens
+	// but no cost, so the public catalog must price them (Claude Code); a
+	// self-pricing harness (Pi) adds cost to each event.
+	parseUsage   func(*bufio.Reader) (sessionParse, error)
 	catalogRated bool
 }
 
@@ -325,6 +327,31 @@ func sessionRecord(r *bufio.Reader) ([]byte, bool, error) {
 			return line, oversized, err
 		}
 	}
+}
+
+// recordType reads the top-level "type" from a truncated prefix. Nested types
+// cannot classify the record, and a prefix that ends first fails closed.
+func recordType(prefix []byte) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(prefix))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return "", false
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		if key == "type" {
+			v, err := dec.Token()
+			t, ok := v.(string)
+			return t, ok && err == nil
+		}
+		if dec.Decode(new(json.RawMessage)) != nil {
+			return "", false
+		}
+	}
+	return "", false
 }
 
 // sessionIndex maps a canonical worktree cwd to its session files. It is built
@@ -628,9 +655,10 @@ func sessionMtime(p string) (time.Time, error) {
 // parsedSession pairs one readable session's events with its fold inputs, so
 // buildUsage can parse every session before it folds any.
 type parsedSession struct {
-	harness string
-	events  []usageEvent
-	price   func(usageEvent) pricedEvent
+	harness  string
+	events   []usageEvent
+	activity []activityEvent
+	price    func(usageEvent) pricedEvent
 }
 
 // usageLoss accumulates what a parse walk lost, so folding can taint the total
@@ -666,8 +694,12 @@ func (l *usageLoss) recordDropped(harness string, n int) {
 // empty proof leaves every event at its list price, and a worktree-level metered
 // override drops the Claude proof for this worktree alone.
 func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
+	return buildUsageSessions(wtPath, idx[canonical(wtPath)], cat, subs)
+}
+
+func buildUsageSessions(wtPath string, refs []sessionRef, cat catalog, subs subscriptions) (worktreeUsage, error) {
 	subs = subs.forWorktree(wtPath)
-	sessions, loss := parseWorktreeSessions(idx[canonical(wtPath)], cat, subs)
+	sessions, loss := parseWorktreeSessions(refs, cat, subs)
 	var u worktreeUsage
 	foldParsedSessions(&u, sessions)
 	markPartial(&u, loss.lost)
@@ -692,7 +724,7 @@ func parseWorktreeSession(ref sessionRef, cat catalog, subs subscriptions, loss 
 	if !ok || a.parseUsage == nil {
 		return parsedSession{}, false
 	}
-	events, n, err := readUsage(a, ref.path)
+	parsed, err := readUsage(a, ref.path)
 	if err != nil {
 		// A bad file sorts anywhere, so record the loss now and taint the
 		// total after folding, when even a good session listed later in the
@@ -700,8 +732,8 @@ func parseWorktreeSession(ref sessionRef, cat catalog, subs subscriptions, loss 
 		loss.fail(ref.harness, err)
 		return parsedSession{}, false
 	}
-	loss.recordDropped(ref.harness, n)
-	return parsedSession{harness: ref.harness, events: events, price: usagePricer(a, cat, subs)}, true
+	loss.recordDropped(ref.harness, parsed.dropped)
+	return parsedSession{harness: ref.harness, events: parsed.events, activity: parsed.activity, price: usagePricer(a, cat, subs)}, true
 }
 
 func foldParsedSessions(u *worktreeUsage, sessions []parsedSession) {
@@ -714,7 +746,7 @@ func foldParsedSessions(u *worktreeUsage, sessions []parsedSession) {
 	// removes from a shared transcript.
 	billed := dedupeKeyedEvents(lists)
 	for i, s := range sessions {
-		u.addBilledSession(s.harness, s.events, billed[i], s.price)
+		u.addBilledSession(s.harness, s.events, s.activity, billed[i], s.price)
 	}
 }
 
@@ -759,10 +791,10 @@ func markPartial(u *worktreeUsage, lost map[string]bool) {
 	}
 }
 
-func readUsage(a agent, path string) ([]usageEvent, int, error) {
+func readUsage(a agent, path string) (sessionParse, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, err
+		return sessionParse{}, err
 	}
 	defer func() { _ = f.Close() }()
 	return a.parseUsage(bufio.NewReader(f))

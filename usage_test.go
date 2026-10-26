@@ -443,7 +443,7 @@ func TestFoldSessionShortMaskBills(t *testing.T) {
 		return m
 	})
 	var u worktreeUsage
-	u.addBilledSession("pi", events, []bool{false}, price)
+	u.addBilledSession("pi", events, nil, []bool{false}, price)
 	if got := u.cost().cell(); got != "$2.00" {
 		t.Errorf("cost = %q, want $2.00 (short mask bills the tail)", got)
 	}
@@ -765,7 +765,7 @@ func TestTokensAccrueOnlyForBilled(t *testing.T) {
 		{at: at(0), model: "m", cost: fptr(1), tokens: promptTokens{input: 100}},
 		{at: at(10), model: "m", cost: fptr(1), tokens: promptTokens{input: 100}},
 	}
-	u.addBilledSession("pi", events, []bool{true, false}, price)
+	u.addBilledSession("pi", events, nil, []bool{true, false}, price)
 	m := u.harnesses["pi"].models["m"]
 	if got := m.tokens.input; got != 100 {
 		t.Errorf("billed tokens = %d, want 100", got)

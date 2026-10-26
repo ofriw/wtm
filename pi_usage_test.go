@@ -24,11 +24,11 @@ const piFixture = `{"type":"session","version":3,"id":"s","timestamp":"2026-01-0
 
 func parsePi(t *testing.T, lines ...string) []usageEvent {
 	t.Helper()
-	events, _, err := piUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n")))
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n")))
 	if err != nil {
 		t.Fatalf("piUsageEvents: %v", err)
 	}
-	return events
+	return parsed.events
 }
 
 func parsePiFixture(t *testing.T) []usageEvent { return parsePi(t, piFixture) }
@@ -461,11 +461,12 @@ func TestPiUsageTimestamps(t *testing.T) {
 		t.Errorf("first event at = %v, want %v", events[0].at, want)
 	}
 	// A record without a usable timestamp contributes nothing and is counted.
-	events, dropped, err := piUsageEvents(bufio.NewReader(strings.NewReader(
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(
 		`{"type":"message","timestamp":"nope","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}` + "\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
+	events, dropped := parsed.events, parsed.dropped
 	if len(events) != 0 {
 		t.Fatalf("bad timestamp produced %d events, want 0", len(events))
 	}
@@ -489,10 +490,11 @@ func TestPiUsageSkipsCorruptLines(t *testing.T) {
 		`{"type":"message","timestamp":"2026-01-01T00:00:0`,
 		good[5], good[6], good[7],
 	}
-	events, dropped, err := piUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n")))
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
+	events, dropped := parsed.events, parsed.dropped
 	if len(events) != 5 {
 		t.Fatalf("got %d events, want 5: %+v", len(events), events)
 	}
@@ -510,10 +512,11 @@ func TestPiUsageSkipsCorruptLines(t *testing.T) {
 // oversized record is counted once, and the next good record still prices.
 func TestPiUsageOversizedRecordIsDropped(t *testing.T) {
 	big := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":9}},"pad":"` + strings.Repeat("a", maxSessionHeader) + `"}}`
-	events, dropped, err := piUsageEvents(bufio.NewReader(strings.NewReader(big + "\n" + piUsageLine(1.5) + "\n")))
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(big + "\n" + piUsageLine(1.5) + "\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
+	events, dropped := parsed.events, parsed.dropped
 	if dropped != 1 {
 		t.Errorf("dropped = %d, want 1", dropped)
 	}
@@ -699,8 +702,8 @@ func TestPiSpawnWithoutIDCrossSessionBillsOnce(t *testing.T) {
 		return m
 	})
 	billed := dedupeKeyedEvents([][]usageEvent{a, b})
-	u.addBilledSession("pi", a, billed[0], price)
-	u.addBilledSession("pi", b, billed[1], price)
+	u.addBilledSession("pi", a, nil, billed[0], price)
+	u.addBilledSession("pi", b, nil, billed[1], price)
 	if got := u.cost().cell(); got != "$0.30" {
 		t.Fatalf("cost = %q, want $0.30 (cross-session spawn bills once)", got)
 	}
