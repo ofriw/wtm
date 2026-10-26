@@ -133,8 +133,8 @@ type piSpawnUsage struct {
 func piUsageEvents(r *bufio.Reader) (sessionParse, error) {
 	s := piParseState{spawnAt: map[string]time.Time{}}
 	for {
-		line, oversized, err := sessionRecord(r)
-		s.consume(line, oversized)
+		line, oversized, prefix, err := sessionRecord(r)
+		s.consume(line, oversized, prefix)
 		if err == io.EOF {
 			return s.result(), nil
 		}
@@ -162,10 +162,14 @@ type piParseState struct {
 }
 
 // consume folds one session line into the state. An oversized line was
-// discarded before its billing relevance was known, so it counts as dropped.
-func (s *piParseState) consume(line []byte, oversized bool) {
+// discarded before its billing relevance was known; the bounded prefix decides
+// whether it could have billed, so a huge progress/user record cannot taint the
+// total.
+func (s *piParseState) consume(line []byte, oversized bool, prefix []byte) {
 	if oversized {
-		s.dropped++
+		if oversizedPiBillable(prefix) {
+			s.dropped++
+		}
 		return
 	}
 	if len(line) == 0 {
@@ -204,6 +208,34 @@ func (s *piParseState) consumePiActivity(line []byte) {
 	}
 	if a, ok := piActivityFromMessage(rec.Message.Role, rec.Message.StopReason, at); ok {
 		s.activity = append(s.activity, a)
+	}
+}
+
+// oversizedPiBillable reports whether a discarded Pi record could have billed.
+// An unknown role stays fail-closed; only a visible non-spawn tool result is free.
+func oversizedPiBillable(prefix []byte) bool {
+	t, ok := recordType(prefix)
+	if !ok {
+		return true
+	}
+	switch t {
+	case "usage", "compaction", "branch_summary":
+		return true
+	case "message":
+		if bytes.Contains(prefix, []byte(`"role":"user"`)) {
+			return false
+		}
+		if bytes.Contains(prefix, []byte(`"role":"assistant"`)) ||
+			bytes.Contains(prefix, []byte(`"toolName":"spawn"`)) ||
+			bytes.Contains(prefix, usageKey) || bytes.Contains(prefix, piDetailsKey) ||
+			bytes.Contains(prefix, piStatsKey) {
+			return true
+		}
+		// Missing role/name is unknown; only a visible non-spawn tool result is free.
+		return !bytes.Contains(prefix, []byte(`"role":"toolResult"`)) ||
+			!bytes.Contains(prefix, []byte(`"toolName":"`))
+	default:
+		return false
 	}
 }
 

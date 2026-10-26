@@ -70,8 +70,8 @@ type claudeServerToolUse struct {
 func claudeUsageEvents(r *bufio.Reader) (sessionParse, error) {
 	var out sessionParse
 	for {
-		line, oversized, err := sessionRecord(r)
-		out.consumeClaudeLine(line, oversized)
+		line, oversized, prefix, err := sessionRecord(r)
+		out.consumeClaudeLine(line, oversized, prefix)
 		if err != nil {
 			if err == io.EOF {
 				out.sortClaude()
@@ -93,9 +93,11 @@ func (p *sessionParse) sortClaude() {
 
 // consumeClaudeLine folds one record: a billed assistant drives cost, and any
 // user/assistant record drives the turn state.
-func (p *sessionParse) consumeClaudeLine(line []byte, oversized bool) {
+func (p *sessionParse) consumeClaudeLine(line []byte, oversized bool, prefix []byte) {
 	if oversized {
-		p.dropped++
+		if oversizedClaudeBillable(prefix) {
+			p.dropped++
+		}
 		return
 	}
 	if len(line) == 0 {
@@ -127,6 +129,16 @@ func (p *sessionParse) consumeClaudeLine(line []byte, oversized bool) {
 			p.activity = append(p.activity, a)
 		}
 	}
+}
+
+// oversizedClaudeBillable reports whether a discarded Claude record could have
+// billed. Only an assistant type bills; an unknown type fails closed.
+func oversizedClaudeBillable(prefix []byte) bool {
+	t, ok := recordType(prefix)
+	if !ok {
+		return true
+	}
+	return t == "assistant"
 }
 
 func sortUsageEvents(events []usageEvent) {

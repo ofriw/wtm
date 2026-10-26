@@ -255,7 +255,11 @@ func copyIgnoredFile(srcRoot, dstRoot, rel string) error {
 
 // Ownership comes from harness records, never lossy encoded directory names.
 // Bound each record's memory; oversized records have unknown ownership.
-const maxSessionHeader = 4 << 20
+// maxSessionPrefix bounds the prefix used to classify a discarded record.
+const (
+	maxSessionHeader = 4 << 20
+	maxSessionPrefix = 8 << 10
+)
 
 // maxSessionOwnerRecords bounds the cwd scan: a cwd-less giant JSONL must
 // not force a full scan per status. The owner arrives in the first records
@@ -272,7 +276,7 @@ func (a agent) readSessionOwner(p string) (string, error) {
 }
 
 func piSessionOwner(r *bufio.Reader) (string, error) {
-	line, _, err := sessionRecord(r)
+	line, _, _, err := sessionRecord(r)
 	if err == io.EOF {
 		err = nil
 	}
@@ -282,7 +286,7 @@ func piSessionOwner(r *bufio.Reader) (string, error) {
 // Claude can write queue metadata before the first record with a cwd.
 func claudeSessionOwner(r *bufio.Reader) (string, error) {
 	for n := 0; n < maxSessionOwnerRecords; n++ {
-		line, _, err := sessionRecord(r)
+		line, _, _, err := sessionRecord(r)
 		if cwd := recordCWD(line); cwd != "" {
 			return cwd, nil
 		}
@@ -308,23 +312,29 @@ func recordCWD(line []byte) string {
 	return h.CWD
 }
 
-// sessionRecord returns one record. An oversized record drains without being
-// retained and reports oversized=true exactly once, so the parser can count the
-// loss and continue at the next record. Owner scans ignore the flag: an
-// oversized header proves nothing about ownership.
-func sessionRecord(r *bufio.Reader) ([]byte, bool, error) {
-	var line []byte
-	oversized := false
+// sessionRecord returns one record. An oversized record drains and reports
+// oversized=true once with a bounded prefix for billing classification. Owner
+// scans ignore the prefix: an oversized header proves nothing about ownership.
+func sessionRecord(r *bufio.Reader) (line []byte, oversized bool, prefix []byte, err error) {
 	for {
-		part, err := r.ReadSlice('\n')
-		if len(line)+len(part) > maxSessionHeader {
-			oversized, line = true, nil
-		}
+		part, rerr := r.ReadSlice('\n')
 		if !oversized {
-			line = append(line, part...)
+			if len(line)+len(part) > maxSessionHeader {
+				prefix = append(prefix, line...)
+				prefix = append(prefix, part...)
+				if len(prefix) > maxSessionPrefix {
+					prefix = prefix[:maxSessionPrefix]
+				}
+				oversized, line = true, nil
+			} else {
+				line = append(line, part...)
+			}
+		} else if len(prefix) < maxSessionPrefix {
+			keep := min(len(part), maxSessionPrefix-len(prefix))
+			prefix = append(prefix, part[:keep]...)
 		}
-		if err != bufio.ErrBufferFull {
-			return line, oversized, err
+		if rerr != bufio.ErrBufferFull {
+			return line, oversized, prefix, rerr
 		}
 	}
 }

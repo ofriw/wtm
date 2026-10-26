@@ -205,10 +205,10 @@ func TestClaudeUsageSkipsUntimestamped(t *testing.T) {
 }
 
 // TestClaudeUsageOversizedRecordIsDropped pins the bounded-memory loss
-// contract: an oversized billed record is counted once, and the next good
-// record still prices.
+// contract: an oversized billed record with a nested type is counted once, and
+// the next good record still prices.
 func TestClaudeUsageOversizedRecordIsDropped(t *testing.T) {
-	big := `{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","requestId":"big","message":{"id":"big","model":"m","usage":{"input_tokens":999999},"pad":"` + strings.Repeat("a", maxSessionHeader) + `"}}`
+	big := `{"data":{"type":"progress"},"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"id":"big","model":"m","usage":{"input_tokens":999999},"pad":"` + strings.Repeat("a", maxSessionHeader) + `"}}`
 	good := `{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"good","message":{"id":"good","model":"m","usage":{"input_tokens":100,"output_tokens":10}}}`
 	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(big + "\n" + good + "\n")))
 	if err != nil {
@@ -305,5 +305,24 @@ func TestClaudeActivityCausalTurns(t *testing.T) {
 	}
 	if len(blocks) != 2 {
 		t.Fatalf("blocks = %v, want two turns", blocks)
+	}
+}
+
+// TestClaudeOversizedNonBilledRecordsDoNotDrop pins the precise-loss fix: a
+// huge progress or user record cannot bill, even with a nested assistant type.
+func TestClaudeOversizedNonBilledRecordsDoNotDrop(t *testing.T) {
+	pad := strings.Repeat("a", maxSessionHeader)
+	progress := `{"data":{"type":"assistant"},"type":"progress","timestamp":"2026-01-01T00:00:00Z","pad":"` + pad + `"}`
+	user := `{"type":"user","timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"` + pad + `"}}`
+	good := `{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","requestId":"r1","message":{"id":"m1","model":"m","usage":{"input_tokens":1}}}`
+	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(progress + "\n" + user + "\n" + good + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.dropped != 0 {
+		t.Fatalf("dropped = %d, want 0 for non-billed oversized records", parsed.dropped)
+	}
+	if len(parsed.events) != 1 {
+		t.Fatalf("events = %d, want the good record", len(parsed.events))
 	}
 }

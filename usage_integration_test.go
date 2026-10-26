@@ -372,10 +372,10 @@ func TestBuildUsageOversizedRecordWarnsAndPartials(t *testing.T) {
 	}
 }
 
-// TestBuildUsageOversizedUnbilledRecordStillDiscloses pins the conservative
-// policy: after the discard the parser cannot know whether the record carried
-// billed data, so an oversized user record still marks the total partial.
-func TestBuildUsageOversizedUnbilledRecordStillDiscloses(t *testing.T) {
+// TestBuildUsageOversizedUnbilledRecordDoesNotTaint pins the precise-loss
+// policy: an oversized user message cannot carry billed usage, so it is skipped
+// without warning and without hiding the readable cost.
+func TestBuildUsageOversizedUnbilledRecordDoesNotTaint(t *testing.T) {
 	dir := t.TempDir()
 	session := filepath.Join(dir, "s.jsonl")
 	big := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"` + strings.Repeat("a", maxSessionHeader) + `"}}`
@@ -385,15 +385,15 @@ func TestBuildUsageOversizedUnbilledRecordStillDiscloses(t *testing.T) {
 		idx: sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}},
 	}
 	errOut := captureStderr(t, func() { ws.loadUsage(nil) })
-	if !strings.Contains(errOut, "oversized") {
-		t.Fatalf("warning must name the oversized loss:\n%s", errOut)
+	if errOut != "" {
+		t.Fatalf("non-billed oversized record must not warn:\n%s", errOut)
 	}
 	u := ws.wts[0].Usage
-	if u == nil || !u.partial {
-		t.Fatalf("oversized record must taint the total: %+v", u)
+	if u == nil || u.partial {
+		t.Fatalf("non-billed oversized record must not taint the total: %+v", u)
 	}
-	if h := u.harnesses[piAgent.name]; h == nil || len(h.models) == 0 {
-		t.Fatalf("the good record after the loss must still fold: %+v", u)
+	if got := u.cost().cell(); got != "$1.50" {
+		t.Fatalf("cost = %q, want the readable $1.50", got)
 	}
 }
 

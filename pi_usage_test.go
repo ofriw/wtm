@@ -508,10 +508,10 @@ func TestPiUsageSkipsCorruptLines(t *testing.T) {
 	assertPiEvent(t, events[4], "m-a", nil)
 }
 
-// TestPiUsageOversizedRecordIsDropped pins the bounded-memory loss contract: an
-// oversized record is counted once, and the next good record still prices.
+// TestPiUsageOversizedRecordIsDropped pins the bounded-memory loss contract: a
+// reordered oversized record is counted once, and the next good record prices.
 func TestPiUsageOversizedRecordIsDropped(t *testing.T) {
-	big := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":9}},"pad":"` + strings.Repeat("a", maxSessionHeader) + `"}}`
+	big := `{"type":"message","pad":"` + strings.Repeat("a", maxSessionHeader) + `","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":9}}}}`
 	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(big + "\n" + piUsageLine(1.5) + "\n")))
 	if err != nil {
 		t.Fatal(err)
@@ -760,5 +760,25 @@ func TestPiUsageTokensAndTierCost(t *testing.T) {
 	}
 	if legacy[0].tokens.total() != 0 {
 		t.Errorf("legacy tokens.total() = %d, want 0", legacy[0].tokens.total())
+	}
+}
+
+// TestPiOversizedNonBilledRecordsDoNotDrop pins the precise-loss fix: a huge
+// user message and a huge non-spawn tool result cannot carry usage, so they
+// must not taint the cost.
+func TestPiOversizedNonBilledRecordsDoNotDrop(t *testing.T) {
+	pad := strings.Repeat("a", maxSessionHeader)
+	user := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":[{"type":"text","text":"` + pad + `"}]}}`
+	result := `{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"` + pad + `"}]}}`
+	good := `{"type":"message","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}`
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(user + "\n" + result + "\n" + good + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.dropped != 0 {
+		t.Fatalf("dropped = %d, want 0 for non-billed oversized records", parsed.dropped)
+	}
+	if len(parsed.events) != 1 {
+		t.Fatalf("events = %d, want the good record", len(parsed.events))
 	}
 }
