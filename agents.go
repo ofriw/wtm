@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -633,10 +634,14 @@ func lastUsed(wtPath string, idx sessionIndex, p *progress) time.Time {
 // sessionLastUsed fails closed for fresh removal checks. Display can retain
 // known activity, but must disclose every file it could not inspect. The
 // warning rides p because discovery workers run under the renderer and a raw
-// stderr write would be overwritten by the next frame.
+// stderr write would be overwritten by the next frame. Descendant sessions
+// count too, so ACTIVE/COST and LAST USED agree and GC never reclaims a
+// worktree whose only recent work ran from a subdirectory. A nil worktree list
+// may also count a nested worktree's sessions for the parent: that is
+// conservative for reclamation and harmless for display.
 func sessionLastUsed(wtPath string, idx sessionIndex, strict bool, p *progress) (time.Time, error) {
 	var newest time.Time
-	for _, r := range idx[canonical(wtPath)] {
+	for _, r := range sessionsForWorktree(wtPath, nil, idx) {
 		mtime, err := sessionMtime(r.path)
 		if err != nil {
 			if strict {
@@ -698,13 +703,23 @@ func (l *usageLoss) recordDropped(harness string, n int) {
 	l.dropped += n
 }
 
-// buildUsage parses a worktree's owned sessions once and aggregates cost/time.
+// buildUsage is the exact-cwd form: it folds only sessions whose cwd equals the
+// worktree. Production status uses buildUsageFor, which also includes descendant
+// sessions; tests and callers without a worktree list use this form.
+//
 // cat is nil when no catalog is available: a catalog-rated harness then reports
 // unknown cost instead of a wrong number. subs is the run's credential proof; an
 // empty proof leaves every event at its list price, and a worktree-level metered
 // override drops the Claude proof for this worktree alone.
 func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
 	return buildUsageSessions(wtPath, idx[canonical(wtPath)], cat, subs)
+}
+
+// buildUsageFor includes sessions whose cwd is a descendant of the worktree, so
+// work done from a repo subdirectory still counts for that worktree. The exact
+// index stays the authority for destructive operations (see purgeSessions).
+func buildUsageFor(wtPath string, wts []worktree, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
+	return buildUsageSessions(wtPath, sessionsForWorktree(wtPath, wts, idx), cat, subs)
 }
 
 func buildUsageSessions(wtPath string, refs []sessionRef, cat catalog, subs subscriptions) (worktreeUsage, error) {
@@ -714,6 +729,51 @@ func buildUsageSessions(wtPath string, refs []sessionRef, cat catalog, subs subs
 	foldParsedSessions(&u, sessions)
 	markPartial(&u, loss.lost)
 	return u, usageLossErr(loss.firstErr, loss.dropped)
+}
+
+// sessionsForWorktree returns the sessions whose cwd is the worktree or a
+// descendant of it. A non-nil worktree list keeps a cwd inside a deeper
+// worktree with that worktree only, so nested checkouts never double-count; a
+// nil list includes every descendant (LastUsed only needs a safe upper bound).
+// Exact refs keep their index order; descendant refs follow in cwd order so
+// dedupe stays deterministic.
+func sessionsForWorktree(wtPath string, wts []worktree, idx sessionIndex) []sessionRef {
+	root := canonical(wtPath)
+	refs := slices.Clone(idx[root])
+	var cwds []string
+	for cwd := range idx {
+		if cwd != root && pathInside(cwd, root) && !deeperWorktree(cwd, root, wts) {
+			cwds = append(cwds, cwd)
+		}
+	}
+	slices.Sort(cwds)
+	for _, cwd := range cwds {
+		refs = append(refs, idx[cwd]...)
+	}
+	return refs
+}
+
+// pathInside reports whether p is strictly below root, using a separator
+// boundary so /repo-feature is not inside /repo.
+func pathInside(p, root string) bool {
+	rel, err := filepath.Rel(root, p)
+	if err != nil || rel == "." || rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// deeperWorktree reports whether a worktree below root also contains cwd, so
+// the session belongs to the deeper worktree only. Equality counts: a cwd equal
+// to a nested worktree's path belongs to that worktree, not its parent.
+func deeperWorktree(cwd, root string, wts []worktree) bool {
+	for _, w := range wts {
+		p := canonical(w.Path)
+		if len(p) > len(root) && (cwd == p || pathInside(cwd, p)) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseWorktreeSessions reads every owned session, remembering unreadable files
@@ -911,7 +971,7 @@ func agentByName(name string) (agent, bool) {
 // needed, so a Pi-only repo never touches the network.
 func (idx sessionIndex) hasHarness(wts []worktree, name string) bool {
 	for _, w := range wts {
-		for _, r := range idx[canonical(w.Path)] {
+		for _, r := range sessionsForWorktree(w.Path, wts, idx) {
 			if r.harness == name {
 				return true
 			}

@@ -175,7 +175,7 @@ func (ws *workspace) parseUsage(cat catalog, subs subscriptions, p *progress) {
 	usages := mapParallel(len(ws.wts), scanWorkers, func(i int) usageResult {
 		path := ws.wts[i].Path
 		p.detail(displayPath(path))
-		u, err := buildUsage(path, ws.idx, cat, subs)
+		u, err := buildUsageFor(path, ws.wts, ws.idx, cat, subs)
 		p.advance(1)
 		// Keep a total loss so the loss reads as unknown, never as no usage.
 		if u.hasEvents() || u.partial {
