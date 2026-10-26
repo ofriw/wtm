@@ -22,19 +22,22 @@ type columnContext struct {
 }
 
 // worktreeColumn is one grid column: its header, its projection from a
-// worktree, and its fit policy. shrinkRank is the elision order (0 = pinned);
-// floor is the smallest width a shrinkable column may be elided to. This
-// registry is the single source of truth for the status table and the gc
-// picker, so the two can never drift apart.
+// worktree, and its fit policy. shrinkRank is the fit order (0 = pinned): a
+// lower rank gives up width or drops whole first. floor is the hard minimum
+// width of a shrinkable column; the fit never shrinks below it. floor 0 means
+// the column has no useful minimum, so it drops whole. This registry is the
+// single source of truth for the status table and the gc picker, so the two
+// can never drift apart.
 type worktreeColumn struct {
 	header     string
 	cell       func(worktree, columnContext) string
 	rightAlign bool
 	shrinkRank int
 	floor      int
-	// unelidable columns must not be middle-elided: a cut currency hides its
-	// magnitude, which reads as a wrong number. Such a column keeps its natural
-	// width and is dropped whole (with the stderr disclosure) when it cannot fit.
+	// unelidable columns must not be middle-elided: a cut measurement hides its
+	// magnitude, which reads as a wrong value. A floor-0 unelidable column drops
+	// whole in the shrink pass; a column with a floor keeps its natural width and
+	// drops whole only in the overflow pass (with the stderr disclosure).
 	unelidable bool
 }
 
@@ -106,7 +109,7 @@ func activeCellValue(w worktree) (string, bool) {
 	return humanDuration(w.Usage.active()), false
 }
 
-// cellActive is the union of the worktree's session spans; "-" only when the
+// cellActive is the union of the worktree's causal turns; "-" only when the
 // worktree has no events. A worktree with point events has a zero span, which
 // reads as "0s": measured-but-empty usage must not hide behind "-".
 func cellActive(w worktree, _ columnContext) string {
@@ -165,39 +168,39 @@ func cellIntegrations(w worktree, c columnContext) string {
 func cellUncommitted(w worktree, _ columnContext) string { return dirtyCell(w) }
 
 var (
-	// Core shrink ranks start at 2: rank 1 belongs to the data-dependent
-	// columns (the capabilities, the token group and LIST), which give up width
-	// first.
-	// The identity columns give up width first, in PATH/UPSTREAM/BRANCH/LAST USED
-	// order, so the cost/time data outlives the columns that name a worktree.
-	// AGE, ACTIVE and COST elide next; their floor is their header width, so
-	// those three are never rendered narrower than their headers. INTEGRATIONS
-	// gives up width last.
-	colPath     = worktreeColumn{header: "PATH", cell: cellPath, shrinkRank: 2, floor: 12}
-	colBranch   = worktreeColumn{header: "BRANCH", cell: cellBranch, shrinkRank: 4, floor: 8}
-	colUpstream = worktreeColumn{header: "UPSTREAM", cell: cellUpstream, shrinkRank: 3, floor: 8}
-	colLastUsed = worktreeColumn{header: "LAST USED", cell: cellLastUsed, rightAlign: true, shrinkRank: 5, floor: 10}
-	colAge      = worktreeColumn{header: "AGE", cell: cellAge, rightAlign: true, shrinkRank: 6, floor: 3}
-	colActive   = worktreeColumn{header: "ACTIVE", cell: cellActive, rightAlign: true, shrinkRank: 7, floor: 6}
-	colCost     = worktreeColumn{header: "COST", cell: cellCost, rightAlign: true, shrinkRank: 8, floor: 4, unelidable: true}
+	// Fit order: a lower rank is sacrificed first. Zero-floor columns
+	// (capabilities, the token group, MODEL) drop whole in the shrink pass;
+	// elidable columns shrink toward their floor; unelidable columns keep natural
+	// width. When the floors still overflow, dropOverflowColumns drops whole
+	// columns in the same rank order: LIST, then INTEGRATIONS, then identity, then
+	// the measurements. Measurement columns are unelidable: they render their
+	// whole value or drop whole, never a truncated number that reads as a
+	// different value.
+	colPath     = worktreeColumn{header: "PATH", cell: cellPath, shrinkRank: 3, floor: 12}
+	colBranch   = worktreeColumn{header: "BRANCH", cell: cellBranch, shrinkRank: 5, floor: 8}
+	colUpstream = worktreeColumn{header: "UPSTREAM", cell: cellUpstream, shrinkRank: 4, floor: 8}
+	colLastUsed = worktreeColumn{header: "LAST USED", cell: cellLastUsed, rightAlign: true, shrinkRank: 6, floor: 10, unelidable: true}
+	colAge      = worktreeColumn{header: "AGE", cell: cellAge, rightAlign: true, shrinkRank: 7, floor: 3, unelidable: true}
+	colActive   = worktreeColumn{header: "ACTIVE", cell: cellActive, rightAlign: true, shrinkRank: 8, floor: 6, unelidable: true}
+	colCost     = worktreeColumn{header: "COST", cell: cellCost, rightAlign: true, shrinkRank: 9, floor: 4, unelidable: true}
 	// colList is the data-dependent pay-as-you-go column beside COST (see
 	// withListColumn). It drops whole and it drops first: a counterfactual price
 	// is the most dispensable number here, and a price must never middle-cut.
 	colList   = worktreeColumn{header: "LIST", cell: cellList, rightAlign: true, shrinkRank: 1, unelidable: true}
 	colStatus = worktreeColumn{header: "STATUS", cell: cellStatus}
-	// colTemp is pinned (rank 0): the reclaim countdown must never be elided, so
-	// it survives every width while AGE/ACTIVE/COST give up room first.
+	// colTemp is pinned (rank 0): the reclaim countdown is never elided. Only the
+	// tail-first last resort drops it, when the budget cannot hold the pinned set.
 	colTemp         = worktreeColumn{header: "TEMP", cell: cellTemp}
-	colIntegrations = worktreeColumn{header: "INTEGRATIONS", cell: cellIntegrations, shrinkRank: 9, floor: 6}
+	colIntegrations = worktreeColumn{header: "INTEGRATIONS", cell: cellIntegrations, shrinkRank: 2, floor: 6, unelidable: true}
 	colUncommitted  = worktreeColumn{header: "UNCOMMITTED", cell: cellUncommitted}
 
 	// Detail-block headers carry no cell: the block renders pre-formatted model
-	// rows, and these entries exist only so the detail grid obeys the same shrink
-	// policy as the status table. The token group (see tokenColumns) is the pure
-	// data and gives up width first, dropping whole (rank 1); MODEL is identity
-	// and follows; TIME next; COST reuses colCost.
-	colModel = worktreeColumn{header: "MODEL", shrinkRank: 2}
-	colTime  = worktreeColumn{header: "TIME", rightAlign: true, shrinkRank: 7, floor: 6}
+	// rows, and these entries exist only so the detail grid obeys the same fit
+	// policy as the status table. LIST drops first; MODEL then elides to a floor
+	// so the token group outlives it; the token group drops whole next (rank 4);
+	// TIME and COST are unelidable, so they render whole or drop whole.
+	colModel = worktreeColumn{header: "MODEL", shrinkRank: 2, floor: 12}
+	colTime  = worktreeColumn{header: "TIME", rightAlign: true, shrinkRank: 3, floor: 6, unelidable: true}
 )
 
 // tokenColumns builds the token group's grid columns from detailTokenMeta, so a
@@ -207,7 +210,7 @@ var (
 func tokenColumns() []worktreeColumn {
 	cols := make([]worktreeColumn, len(detailTokenMeta))
 	for i, d := range detailTokenMeta {
-		cols[i] = worktreeColumn{header: d.glyph + " " + d.label, rightAlign: true, shrinkRank: 1}
+		cols[i] = worktreeColumn{header: d.glyph + " " + d.label, rightAlign: true, shrinkRank: 4}
 	}
 	return cols
 }

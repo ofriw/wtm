@@ -149,6 +149,7 @@ func TestColumnWidths(t *testing.T) {
 				t.Errorf("%s = %d, narrower than its header %d", h, got[idx[h]], dispWidth(h))
 			}
 		}
+		assertWholeOrDropped(t, headers, got, natural, "LAST USED", "AGE", "ACTIVE", "COST", "INTEGRATIONS")
 	})
 	t.Run("tight budget drops whole columns, never slivers", func(t *testing.T) {
 		got := columnWidths(headers, rows, 45)
@@ -158,9 +159,10 @@ func TestColumnWidths(t *testing.T) {
 	})
 }
 
-// TestColumnWidthsNarrowBudgets pins the shrink contract at every narrow
-// terminal: identity columns yield first, cost/time headers survive whole
-// while kept, lines fit, and no slivers ever render.
+// TestColumnWidthsNarrowBudgets pins the fit contract at every narrow
+// terminal: optional columns drop whole first, identity columns yield next,
+// measurement columns survive whole while kept, lines fit, and no slivers ever
+// render.
 func TestColumnWidthsNarrowBudgets(t *testing.T) {
 	headers := statusHeaders()
 	rows := [][]string{statusRow(map[string]string{
@@ -182,11 +184,12 @@ func TestColumnWidthsNarrowBudgets(t *testing.T) {
 			assertWithin(t, got, budget)
 			assertPinned(t, headers, got, natural)
 			assertNoSlivers(t, headers, got)
-			for _, h := range []string{"AGE", "ACTIVE", "COST"} {
+			for _, h := range []string{"LAST USED", "AGE", "ACTIVE", "COST", "INTEGRATIONS"} {
 				if got[idx[h]] > 0 && got[idx[h]] < dispWidth(h) {
 					t.Errorf("%s = %d, narrower than its %d-cell header", h, got[idx[h]], dispWidth(h))
 				}
 			}
+			assertWholeOrDropped(t, headers, got, natural, "LAST USED", "AGE", "ACTIVE", "COST", "INTEGRATIONS")
 		})
 	}
 }
@@ -479,10 +482,10 @@ func assertPinned(t *testing.T, headers []string, got, natural []int) {
 	}
 }
 
-// assertNoSlivers pins the width contract: a column is either dropped whole or
-// kept at or above its declared floor, so the width-fit pass never emits a
-// one-cell sliver. A floor above the header width is the author's choice; the
-// cost columns set theirs to the header width so the label always survives.
+// assertNoSlivers keeps the historical helper contract shared with
+// status_test.go: a kept column is at or above its header width or its declared
+// floor, whichever is narrower. The strict policy (a kept column is whole or at
+// its floor) is pinned by assertWholeOrDropped and the width_fix tests.
 func assertNoSlivers(t *testing.T, headers []string, widths []int) {
 	t.Helper()
 	registry := columnRegistry()
@@ -496,6 +499,18 @@ func assertNoSlivers(t *testing.T, headers []string, widths []int) {
 		}
 		if w < floor {
 			t.Errorf("column %s = %d, narrower than its %d-cell floor", headers[i], w, floor)
+		}
+	}
+}
+
+// assertWholeOrDropped pins the unelidable contract: the named columns render
+// their whole natural width or are dropped (width 0), never middle-elided.
+func assertWholeOrDropped(t *testing.T, headers []string, got, natural []int, names ...string) {
+	t.Helper()
+	idx := headerIndex(headers)
+	for _, h := range names {
+		if got[idx[h]] != 0 && got[idx[h]] != natural[idx[h]] {
+			t.Errorf("%s = %d, want whole %d or dropped", h, got[idx[h]], natural[idx[h]])
 		}
 	}
 }

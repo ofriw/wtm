@@ -433,13 +433,12 @@ func TestStatusHeadersSSOT(t *testing.T) {
 	if !slices.Equal(columnHeaders(statusColumns), want) {
 		t.Fatalf("status headers = %v, want %v", columnHeaders(statusColumns), want)
 	}
-	// The elision order production derives for this table is a contract, not an
-	// implementation detail. The identity columns give up width first; AGE,
-	// ACTIVE and COST survive longer, and the integration state gives up width
-	// last.
+	// The fit order production derives for this table is a contract, not an
+	// implementation detail. Optional data (INTEGRATIONS) and identity give up
+	// width first; unelidable measurements drop whole before they are ever cut.
 	registry := columnRegistry()
 	priority := dynamicShrinkPriority(want, registry)
-	wantShrink := []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED", "AGE", "ACTIVE", "COST", "INTEGRATIONS"}
+	wantShrink := []string{"INTEGRATIONS", "PATH", "UPSTREAM", "BRANCH", "LAST USED", "AGE", "ACTIVE", "COST"}
 	if !slices.Equal(priority, wantShrink) {
 		t.Errorf("shrink priority = %v, want %v", priority, wantShrink)
 	}
@@ -837,9 +836,12 @@ func TestStatusDetailProvenPricesNarrow(t *testing.T) {
 					t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
 				}
 			}
-			cols, rows := detailSchema(cur.Usage)
-			headers := columnHeaders(cols)
-			widths := columnWidths(headers, rows, width)
+			// The rendered block is the fitted schema after a token-group drop, so
+			// check the final fit: a column the first pass zeroed can return when
+			// the dropped group frees enough width.
+			f := fitDetailBlock(cur, at(0), width)
+			headers := columnHeaders(f.cols)
+			widths := columnWidths(headers, f.rows, width)
 			assertWithin(t, widths, width)
 			assertNoSlivers(t, headers, widths)
 			assertPricesWholeOrDropped(t, out, errOut, widths, headerIndex(headers), cost, list)

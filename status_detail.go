@@ -26,7 +26,7 @@ type detailFit struct {
 // dropped token group (the renderer) or stays silent (the legend pass). The
 // reasons fold in the summary pair's caveats (unless the summary hid the cost
 // row) and the model rows' caveats (unless the fit dropped COST). The fit
-// mirrors the renderer exactly — the token group drops first and frees width —
+// mirrors the renderer exactly — the token group drops whole and frees width —
 // so a column the block actually renders is never judged dropped here.
 func fitDetailBlock(cur worktree, now time.Time, budget int) detailFit {
 	var f detailFit
@@ -103,10 +103,12 @@ func modelsEstimated(u *worktreeUsage) estimateReasons {
 // the derived miss/hit% metrics). A function, like columnRegistry, so the
 // headers derive from the metadata lists with no package-init ordering
 // dependency. It shares the status column registry (see allColumns), so the
-// block obeys the same width policy as the table above: the token group and
-// LIST give up width first (dropping whole), MODEL next, then TIME, and COST is
-// unelidable, so the cost column outlives the columns that name the rows. LIST
-// is inserted beside COST by detailSchema when a model carries a list price.
+// block obeys the same width policy as the table above: LIST drops whole first,
+// MODEL elides to its floor, then the token group drops whole. That order keeps
+// the breakdown visible when the terminal has room for it. TIME and COST are
+// unelidable, so each renders its whole value or drops whole; COST has the
+// highest rank, so it outlives the columns that name the rows. LIST is inserted
+// beside COST by detailSchema when a model carries a list price.
 func detailColumns() []worktreeColumn {
 	cols := []worktreeColumn{colModel, colTime, colCost}
 	return append(cols, tokenColumns()...)

@@ -476,13 +476,15 @@ func middleElide(s string, w int) string {
 }
 
 // columnWidths sizes each column to natural width when the budget allows, else
-// shrinks the shrinkable columns in rank order down to their floor and further
-// toward their header width. Pinned columns never change. A column that cannot
-// fit is dropped whole, so the table never shows a bare ellipsis; a long header
-// may still middle-elide to its column width. Only AGE, ACTIVE and COST declare
-// a floor at their header width, and COST and LIST are unelidable. Shrink priority
-// is derived from the actual headers via columnRegistry(), so --wide capability
-// columns participate alongside the core columns.
+// gives up width in rank order. A declared floor is a hard minimum: the shrink
+// pass stops there, so a measurement column keeps its whole value. A zero-floor
+// column drops whole, including a zero-floor unelidable column such as LIST. A
+// positive-floor unelidable column (AGE, ACTIVE, LAST USED, INTEGRATIONS, TIME,
+// COST) is pinned at natural width and drops whole only in the overflow pass.
+// The table never shows a bare ellipsis or a truncated measurement; a long
+// elidable identity column may still middle-elide to its column width. Shrink
+// priority is derived from the actual headers via columnRegistry(), so --wide
+// capability columns participate alongside the core columns.
 func columnWidths(headers []string, rows [][]string, budget int) []int {
 	widths := naturalWidths(headers, rows)
 	if budget <= 0 || lineWidth(widths) <= budget {
@@ -491,55 +493,35 @@ func columnWidths(headers []string, rows [][]string, budget int) []int {
 	registry := columnRegistry()
 	priority := dynamicShrinkPriority(headers, registry)
 	floors := dynamicShrinkFloor(headers, registry)
-	unelidable := collectUnelidableFloors(headers, widths, registry, floors)
+	pinUnelidableFloors(headers, widths, registry, floors)
 	over := shrinkToFloors(headers, widths, priority, floors, budget)
-	over = shrinkToHeaders(headers, widths, priority, unelidable, over)
 	dropOverflowColumns(headers, widths, priority, budget, over)
 	return widths
 }
 
-// collectUnelidableFloors pins each unelidable column at its natural width and
-// returns the exclusion set both shrink passes honor. An unelidable column must
-// not be cut, so when the budget still overflows, dropOverflowColumns drops it
-// whole instead of rendering a truncated value.
-func collectUnelidableFloors(headers []string, widths []int, registry map[string]worktreeColumn, floors map[string]int) map[string]bool {
-	unelidable := map[string]bool{}
+// pinUnelidableFloors pins each unelidable column with a floor at its natural
+// width: the shrink pass then cannot cut a measurement value, and
+// dropOverflowColumns drops the whole column instead. A floor-0 unelidable
+// column has no useful minimum, so it drops whole in the shrink pass at its
+// rank; pinning it would make it outlive cheaper columns (LIST did before this
+// distinction).
+func pinUnelidableFloors(headers []string, widths []int, registry map[string]worktreeColumn, floors map[string]int) {
 	for i, h := range headers {
-		if c, ok := registry[h]; ok && c.unelidable {
-			unelidable[h] = true
+		if c, ok := registry[h]; ok && c.unelidable && c.floor > 0 {
 			floors[h] = max(floors[h], widths[i])
 		}
 	}
-	return unelidable
 }
 
-// shrinkToHeaders is the fallback after the declared floors: a column may give
-// up more than its floor, down to its header width. Unelidable columns are
-// skipped: they are dropped whole later instead of being cut. AGE, ACTIVE and
-// COST set their floor at the header width, so their labels survive; a column
-// whose declared floor is lower (INTEGRATIONS) may end below its header.
-func shrinkToHeaders(headers []string, widths []int, priority []string, unelidable map[string]bool, over int) int {
-	for _, name := range priority {
-		if over <= 0 {
-			break
-		}
-		if unelidable[name] {
-			continue
-		}
-		i := slices.Index(headers, name)
-		if i >= 0 {
-			over = shrinkColumn(widths, i, over, dispWidth(headers[i]))
-		}
-	}
-	return over
-}
-
-// dropOverflowColumns is the last resort when even header widths do not fit:
-// drop whole columns (reclaiming their gutter) in the same priority order,
-// instead of rendering an unlabelled sliver. Pinned columns (rank 0) are absent
-// from priority, so when the budget cannot hold even the pinned set they are
-// dropped tail-first: the grid must fit its budget, and the leading pinned
-// columns (the state) outlive the trailing ones (the temp countdown).
+// dropOverflowColumns is the last resort when the declared floors still do not
+// fit: drop whole columns (reclaiming their gutter) in the same priority order,
+// instead of rendering an unlabelled sliver or a cut measurement. Unelidable
+// columns reach this stage at natural width, so a measurement column is dropped
+// whole with the stderr disclosure rather than middle-elided. Pinned columns
+// (rank 0) are absent from priority, so when the budget cannot hold even the
+// pinned set they are dropped tail-first: the grid must fit its budget, and the
+// leading pinned columns (the state) outlive the trailing ones (the temp
+// countdown).
 func dropOverflowColumns(headers []string, widths []int, priority []string, budget, over int) {
 	for _, name := range priority {
 		if over <= 0 {
@@ -561,6 +543,11 @@ func dropOverflowColumns(headers []string, widths []int, priority []string, budg
 	}
 }
 
+// shrinkToFloors gives up width in rank order until the budget fits. A
+// zero-floor column drops whole (it has no useful minimum), whether or not it is
+// unelidable; every other column stops at its floor, which positive-floor
+// unelidable columns pin at natural width. The returned over is what the floors
+// cannot absorb; dropOverflowColumns then drops whole columns.
 func shrinkToFloors(headers []string, widths []int, priority []string, floors map[string]int, budget int) int {
 	over := lineWidth(widths) - budget
 	for _, name := range priority {

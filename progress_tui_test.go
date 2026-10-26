@@ -81,7 +81,7 @@ func TestStatusProgressTTY(t *testing.T) {
 			} else {
 				env = []string{progressDelayEnv + "=1h"}
 			}
-			stdout, stderr, rawErr, rc := runStatusTTY(t, repo, 80, env, args)
+			stdout, stderr, rawErr, rc := runStatusTTY(t, repo, 160, env, args)
 			if rc != 0 {
 				t.Fatalf("rc = %d, want 0\nstdout: %s\nstderr: %s", rc, stdout, stderr)
 			}
