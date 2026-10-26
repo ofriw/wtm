@@ -98,9 +98,10 @@ func dispatch(cmd string, g *globals, rest []string) error {
 	if err := validateGlobals(g); err != nil {
 		return err
 	}
-	// Disclose the clock seam here: subcommands start renderers, and a warning
+	// Disclose the test seams here: subcommands start renderers, and a warning
 	// written inside a frame would be erased by the next frame.
 	warnNowEnv()
+	warnCreatedAtEnv()
 	return dispatchSubcommand(cmd, g, rest)
 }
 

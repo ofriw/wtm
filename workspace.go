@@ -30,8 +30,9 @@ type worktree struct {
 	TempIdentity string
 	// Caps uses the capability registry's ids and states.
 	Caps map[string]capState
-	// Created is the worktree creation mark: the .git entry mtime. Zero when the
-	// mark is absent, which renders as an unknown age.
+	// Created is the worktree creation mark: the filesystem birth time of its
+	// .git entry. Zero when the filesystem records none, which renders as an
+	// unknown age.
 	Created time.Time
 	// Usage is the cost/active-time summary; nil when the worktree has no agent
 	// events. Only status fills it; gc and add leave it nil.
@@ -146,16 +147,17 @@ func worktreeInventory(g gworktree, idx sessionIndex, ups map[string]upstream, p
 	}
 }
 
-// worktreeCreated reads the .git entry mtime as the creation mark. A linked
-// worktree's .git is a file, so its mtime is a stable creation proxy. The main
-// worktree's .git is a directory, so its AGE resets on index and ref writes;
-// the design accepts this because birth time is unavailable on every filesystem.
+// worktreeCreated reads the AGE fact: the .git entry's filesystem birth time.
+// A linked worktree's .git is a file and the main's is a directory; neither
+// birth time moves on ref or index writes. Filesystems that record no birth
+// time yield zero, so AGE reads "-": an mtime or reflog proxy would re-stamp
+// on writes and report a young worktree as new. createdAtEnv overrides this
+// for tests only.
 func worktreeCreated(path string) time.Time {
-	info, err := os.Stat(filepath.Join(path, ".git"))
-	if err != nil {
-		return time.Time{}
+	if t, ok := parseCreatedAtEnv(); ok {
+		return t
 	}
-	return info.ModTime()
+	return fileBirthTime(filepath.Join(path, ".git"))
 }
 
 // applyTempRecord marks w temporary when its record verifies. Every failure

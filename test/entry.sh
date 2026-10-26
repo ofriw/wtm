@@ -25,6 +25,9 @@ export WTM_RATES="${WTM_RATES:-$HARNESS/fixtures/rates.json}"
 # worktreeLastUsed and the gc TTL decision all draw from WTM_NOW. Scenarios seed
 # .git mtimes relative to this date, not to the wall clock.
 export WTM_NOW="${WTM_NOW:-2026-01-01T00:00:00Z}"
+# Fixtures cannot seed a filesystem birth time, so pin AGE from the same
+# origin. Test seam only: production never sets WTM_CREATED_AT.
+export WTM_CREATED_AT="${WTM_CREATED_AT:-2020-01-01T00:00:00Z}"
 export PATH="/stub-bin:/usr/local/bin:/usr/bin:/bin"
 export TZ=UTC LC_ALL=C
 # Goldens opt into a width themselves (COLUMNS=80 wtm status); everything else

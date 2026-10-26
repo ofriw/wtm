@@ -232,21 +232,41 @@ func TestMalformedNowDisclosedOnceAtDispatch(t *testing.T) {
 	}
 }
 
-// TestWorktreeCreated pins the creation mark: the .git entry mtime, and an
-// unknown mark (no .git entry) that must never read as a real zero age.
+// TestWorktreeCreated pins the creation contract: the .git entry's filesystem
+// birth time, the WTM_CREATED_AT test seam, and a missing .git entry that must
+// never read as a real zero age.
 func TestWorktreeCreated(t *testing.T) {
+	t.Setenv(createdAtEnv, "")
+	_ = os.Unsetenv(createdAtEnv)
 	dir := t.TempDir()
 	if !worktreeCreated(dir).IsZero() {
 		t.Error("a worktree without a .git entry must have no creation mark")
 	}
-	mark := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
 	gitEntry := filepath.Join(dir, ".git")
 	writeFile(t, gitEntry, "gitdir: /elsewhere\n", 0o644)
-	if err := os.Chtimes(gitEntry, mark, mark); err != nil {
-		t.Fatal(err)
+	birth := fileBirthTime(gitEntry)
+	if birth.IsZero() {
+		t.Log("filesystem records no birth time; AGE is unknown here")
 	}
-	if got := worktreeCreated(dir); !got.Equal(mark) {
-		t.Errorf("worktreeCreated = %v, want the .git entry mtime %v", got, mark)
+	if got := worktreeCreated(dir); !got.Equal(birth) {
+		t.Errorf("worktreeCreated = %v, want the .git entry birth time %v", got, birth)
+	}
+
+	// The seam must win over the filesystem fact, for both RFC3339 forms.
+	pin := time.Date(2020, 1, 1, 0, 0, 0, 123456789, time.UTC)
+	t.Setenv(createdAtEnv, pin.Format(time.RFC3339Nano))
+	if got := worktreeCreated(dir); !got.Equal(pin) {
+		t.Errorf("worktreeCreated = %v, want the %s pin %v", got, createdAtEnv, pin)
+	}
+	whole := time.Date(2021, 6, 7, 8, 9, 10, 0, time.UTC)
+	t.Setenv(createdAtEnv, whole.Format(time.RFC3339))
+	if got := worktreeCreated(dir); !got.Equal(whole) {
+		t.Errorf("worktreeCreated = %v, want the %s pin %v", got, createdAtEnv, whole)
+	}
+	t.Setenv(createdAtEnv, "nope")
+	if got := worktreeCreated(dir); !got.Equal(birth) {
+		t.Errorf("malformed %s = %v, want the filesystem birth time %v", createdAtEnv, got, birth)
 	}
 }
 

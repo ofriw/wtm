@@ -99,6 +99,35 @@ func warnNowEnv() {
 	}
 }
 
+// createdAtEnv is the WTM_CREATED_AT test seam. Fixtures cannot seed a
+// filesystem birth time, so the scenario harness pins it; production never
+// sets it. A malformed value is a test-setup error, so warnCreatedAtEnv
+// discloses it once while worktreeCreated falls through to the FS fact.
+const createdAtEnv = "WTM_CREATED_AT"
+
+// parseCreatedAtEnv parses the creation seam. Absent and malformed values both
+// report ok=false, so the caller uses the filesystem birth time.
+func parseCreatedAtEnv() (time.Time, bool) {
+	raw := os.Getenv(createdAtEnv)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	return t, err == nil
+}
+
+// warnCreatedAtEnv runs at dispatch beside warnNowEnv: a raw warning inside a
+// renderer frame would be erased by the next frame.
+func warnCreatedAtEnv() {
+	raw := os.Getenv(createdAtEnv)
+	if raw == "" {
+		return
+	}
+	if _, ok := parseCreatedAtEnv(); !ok {
+		warnf("%s %q is not RFC3339: using the filesystem birth time", createdAtEnv, raw)
+	}
+}
+
 // loadUsage attaches every worktree's cost/active-time summary. The catalog is
 // loaded only when the repo owns a Claude session, so a Pi-only repo never
 // reaches the network. An unreadable session degrades to a warning: status is
