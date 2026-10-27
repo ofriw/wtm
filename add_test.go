@@ -448,6 +448,168 @@ func TestAddTTLImpliesTemp(t *testing.T) {
 	}
 }
 
+func linkedMainFixture(t *testing.T) (repo, linked string) {
+	t.Helper()
+	repo = initRepo(t, "work")
+	gitTestCommit(t, repo)
+	gitTestBranch(t, repo, "main")
+	linked = canonical(filepath.Join(filepath.Dir(repo), "wt-main"))
+	mustGit(t, repo, "worktree", "add", "-q", linked, "main")
+	writeFile(t, filepath.Join(linked, chunkhoundConfigFile), `{"from":"main-linked"}`, 0o644)
+	return repo, linked
+}
+
+func advanceWorktree(t *testing.T, dir, name, content, msg string) {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, name), content, 0o644)
+	mustGit(t, dir, "add", "--", name)
+	mustGit(t, dir, "commit", "-q", "-m", msg)
+}
+
+func assertAddSeed(t *testing.T, res addResult, base, src, marker string) {
+	t.Helper()
+	if res.Base != base || canonical(res.Source) != canonical(src) {
+		t.Fatalf("seed = (%q,%q), want (%q,%q)", res.Base, res.Source, base, src)
+	}
+	b, err := os.ReadFile(filepath.Join(res.Path, chunkhoundConfigFile))
+	if err != nil || string(b) != marker {
+		t.Fatalf("seeded marker = %q (%v), want %q", b, err, marker)
+	}
+}
+
+func addCapturingStderr(t *testing.T, repo string, args ...string) (addResult, string) {
+	t.Helper()
+	var res addResult
+	errOut := captureStderr(t, func() { res = addResultOf(t, &globals{root: repo}, args...) })
+	return res, errOut
+}
+
+func assertSeedWarning(t *testing.T, errOut string, notice, stale bool) {
+	t.Helper()
+	gotNotice := strings.Contains(errOut, "seeding from") || strings.Contains(errOut, "no worktree checked out at")
+	gotStale := strings.Contains(errOut, "copied ChunkHound index")
+	if gotNotice != notice || gotStale != stale {
+		t.Fatalf("seed warning = (notice %v, stale %v), want (%v, %v): %q", gotNotice, gotStale, notice, stale, errOut)
+	}
+}
+
+func TestWarnSeedMismatch(t *testing.T) {
+	const note = "seeding from elsewhere"
+	dir := t.TempDir()
+	writeFile(t, chunkhoundDBPath(dir), "DB", 0o644)
+	if out := captureStderr(t, func() { warnSeedMismatch(note, dir, false) }); out != warnPrefix+note+"\n" {
+		t.Fatalf("refreshed index must not be claimed stale: %q", out)
+	}
+	if out := captureStderr(t, func() { warnSeedMismatch(note, dir, true) }); !strings.Contains(out, "index is stale") {
+		t.Fatalf("skipped index must be disclosed: %q", out)
+	}
+}
+
+func TestAddDefaultSourceFollowsCheckedOutDefaultBranch(t *testing.T) {
+	t.Run("linked default without remote", func(t *testing.T) {
+		sandbox(t)
+		repo, linked := linkedMainFixture(t)
+		res, errOut := addCapturingStderr(t, repo, "feature/child", "--no-index")
+		assertAddSeed(t, res, "refs/heads/main", linked, `{"from":"main-linked"}`)
+		assertSeedWarning(t, errOut, false, false)
+	})
+	t.Run("linked default in sync with origin", func(t *testing.T) {
+		sandbox(t)
+		repo, linked := linkedMainFixture(t)
+		gitTestRemoteHead(t, repo, "origin", "main")
+		res, errOut := addCapturingStderr(t, repo, "feature/child", "--no-index")
+		assertAddSeed(t, res, "refs/remotes/origin/main", linked, `{"from":"main-linked"}`)
+		assertSeedWarning(t, errOut, false, false)
+	})
+	t.Run("linked default ahead of origin", func(t *testing.T) {
+		sandbox(t)
+		repo, linked := linkedMainFixture(t)
+		gitTestRemoteHead(t, repo, "origin", "main")
+		writeFile(t, chunkhoundDBPath(linked), "DB", 0o644)
+		advanceWorktree(t, linked, "local.txt", "local", "local main")
+		res, errOut := addCapturingStderr(t, repo, "feature/child", "--no-index")
+		assertAddSeed(t, res, "refs/remotes/origin/main", linked, `{"from":"main-linked"}`)
+		assertSeedWarning(t, errOut, true, true)
+		if got, want := mustGit(t, repo, "rev-parse", res.Branch), mustGit(t, repo, "rev-parse", "refs/remotes/origin/main"); got != want {
+			t.Fatalf("branch tip = %s, want origin/main %s", got, want)
+		}
+	})
+	t.Run("origin ahead of linked default", func(t *testing.T) {
+		sandbox(t)
+		repo, linked := linkedMainFixture(t)
+		gitTestRemoteHead(t, repo, "origin", "main")
+		tree := mustGit(t, repo, "rev-parse", "HEAD^{tree}")
+		remote := mustGit(t, repo, "commit-tree", tree, "-p", "HEAD", "-m", "remote main")
+		mustGit(t, repo, "update-ref", "refs/remotes/origin/main", remote)
+		res, errOut := addCapturingStderr(t, repo, "feature/child", "--no-index")
+		assertAddSeed(t, res, "refs/remotes/origin/main", linked, `{"from":"main-linked"}`)
+		assertSeedWarning(t, errOut, false, false)
+		if got := mustGit(t, repo, "rev-parse", res.Branch); got != remote {
+			t.Fatalf("branch tip = %s, want origin/main %s", got, remote)
+		}
+	})
+	t.Run("default at primary diverged", func(t *testing.T) {
+		sandbox(t)
+		repo := addTestRepo(t)
+		gitTestRemoteHead(t, repo, "origin", "main")
+		advanceWorktree(t, repo, "local.txt", "local", "local main")
+		writeFile(t, filepath.Join(repo, chunkhoundConfigFile), `{"from":"central"}`, 0o644)
+		res, errOut := addCapturingStderr(t, repo, "feature/child", "--no-index")
+		assertAddSeed(t, res, "refs/remotes/origin/main", repo, `{"from":"central"}`)
+		assertSeedWarning(t, errOut, true, false)
+	})
+	t.Run("default checked out nowhere", func(t *testing.T) {
+		sandbox(t)
+		repo := initRepo(t, "work")
+		gitTestCommit(t, repo)
+		gitTestBranch(t, repo, "main")
+		gitTestRemoteHead(t, repo, "origin", "main")
+		writeFile(t, filepath.Join(repo, chunkhoundConfigFile), `{"from":"central"}`, 0o644)
+		res, errOut := addCapturingStderr(t, repo, "feature/child", "--no-index")
+		assertAddSeed(t, res, "refs/remotes/origin/main", repo, `{"from":"central"}`)
+		assertSeedWarning(t, errOut, false, false)
+	})
+	t.Run("from overrides the default checkout", func(t *testing.T) {
+		sandbox(t)
+		repo, linked := linkedMainFixture(t)
+		gitTestRemoteHead(t, repo, "origin", "main")
+		advanceWorktree(t, linked, "local.txt", "local", "local main")
+		from := canonical(filepath.Join(filepath.Dir(repo), "from-src"))
+		if err := os.MkdirAll(from, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(from, chunkhoundConfigFile), `{"from":"explicit"}`, 0o644)
+		res, errOut := addCapturingStderr(t, repo, "feature/child", "--from", from, "--no-index")
+		assertAddSeed(t, res, "refs/remotes/origin/main", from, `{"from":"explicit"}`)
+		assertSeedWarning(t, errOut, false, false)
+	})
+	t.Run("offline linked worktree falls back to primary", func(t *testing.T) {
+		for _, start := range []string{"", "refs/heads/main"} {
+			for _, lock := range []bool{false, true} {
+				sandbox(t)
+				repo, linked := linkedMainFixture(t)
+				advanceWorktree(t, linked, "gone.txt", "gone", "main moved")
+				if lock {
+					mustGit(t, repo, "worktree", "lock", linked)
+				}
+				if err := os.RemoveAll(linked); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(repo, chunkhoundConfigFile), `{"from":"central"}`, 0o644)
+				args := []string{"feature/child", "--no-index"}
+				if start != "" {
+					args = []string{"feature/child", start, "--no-index"}
+				}
+				res, errOut := addCapturingStderr(t, repo, args...)
+				assertAddSeed(t, res, "refs/heads/main", repo, `{"from":"central"}`)
+				if !strings.Contains(errOut, "no worktree checked out at refs/heads/main") {
+					t.Fatalf("offline (locked %v) at start %q must be disclosed, not seeded: %q", lock, start, errOut)
+				}
+			}
+		}
+	})
+}
+
 // TestTempBranchPrefix pins the tmp/ namespace and its idempotence: an
 // already-temp name must not double-prefix.
 func TestTempBranchPrefix(t *testing.T) {
