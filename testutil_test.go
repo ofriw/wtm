@@ -40,16 +40,20 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// exeName adds the host executable suffix so CLI fixtures resolve on Windows.
+func exeName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
 func buildWTMOnce() {
 	wtmBuildDir, wtmBuildErr = os.MkdirTemp("", "wtm-bin-")
 	if wtmBuildErr != nil {
 		return
 	}
-	name := "wtm"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	wtmBinPath = filepath.Join(wtmBuildDir, name)
+	wtmBinPath = filepath.Join(wtmBuildDir, exeName("wtm"))
 	if out, err := exec.Command("go", "build", "-o", wtmBinPath, ".").CombinedOutput(); err != nil {
 		wtmBuildErr = fmt.Errorf("go build: %w\n%s", err, out)
 	}

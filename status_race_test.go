@@ -26,7 +26,7 @@ func buildRaceWTM(t *testing.T) string {
 	if err != nil || strings.TrimSpace(string(out)) != "1" {
 		t.Skip("race-instrumented build needs cgo")
 	}
-	bin := filepath.Join(t.TempDir(), "wtm-race")
+	bin := filepath.Join(t.TempDir(), exeName("wtm-race"))
 	if out, err := exec.Command("go", "build", "-race", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build -race: %v\n%s", err, out)
 	}
