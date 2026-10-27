@@ -280,10 +280,10 @@ func defaultBranch(dir string) (name, remote string) {
 	return defaultLocalCandidate(dir), ""
 }
 
-// baseRefFor resolves the start-point for a new branch: the remote-tracking
-// default when it exists (kept fresh for clones), else the local branch.
-func baseRefFor(dir string) string {
-	name, remote := defaultBranch(dir)
+// baseRefForDefault resolves the start-point for a new branch from an already
+// resolved default: the remote-tracking default when it exists (kept fresh for
+// clones), else the local branch.
+func baseRefForDefault(dir, name, remote string) string {
 	remotes := []string{"origin"}
 	if remote != "" && remote != "origin" {
 		remotes = append([]string{remote}, remotes...)

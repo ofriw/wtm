@@ -121,34 +121,84 @@ func warnIfChunkHoundExpected(path string) {
 }
 
 // resolveAddSource picks the worktree to seed from. An explicit --from wins.
-// Otherwise the source is the worktree checked out at the start-point, so the
-// seeded harness — gitignored db/agent/mcp state git cannot carry — matches the
-// tree the new worktree is created from. When no worktree sits at the
-// start-point, the ref is checked out nowhere and no faithful index exists, so
-// the main worktree is the fallback and the mismatch is disclosed: the copied
-// index cannot match, so indexing must re-embed instead of being a no-op.
-func resolveAddSource(root string, wts []gworktree, base, from, target string) (string, error) {
+// For the implicit default start-point the default-branch worktree wins, even
+// when its HEAD differs, because it carries the harness the user works with.
+// Otherwise the worktree at the start-point wins, with the main worktree as
+// fallback. A differing tree is disclosed after indexing, when index state is
+// known. defaultName is empty for an explicit start-point.
+func resolveAddSource(root string, wts []gworktree, base, from, target, defaultName string) (string, string, error) {
 	if from != "" {
 		src, err := canonicalAbs(from)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if !exists(src) {
-			return "", fmt.Errorf("--from %s: not found", src)
+			return "", "", fmt.Errorf("--from %s: not found", src)
 		}
-		return src, nil
+		return src, "", nil
+	}
+	if defaultName != "" {
+		if w, ok := defaultBranchWorktree(wts, defaultName, target); ok {
+			src := canonical(w.Path)
+			return src, seedNotice(root, src, base, defaultName), nil
+		}
 	}
 	if src, ok := worktreeAt(root, wts, base, target); ok {
-		return src, nil
+		return src, "", nil
 	}
-	warnf("no worktree checked out at %s; seeding from %s; the copied ChunkHound index cannot match and indexing will re-embed", base, canonical(root))
-	return canonical(root), nil
+	src := canonical(root)
+	return src, seedNotice(root, src, base, ""), nil
+}
+
+// seedNotice returns why a differing seed tree does not match base; equal trees stay silent.
+func seedNotice(root, src, base, branch string) string {
+	want, err := git(root, "rev-parse", "--verify", "--quiet", base+"^{tree}")
+	if err != nil {
+		return ""
+	}
+	if got, err := git(src, "rev-parse", "--verify", "--quiet", "HEAD^{tree}"); err != nil || got == want {
+		return ""
+	}
+	if branch == "" {
+		return fmt.Sprintf("no worktree checked out at %s; seeding from %s", base, src)
+	}
+	return fmt.Sprintf("seeding from %s: default branch %s is checked out there, but the start-point is %s", src, branch, base)
+}
+
+// seedable reports whether w can be a seed source: it needs a directory to copy
+// from and must not be the checkout being created.
+func seedable(w gworktree, target string) bool {
+	return !w.Prunable && exists(w.Path) && canonical(w.Path) != target
+}
+
+// defaultBranchWorktree returns the worktree that has branch checked out.
+func defaultBranchWorktree(wts []gworktree, branch, target string) (gworktree, bool) {
+	for _, w := range wts {
+		if w.Branch == branch && seedable(w, target) {
+			return w, true
+		}
+	}
+	return gworktree{}, false
+}
+
+// warnSeedMismatch discloses a differing seed tree. Only a copied index that
+// indexing skipped can be stale: a missing db makes no claim, and a refreshed
+// one already matches the new tree. A missing chunkhound is disclosed by
+// warnIfChunkHoundExpected, so this warning never repeats it.
+func warnSeedMismatch(note, src string, noIndex bool) {
+	if note == "" {
+		return
+	}
+	if noIndex && exists(chunkhoundDBPath(src)) {
+		note += "; the copied ChunkHound index is stale: indexing was skipped"
+	}
+	warnf("%s", note)
 }
 
 // worktreeAt returns the existing worktree checked out at base. It prefers the
-// worktree whose branch is base's branch, then any worktree at the same commit;
-// both require a commit match, so a diverged branch of the same name never
-// masquerades as the start-point. target (the checkout being created) is excluded.
+// branch match, then any worktree at the same commit, so a diverged branch of
+// the same name never masquerades as the start-point. The checkout being created
+// and prunable entries are excluded.
 func worktreeAt(root string, wts []gworktree, base, target string) (string, bool) {
 	commit, err := git(root, "rev-parse", "--verify", "--quiet", base+"^{commit}")
 	if err != nil {
@@ -157,10 +207,10 @@ func worktreeAt(root string, wts []gworktree, base, target string) (string, bool
 	branch := baseBranchName(root, base)
 	exact, same := "", ""
 	for _, w := range wts {
-		p := canonical(w.Path)
-		if p == target || w.HEAD != commit {
+		if !seedable(w, target) || w.HEAD != commit {
 			continue
 		}
+		p := canonical(w.Path)
 		if branch != "" && w.Branch == branch {
 			exact = p
 			break
@@ -275,9 +325,9 @@ func reportAddResult(g *globals, res addResult, ttl time.Duration) error {
 }
 
 type addParams struct {
-	root, src, path, branch, base string
-	temp                          bool
-	ttl                           time.Duration
+	root, src, path, branch, base, seedNote string
+	temp                                    bool
+	ttl                                     time.Duration
 }
 
 func prepareAdd(g *globals, branchArg string, o addOptions) (addParams, error) {
@@ -307,10 +357,13 @@ func resolveAddParams(p addParams, o addOptions) (addParams, error) {
 		return addParams{}, err
 	}
 	p.base = o.start
+	defaultName := ""
 	if p.base == "" {
-		p.base = baseRefFor(p.root)
+		var remote string
+		defaultName, remote = defaultBranch(p.root)
+		p.base = baseRefForDefault(p.root, defaultName, remote)
 	}
-	p.src, err = resolveAddSource(p.root, wts, p.base, o.from, p.path)
+	p.src, p.seedNote, err = resolveAddSource(p.root, wts, p.base, o.from, p.path, defaultName)
 	if err != nil {
 		return addParams{}, err
 	}
@@ -341,6 +394,7 @@ func addWorktree(g *globals, branchArg string, o addOptions) error {
 	if err != nil {
 		return rollbackAdd(p.root, p.path, p.branch, err)
 	}
+	warnSeedMismatch(p.seedNote, p.src, o.noIndex)
 	res := addResult{Path: p.path, Branch: p.branch, Base: p.base, Source: p.src, Indexed: indexed}
 	trackAddTemp(p, &res)
 	return reportAddResult(g, res, p.ttl)

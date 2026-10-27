@@ -254,7 +254,7 @@ func TestRemoteDefaultRef(t *testing.T) {
 	}
 }
 
-func TestBaseRefFor(t *testing.T) {
+func TestBaseRefForDefault(t *testing.T) {
 	cases := []struct {
 		name string
 		seed func(t *testing.T, repo string)
@@ -279,8 +279,9 @@ func TestBaseRefFor(t *testing.T) {
 			repo := initRepo(t, "work")
 			gitTestCommit(t, repo)
 			tc.seed(t, repo)
-			if got := baseRefFor(repo); got != tc.want {
-				t.Fatalf("baseRefFor() = %q, want %q", got, tc.want)
+			name, remote := defaultBranch(repo)
+			if got := baseRefForDefault(repo, name, remote); got != tc.want {
+				t.Fatalf("baseRefForDefault() = %q, want %q", got, tc.want)
 			}
 		})
 	}
