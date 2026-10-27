@@ -29,6 +29,18 @@ func TestUsageDocumentsWide(t *testing.T) {
 	}
 }
 
+// TestNativeAddHelpShowsSeedDefault pins the visible seed rule: subcommand
+// flags must be printed by -h, not only the global usage summary.
+func TestNativeAddHelpShowsSeedDefault(t *testing.T) {
+	out, errOut, rc := runWTM(t, t.TempDir(), nil, "add", "-h")
+	if rc != 0 {
+		t.Fatalf("add -h rc = %d, stderr = %s", rc, errOut)
+	}
+	if !strings.Contains(out+errOut, "default-branch worktree") {
+		t.Fatalf("add -h must document the default-branch source:\n%s%s", out, errOut)
+	}
+}
+
 func TestNativeExitCodes(t *testing.T) {
 	sandbox(t)
 	outside := t.TempDir()

@@ -153,9 +153,19 @@ func subFlags(name string, g *globals) *flag.FlagSet {
 	return fs
 }
 
+// printSubFlags shows a subcommand's flag descriptions. subFlags discards flag
+// output so parse errors stay quiet; -h must still expose the descriptions.
+func printSubFlags(fs *flag.FlagSet) {
+	fmt.Printf("options for wtm %s:\n", fs.Name())
+	fs.SetOutput(os.Stdout)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
+}
+
 // parseSub parses subcommand arguments allowing flags and positionals to be
 // interleaved (go flag stops at the first positional; usage is
-// `wtm add <branch> [<start-point>] [-p|--path <dir>]`). -h prints usage and yields errHelpOK.
+// `wtm add <branch> [<start-point>] [-p|--path <dir>]`). -h prints the
+// subcommand flags and then global usage, and yields errHelpOK.
 // Globals are validated here after parsing: subFlags binds them to g, so a
 // bogus --color/--progress placed after the subcommand is only visible now,
 // not in dispatch's pre-parse check.
@@ -164,6 +174,7 @@ func parseSub(fs *flag.FlagSet, g *globals, args []string) ([]string, error) {
 	for {
 		if err := fs.Parse(args); err != nil {
 			if errors.Is(err, flag.ErrHelp) {
+				printSubFlags(fs)
 				fmt.Print(usage)
 				return nil, errHelpOK
 			}
