@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +10,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +37,14 @@ type agent struct {
 	configDirRel  []string // under home
 	sessionSubdir string
 	sessionOwner  func(*bufio.Reader) (string, error)
+	// parseUsage reads one session file into cost events, causal turn
+	// activity, and the count of records it could not read (bad JSON,
+	// timestamp, or oversized). A nonzero count lets the caller warn and taint
+	// the total partial. catalogRated marks a harness whose records carry tokens
+	// but no cost, so the public catalog must price them (Claude Code); a
+	// self-pricing harness (Pi) adds cost to each event.
+	parseUsage   func(*bufio.Reader) (sessionParse, error)
+	catalogRated bool
 }
 
 // agents is the SSOT for known harnesses: seeding, indexing and MCP status
@@ -245,7 +256,11 @@ func copyIgnoredFile(srcRoot, dstRoot, rel string) error {
 
 // Ownership comes from harness records, never lossy encoded directory names.
 // Bound each record's memory; oversized records have unknown ownership.
-const maxSessionHeader = 4 << 20
+// maxSessionPrefix bounds the prefix used to classify a discarded record.
+const (
+	maxSessionHeader = 4 << 20
+	maxSessionPrefix = 8 << 10
+)
 
 // maxSessionOwnerRecords bounds the cwd scan: a cwd-less giant JSONL must
 // not force a full scan per status. The owner arrives in the first records
@@ -262,7 +277,7 @@ func (a agent) readSessionOwner(p string) (string, error) {
 }
 
 func piSessionOwner(r *bufio.Reader) (string, error) {
-	line, err := sessionRecord(r)
+	line, _, _, err := sessionRecord(r)
 	if err == io.EOF {
 		err = nil
 	}
@@ -272,7 +287,7 @@ func piSessionOwner(r *bufio.Reader) (string, error) {
 // Claude can write queue metadata before the first record with a cwd.
 func claudeSessionOwner(r *bufio.Reader) (string, error) {
 	for n := 0; n < maxSessionOwnerRecords; n++ {
-		line, err := sessionRecord(r)
+		line, _, _, err := sessionRecord(r)
 		if cwd := recordCWD(line); cwd != "" {
 			return cwd, nil
 		}
@@ -298,22 +313,56 @@ func recordCWD(line []byte) string {
 	return h.CWD
 }
 
-// Drain oversized lines without retaining them, then resume at the next record.
-func sessionRecord(r *bufio.Reader) ([]byte, error) {
-	var line []byte
-	oversized := false
+// sessionRecord returns one record. An oversized record drains and reports
+// oversized=true once with a bounded prefix for billing classification. Owner
+// scans ignore the prefix: an oversized header proves nothing about ownership.
+func sessionRecord(r *bufio.Reader) (line []byte, oversized bool, prefix []byte, err error) {
 	for {
-		part, err := r.ReadSlice('\n')
-		if len(line)+len(part) > maxSessionHeader {
-			oversized, line = true, nil
-		}
+		part, rerr := r.ReadSlice('\n')
 		if !oversized {
-			line = append(line, part...)
+			if len(line)+len(part) > maxSessionHeader {
+				prefix = append(prefix, line...)
+				prefix = append(prefix, part...)
+				if len(prefix) > maxSessionPrefix {
+					prefix = prefix[:maxSessionPrefix]
+				}
+				oversized, line = true, nil
+			} else {
+				line = append(line, part...)
+			}
+		} else if len(prefix) < maxSessionPrefix {
+			keep := min(len(part), maxSessionPrefix-len(prefix))
+			prefix = append(prefix, part[:keep]...)
 		}
-		if err != bufio.ErrBufferFull {
-			return line, err
+		if rerr != bufio.ErrBufferFull {
+			return line, oversized, prefix, rerr
 		}
 	}
+}
+
+// recordType reads the top-level "type" from a truncated prefix. Nested types
+// cannot classify the record, and a prefix that ends first fails closed.
+func recordType(prefix []byte) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(prefix))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return "", false
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		if key == "type" {
+			v, err := dec.Token()
+			t, ok := v.(string)
+			return t, ok && err == nil
+		}
+		if dec.Decode(new(json.RawMessage)) != nil {
+			return "", false
+		}
+	}
+	return "", false
 }
 
 // sessionIndex maps a canonical worktree cwd to its session files. It is built
@@ -321,10 +370,12 @@ func sessionRecord(r *bufio.Reader) ([]byte, error) {
 // instead of one per worktree.
 type sessionIndex map[string][]sessionRef
 
-// sessionRef carries an owned file and the boundary for empty-dir cleanup.
+// sessionRef carries an owned file, the boundary for empty-dir cleanup, and
+// the harness that owns it, so usage loads without re-resolving the harness.
 type sessionRef struct {
 	path       string
 	group      string
+	harness    string
 	root       string
 	rootTarget string
 	owner      func(*bufio.Reader) (string, error)
@@ -404,20 +455,114 @@ func (s *sessionScan) walk(a agent) error {
 	if base == "" {
 		return nil
 	}
-	return s.walkRoot(a, base)
-}
-
-func (s *sessionScan) walkRoot(a agent, base string) error {
 	target, err := filepath.EvalSymlinks(base)
 	if err != nil {
 		return s.pol.sessionErr(fmt.Errorf("resolve sessions %s: %w", base, err))
 	}
-	return filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return s.pol.sessionErr(fmt.Errorf("walk sessions %s: %w", p, err))
+	s.pol.p.detail(a.name)
+	cands, unverified, walkErrs := collectSessions(a, base, target)
+	for _, walkErr := range walkErrs {
+		if perr := s.pol.sessionErr(walkErr); perr != nil {
+			return perr
 		}
-		return s.add(a, base, target, p, d)
+	}
+	for _, u := range unverified {
+		if err := s.unknown(u.path, u.err); err != nil {
+			return err
+		}
+	}
+	return s.resolve(a, cands)
+}
+
+// sessionCandidate is one regular session file awaiting an owner read. The walk
+// collects candidates first so the reads can run in a bounded pool.
+type sessionCandidate struct {
+	path       string
+	group      string
+	root       string
+	rootTarget string
+}
+
+// unverifiedFile is one path whose ownership cannot be read, with the cause.
+type unverifiedFile struct {
+	path string
+	err  error
+}
+
+// collectSessions lists regular session files under base without reading them.
+// Walk and classification errors are returned, not applied: the caller owns the
+// error policy, so a lenient run reports and continues while a strict run
+// aborts. Order is WalkDir's, which keeps the index deterministic.
+func collectSessions(a agent, base, target string) ([]sessionCandidate, []unverifiedFile, []error) {
+	var (
+		cands      []sessionCandidate
+		unverified []unverifiedFile
+		errs       []error
+	)
+	_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			errs = append(errs, fmt.Errorf("walk sessions %s: %w", p, err))
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			unverified = append(unverified, unverifiedFile{path: p})
+			return nil
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			unverified = append(unverified, unverifiedFile{path: p})
+			return nil
+		}
+		cands = append(cands, sessionCandidate{path: p, group: sessionGroup(base, p), root: base, rootTarget: target})
+		return nil
 	})
+	return cands, unverified, errs
+}
+
+// sessionProgressEvery bounds progress chatter: one label update per chunk of
+// owner reads, not one per file. A real machine walks 15k session files.
+const sessionProgressEvery = 128
+
+// ownerRead is one pooled owner lookup. cwd is empty when the file is not
+// attributable, with err naming the cause for the caller's error policy.
+type ownerRead struct {
+	candidate sessionCandidate
+	cwd       string
+	err       error
+}
+
+// resolve reads owners in a bounded pool: the kernel and the disk, not the CPU,
+// bound this walk. Reads merge in candidate order, so the index and its
+// warnings never depend on completion order.
+func (s *sessionScan) resolve(a agent, cands []sessionCandidate) error {
+	var processed atomic.Int64
+	reads := mapParallel(len(cands), scanWorkers, func(i int) ownerRead {
+		c := cands[i]
+		cwd, err := a.readSessionOwner(c.path)
+		n := processed.Add(1)
+		if n%sessionProgressEvery == 0 {
+			s.pol.p.detail(fmt.Sprintf("%s · %d files", a.name, n))
+		}
+		if err != nil || !filepath.IsAbs(cwd) {
+			return ownerRead{candidate: c, err: err}
+		}
+		return ownerRead{candidate: c, cwd: canonical(cwd)}
+	})
+	for _, r := range reads {
+		if r.cwd == "" {
+			if err := s.unknown(r.candidate.path, r.err); err != nil {
+				return err
+			}
+			continue
+		}
+		c := r.candidate
+		s.idx[r.cwd] = append(s.idx[r.cwd], sessionRef{
+			path: c.path, group: c.group, harness: a.name, root: c.root, rootTarget: c.rootTarget, owner: a.sessionOwner,
+		})
+	}
+	return nil
 }
 
 // Resolve only the root symlink; resolving ancestors rewrites macOS /var paths.
@@ -448,27 +593,6 @@ func sessionDirectory(base string) (string, error) {
 		return "", fmt.Errorf("sessions path is not a directory: %s", base)
 	}
 	return base, nil
-}
-
-func (s *sessionScan) add(a agent, base, target, p string, d fs.DirEntry) error {
-	if d.Type()&os.ModeSymlink != 0 {
-		return s.unknown(p, nil)
-	}
-	if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
-		return nil
-	}
-	if !d.Type().IsRegular() {
-		return s.unknown(p, nil)
-	}
-	cwd, err := a.readSessionOwner(p)
-	if err != nil || !filepath.IsAbs(cwd) {
-		return s.unknown(p, err)
-	}
-	key := canonical(cwd)
-	s.idx[key] = append(s.idx[key], sessionRef{
-		path: p, group: sessionGroup(base, p), root: base, rootTarget: target, owner: a.sessionOwner,
-	})
-	return nil
 }
 
 func (s *sessionScan) unknown(p string, err error) error {
@@ -502,22 +626,28 @@ func sessionGroup(base, p string) string {
 
 // lastUsed is the newest mtime among the worktree's session files (looked up
 // in idx); zero when the worktree has never hosted a session.
-func lastUsed(wtPath string, idx sessionIndex) time.Time {
-	newest, _ := sessionLastUsed(wtPath, idx, false)
+func lastUsed(wtPath string, idx sessionIndex, p *progress) time.Time {
+	newest, _ := sessionLastUsed(wtPath, idx, false, p)
 	return newest
 }
 
 // sessionLastUsed fails closed for fresh removal checks. Display can retain
-// known activity, but must disclose every file it could not inspect.
-func sessionLastUsed(wtPath string, idx sessionIndex, strict bool) (time.Time, error) {
+// known activity, but must disclose every file it could not inspect. The
+// warning rides p because discovery workers run under the renderer and a raw
+// stderr write would be overwritten by the next frame. Descendant sessions
+// count too, so ACTIVE/COST and LAST USED agree and GC never reclaims a
+// worktree whose only recent work ran from a subdirectory. A nil worktree list
+// may also count a nested worktree's sessions for the parent: that is
+// conservative for reclamation and harmless for display.
+func sessionLastUsed(wtPath string, idx sessionIndex, strict bool, p *progress) (time.Time, error) {
 	var newest time.Time
-	for _, r := range idx[canonical(wtPath)] {
+	for _, r := range sessionsForWorktree(wtPath, nil, idx) {
 		mtime, err := sessionMtime(r.path)
 		if err != nil {
 			if strict {
 				return newest, err
 			}
-			warnProgress(nil, "%v", err)
+			warnProgress(p, "%v", err)
 		} else if mtime.After(newest) {
 			newest = mtime
 		}
@@ -535,6 +665,319 @@ func sessionMtime(p string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("session is not a regular file: %s", p)
 	}
 	return info.ModTime(), nil
+}
+
+// parsedSession pairs one readable session's events with its fold inputs, so
+// buildUsage can parse every session before it folds any.
+type parsedSession struct {
+	harness  string
+	events   []usageEvent
+	activity []activityEvent
+	price    func(usageEvent) pricedEvent
+}
+
+// usageLoss accumulates what a parse walk lost, so folding can taint the total
+// after every readable session has been seen.
+type usageLoss struct {
+	lost     map[string]bool
+	firstErr error
+	dropped  int
+}
+
+func newUsageLoss() usageLoss { return usageLoss{lost: map[string]bool{}} }
+
+func (l *usageLoss) fail(harness string, err error) {
+	l.lost[harness] = true
+	if l.firstErr == nil {
+		l.firstErr = err
+	}
+}
+
+func (l *usageLoss) recordDropped(harness string, n int) {
+	if n == 0 {
+		return
+	}
+	// The readable records still fold; the dropped ones only taint the
+	// total, so a partial sum never reads as exact.
+	l.lost[harness] = true
+	l.dropped += n
+}
+
+// buildUsage is the exact-cwd form: it folds only sessions whose cwd equals the
+// worktree. Production status uses buildUsageFor, which also includes descendant
+// sessions; tests and callers without a worktree list use this form.
+//
+// cat is nil when no catalog is available: a catalog-rated harness then reports
+// unknown cost instead of a wrong number. subs is the run's credential proof; an
+// empty proof leaves every event at its list price, and a worktree-level metered
+// override drops the Claude proof for this worktree alone.
+func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
+	return buildUsageSessions(wtPath, idx[canonical(wtPath)], cat, subs)
+}
+
+// buildUsageFor includes sessions whose cwd is a descendant of the worktree, so
+// work done from a repo subdirectory still counts for that worktree. The exact
+// index stays the authority for destructive operations (see purgeSessions).
+func buildUsageFor(wtPath string, wts []worktree, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
+	return buildUsageSessions(wtPath, sessionsForWorktree(wtPath, wts, idx), cat, subs)
+}
+
+func buildUsageSessions(wtPath string, refs []sessionRef, cat catalog, subs subscriptions) (worktreeUsage, error) {
+	subs = subs.forWorktree(wtPath)
+	sessions, loss := parseWorktreeSessions(refs, cat, subs)
+	var u worktreeUsage
+	foldParsedSessions(&u, sessions)
+	markPartial(&u, loss.lost)
+	return u, usageLossErr(loss.firstErr, loss.dropped)
+}
+
+// sessionsForWorktree returns the sessions whose cwd is the worktree or a
+// descendant of it. A non-nil worktree list keeps a cwd inside a deeper
+// worktree with that worktree only, so nested checkouts never double-count; a
+// nil list includes every descendant (LastUsed only needs a safe upper bound).
+// Exact refs keep their index order; descendant refs follow in cwd order so
+// dedupe stays deterministic.
+func sessionsForWorktree(wtPath string, wts []worktree, idx sessionIndex) []sessionRef {
+	root := canonical(wtPath)
+	refs := slices.Clone(idx[root])
+	var cwds []string
+	for cwd := range idx {
+		if cwd != root && pathInside(cwd, root) && !deeperWorktree(cwd, root, wts) {
+			cwds = append(cwds, cwd)
+		}
+	}
+	slices.Sort(cwds)
+	for _, cwd := range cwds {
+		refs = append(refs, idx[cwd]...)
+	}
+	return refs
+}
+
+// pathInside reports whether p is strictly below root, using a separator
+// boundary so /repo-feature is not inside /repo.
+func pathInside(p, root string) bool {
+	rel, err := filepath.Rel(root, p)
+	if err != nil || rel == "." || rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// deeperWorktree reports whether a worktree below root also contains cwd, so
+// the session belongs to the deeper worktree only. Equality counts: a cwd equal
+// to a nested worktree's path belongs to that worktree, not its parent.
+func deeperWorktree(cwd, root string, wts []worktree) bool {
+	for _, w := range wts {
+		p := canonical(w.Path)
+		if len(p) > len(root) && (cwd == p || pathInside(cwd, p)) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseWorktreeSessions reads every owned session, remembering unreadable files
+// and dropped records so the fold can taint the total.
+func parseWorktreeSessions(refs []sessionRef, cat catalog, subs subscriptions) ([]parsedSession, usageLoss) {
+	loss := newUsageLoss()
+	var sessions []parsedSession
+	for _, ref := range refs {
+		if s, ok := parseWorktreeSession(ref, cat, subs, &loss); ok {
+			sessions = append(sessions, s)
+		}
+	}
+	return sessions, loss
+}
+
+func parseWorktreeSession(ref sessionRef, cat catalog, subs subscriptions, loss *usageLoss) (parsedSession, bool) {
+	a, ok := agentByName(ref.harness)
+	if !ok || a.parseUsage == nil {
+		return parsedSession{}, false
+	}
+	parsed, err := readUsage(a, ref.path)
+	if err != nil {
+		// A bad file sorts anywhere, so record the loss now and taint the
+		// total after folding, when even a good session listed later in the
+		// walk has folded.
+		loss.fail(ref.harness, err)
+		return parsedSession{}, false
+	}
+	loss.recordDropped(ref.harness, parsed.dropped)
+	return parsedSession{harness: ref.harness, events: parsed.events, activity: parsed.activity, price: usagePricer(a, cat, subs)}, true
+}
+
+func foldParsedSessions(u *worktreeUsage, sessions []parsedSession) {
+	lists := make([][]usageEvent, len(sessions))
+	for i, s := range sessions {
+		lists[i] = s.events
+	}
+	// Spans fold the original events; only the billed winners carry cost. This
+	// keeps activity time independent of the session order and of what dedupe
+	// removes from a shared transcript.
+	billed := dedupeKeyedEvents(lists)
+	for i, s := range sessions {
+		u.addBilledSession(s.harness, s.events, s.activity, billed[i], s.price)
+	}
+}
+
+// usageLossErr reports the session loss that makes a total partial: an
+// unreadable session, unreadable records, or both. One worktree-level warning
+// keeps a read-only run alive while still disclosing the loss.
+func usageLossErr(first error, dropped int) error {
+	switch {
+	case first != nil && dropped > 0:
+		return fmt.Errorf("%w; %d session record(s) dropped (bad JSON, timestamp, or oversized)", first, dropped)
+	case first != nil:
+		return first
+	case dropped > 0:
+		return fmt.Errorf("%d session record(s) dropped (bad JSON, timestamp, or oversized); totals are partial", dropped)
+	default:
+		return nil
+	}
+}
+
+// markPartial taints the total and each harness that kept some spans but also
+// lost a session or records, so a partial sum never looks exact. A harness with
+// no readable spans keeps no entry: a zero-span unknown would read as 0s active
+// instead of none, so the worktree-level flag carries that loss instead. Every
+// model in an affected harness is marked because the lost records may have
+// belonged to any of them; an unaffected harness stays exact.
+func markPartial(u *worktreeUsage, lost map[string]bool) {
+	if len(lost) == 0 {
+		return
+	}
+	u.partial = true
+	for name := range lost {
+		h, ok := u.harnesses[name]
+		if !ok {
+			continue
+		}
+		h.partial = true
+		h.cost.addUnknown()
+		for _, m := range h.models {
+			m.partial = true
+			m.cost.addUnknown()
+		}
+	}
+}
+
+func readUsage(a agent, path string) (sessionParse, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return sessionParse{}, err
+	}
+	defer func() { _ = f.Close() }()
+	return a.parseUsage(bufio.NewReader(f))
+}
+
+// usagePricer resolves one event to its price pair and per-tier breakdown. The
+// list side is the pay-as-you-go price today's code reports; a proven
+// subscription replaces the billed side with the $0 marginal cost while the
+// list side stays visible. A Claude proof that still permits overage yields an
+// estimated zero only when the event priced something (a known nonzero list,
+// real tokens, or a self-priced cost); a zero-token event keeps the exact zero,
+// so an empty turn never reads estimated. The substitution reaches every tier,
+// so a covered event never shows a bare $0.00 beside a metered list per tier.
+// API-key and otherwise metered usage still bills, so a proven $0 never claims
+// the whole invoice.
+func usagePricer(a agent, cat catalog, subs subscriptions) func(usageEvent) pricedEvent {
+	return func(e usageEvent) pricedEvent {
+		p := listPrice(a, cat, e)
+		switch subs.coverage(a.name, e.provider, e.at) {
+		case coverageAllowance:
+			coverTiers(&p, knownZero)
+		case coverageOveragePossible:
+			if (p.total.list.known() && p.total.list.amount != 0) || e.tokens.total() > 0 || e.webSearch > 0 || e.cost != nil {
+				coverTiers(&p, estimatedZero)
+			} else {
+				coverTiers(&p, knownZero)
+			}
+		}
+		return p
+	}
+}
+
+// coverTiers replaces the billed side of the total and every priced tier with
+// the coverage zero, keeping the list side intact. The invariant: every cost
+// figure carries the billed/list pair, so a proven subscription discounts each
+// tier exactly as it discounts the total. A tier the event never priced stays
+// absent rather than becoming a spurious $0.00.
+func coverTiers(p *pricedEvent, zero func() money) {
+	p.total.billed = zero()
+	p.total.subscription = true
+	for i := range p.tiers {
+		if !p.tiers[i].list.any {
+			continue
+		}
+		p.tiers[i].billed = zero()
+		p.tiers[i].subscription = true
+	}
+}
+
+// listPrice resolves one event's pay-as-you-go price and per-tier breakdown: a
+// harness-supplied cost wins, a catalog-rated token record is priced from the
+// catalog, and everything else (including a catalog-rated record with no
+// catalog) is unknown.
+func listPrice(a agent, cat catalog, e usageEvent) pricedEvent {
+	switch {
+	case e.cost != nil:
+		return piPrice(e)
+	case a.catalogRated && cat != nil:
+		return cat.price(e)
+	default:
+		return unpriced()
+	}
+}
+
+// piPrice prices a self-reported Pi event: the record carries the total and,
+// in modern sessions, the per-class split. An older record with only the total
+// leaves every tier absent rather than inventing a breakdown.
+func piPrice(e usageEvent) pricedEvent {
+	var p pricedEvent
+	p.total.list.addKnown(*e.cost)
+	if c := e.tierCost; c != nil {
+		addKnownClass(&p.tiers[tierInput].list, c.input)
+		addKnownClass(&p.tiers[tierOutput].list, c.output)
+		addKnownClass(&p.tiers[tierCacheRead].list, c.cacheRead)
+		addKnownClass(&p.tiers[tierCacheWrite].list, c.cacheWrite)
+	}
+	for i := range p.tiers {
+		p.tiers[i].billed = p.tiers[i].list
+	}
+	p.total.billed = p.total.list
+	return p
+}
+
+// addKnownClass records a harness-reported class price. A nil field leaves the
+// tier untouched, which reads as absent, never as a real zero.
+func addKnownClass(m *money, v *float64) {
+	if v != nil {
+		m.addKnown(*v)
+	}
+}
+
+// agentByName resolves a session owner to its descriptor.
+func agentByName(name string) (agent, bool) {
+	for _, a := range agents() {
+		if a.name == name {
+			return a, true
+		}
+	}
+	return agent{}, false
+}
+
+// hasHarness reports whether any of the given worktrees owns a session from
+// the named harness. Status uses it to load the catalog only when it can be
+// needed, so a Pi-only repo never touches the network.
+func (idx sessionIndex) hasHarness(wts []worktree, name string) bool {
+	for _, w := range wts {
+		for _, r := range sessionsForWorktree(w.Path, wts, idx) {
+			if r.harness == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // purgeSessions deletes only confirmed owned files. Unknown and unrelated

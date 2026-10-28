@@ -366,5 +366,5 @@ func trackAddTemp(p addParams, res *addResult) {
 // recordTemp writes the store record for a freshly seeded temp worktree, keyed
 // by canonical path so lookups from git, Pi and the filesystem compare equal.
 func recordTemp(path, branch string, ttl time.Duration) (tempRecord, error) {
-	return addTempRecord(path, tempRecord{CreatedAt: time.Now(), TTL: ttl.String(), Branch: branch})
+	return addTempRecord(path, tempRecord{CreatedAt: nowFunc(), TTL: ttl.String(), Branch: branch})
 }

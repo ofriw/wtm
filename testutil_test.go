@@ -40,16 +40,20 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// exeName adds the host executable suffix so CLI fixtures resolve on Windows.
+func exeName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
 func buildWTMOnce() {
 	wtmBuildDir, wtmBuildErr = os.MkdirTemp("", "wtm-bin-")
 	if wtmBuildErr != nil {
 		return
 	}
-	name := "wtm"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	wtmBinPath = filepath.Join(wtmBuildDir, name)
+	wtmBinPath = filepath.Join(wtmBuildDir, exeName("wtm"))
 	if out, err := exec.Command("go", "build", "-o", wtmBinPath, ".").CombinedOutput(); err != nil {
 		wtmBuildErr = fmt.Errorf("go build: %w\n%s", err, out)
 	}
@@ -189,6 +193,19 @@ func sandbox(t *testing.T) sandboxEnv {
 	setHomeEnv(t, home)
 	t.Setenv("PI_CODING_AGENT_DIR", agent)
 	t.Setenv("CLAUDE_CONFIG_DIR", claude)
+	// A metered key in the caller's environment would turn every Claude proof
+	// unproven, so the sandbox clears the list the proof reads.
+	for _, k := range claudeMeteredKeys() {
+		t.Setenv(k, "")
+	}
+	// Clear every host override that changes a price, a proof, or the clock:
+	// a developer's pinned catalog or fake time must never leak into a test.
+	for _, k := range []string{"WTM_NOW", createdAtEnv, ratesEnv, "WTM_CLAUDE_PARENT_SCOPE", "CLAUDE_CODE_CUSTOM_OAUTH_URL", progressDelayEnv} {
+		t.Setenv(k, "")
+	}
+	// Replace the managed-settings path list with none, so a host's real
+	// /etc or /Library file cannot change a covered-cost test.
+	t.Setenv("WTM_MANAGED_SETTINGS", "")
 	t.Setenv("TZ", "UTC")
 	t.Setenv("LC_ALL", "C")
 	return sandboxEnv{Home: home, AgentDir: agent, ClaudeDir: claude}
@@ -287,6 +304,14 @@ func capture(t *testing.T, target **os.File, fn func()) string {
 	return out
 }
 
+func withStdout(t *testing.T, stdout *os.File, fn func()) {
+	t.Helper()
+	previous := os.Stdout
+	os.Stdout = stdout
+	defer func() { os.Stdout = previous }()
+	fn()
+}
+
 func captureStdout(t *testing.T, fn func()) string { return capture(t, &os.Stdout, fn) }
 func captureStderr(t *testing.T, fn func()) string { return capture(t, &os.Stderr, fn) }
 
@@ -301,13 +326,28 @@ func mustSymlink(t *testing.T, target, link string) {
 	}
 }
 
+// childTerminalEnv keeps CLI fixtures independent of the invoking terminal.
+// Explicit overrides remain available for environment-precedence contracts.
+func childTerminalEnv(overrides []string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		switch key {
+		case "COLUMNS", "LINES", "TERM", "COLORTERM", "NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE":
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, overrides...)
+}
+
 // runWTM execs the real binary in dir with extra env, returning stdout, stderr
 // and the exit code.
 func runWTM(t *testing.T, dir string, env []string, args ...string) (string, string, int) {
 	t.Helper()
 	cmd := exec.Command(buildWTM(t), args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = childTerminalEnv(env)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err := cmd.Run()
@@ -320,4 +360,11 @@ func runWTM(t *testing.T, dir string, env []string, args ...string) (string, str
 		rc = exit.ExitCode()
 	}
 	return out.String(), errOut.String(), rc
+}
+
+// addSession folds one fully billed session. Production folds through
+// addBilledSession with dedupe masks; tests that need no dedupe use this
+// shorthand, so the shipped code carries no test-only wrapper.
+func (u *worktreeUsage) addSession(harness string, events []usageEvent, price func(usageEvent) pricedEvent) {
+	u.addBilledSession(harness, events, nil, nil, price)
 }

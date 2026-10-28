@@ -234,7 +234,7 @@ func scanSelection(g *globals, wts []worktree, o gcOptions, ttl time.Duration, n
 		return gcSelection(wts, o, ttl, now, nil)
 	}
 	var candidates []worktree
-	err := withProgress(g, true, func(p *progress) error {
+	err := withProgress(g, progressOptions{}, func(p *progress) error {
 		var serr error
 		candidates, serr = gcSelection(wts, o, ttl, now, p)
 		return serr
@@ -270,7 +270,7 @@ func cmdGC(g *globals, args []string) error {
 		return err
 	}
 	// Selection and the fresh under-lock idle check share one clock reading.
-	now := time.Now()
+	now := nowFunc()
 	selected, plan, err := selectAndConfirmGC(g, ws.wts, o, ws.ttl, ws.root, now)
 	if err != nil {
 		return handleGCAbort(g, o, err)
@@ -308,7 +308,7 @@ func reportResult(g *globals, res gcResult, runErr error) error {
 // and corrupt the inline display.
 func runGCRemove(g *globals, root string, selected []worktree, plan remotePlan, o gcOptions, idx sessionIndex, now time.Time) error {
 	var res gcResult
-	runErr := withProgress(g, true, func(p *progress) error {
+	runErr := withProgress(g, progressOptions{}, func(p *progress) error {
 		var rerr error
 		res, rerr = gcCleanup(root, selected, plan, o.keepSessions, idx, gcMode{deleteTemp: true, idleOnly: len(o.paths) == 0}, now, p)
 		return rerr

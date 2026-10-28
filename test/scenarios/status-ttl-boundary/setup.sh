@@ -11,7 +11,11 @@ worktree_add "$SBX/repo" "$SBX/wt-edge" edge
 worktree_add "$SBX/repo" "$SBX/wt-old" old
 worktree_add "$SBX/repo" "$SBX/wt-fresh" fresh
 
-touch_git_activity "$SBX/wt-edge" -d '9 days ago'
-touch_git_activity "$SBX/wt-old" -d '11 days ago'
+# WTM_NOW pins the clock at 2026-01-01; the mtimes are absolute so the
+# boundary is deterministic instead of drifting with the wall clock.
+# touch_git_activity also stamps the private index, so staged-activity reads
+# see the same instant as the checkout backlink.
+touch_git_activity "$SBX/wt-edge" -d '2025-12-23T00:00:00Z'
+touch_git_activity "$SBX/wt-old" -d '2025-12-21T00:00:00Z'
 
 wtm config set unusedTTL 10d
