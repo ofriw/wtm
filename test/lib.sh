@@ -23,6 +23,12 @@ commit() { # commit <repo> <message> <path>...
   git -C "$repo" commit -q -m "$msg"
 }
 
+seed_repo() { # seed_repo — main with one committed README, the common add fixture
+  git_init "$SBX/repo" main
+  echo 'hello' >"$SBX/repo/README.md"
+  commit "$SBX/repo" "seed" README.md
+}
+
 worktree_add() { # worktree_add <repo> <path> <branch> [start-point]
   local repo=$1 path=$2 branch=$3 start=${4:-main}
   git -C "$repo" worktree add -b "$branch" "$path" "$start"
