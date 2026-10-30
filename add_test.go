@@ -463,6 +463,50 @@ func TestAddAttachRejectsOccupiedPath(t *testing.T) {
 	}
 }
 
+// TestAddAttachFailedSeedKeepsBranch pins that a seed failure never deletes an adopted branch.
+func TestAddAttachFailedSeedKeepsBranch(t *testing.T) {
+	sandbox(t)
+	repo, tip := attachRepo(t)
+	writeFile(t, filepath.Join(chunkhoundDBDir(repo), rootGuardName), "{not json", 0o644)
+
+	err := addWorktree(&globals{root: repo}, "feature/attach", addOptions{noIndex: true})
+	if err == nil || !strings.Contains(err.Error(), "existing branch was left untouched") {
+		t.Fatalf("seed failure = %v, want the branch-untouched note", err)
+	}
+	if got := mustGit(t, repo, "rev-parse", "refs/heads/feature/attach"); got != tip {
+		t.Fatalf("branch moved or was deleted: %s, want %s", got, tip)
+	}
+}
+
+// TestRollbackAddBranchOwnership pins the rollback boundary: wtm deletes only the branches it created.
+func TestRollbackAddBranchOwnership(t *testing.T) {
+	sandbox(t)
+	cases := []struct {
+		name     string
+		attached bool
+	}{
+		{"attached branch survives", true},
+		{"created branch removed", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := addTestRepo(t)
+			path := canonical(filepath.Join(filepath.Dir(repo), "wt"))
+			gitWorktreeAdd(t, repo, path, "feature/keep", "refs/heads/main")
+			err := rollbackAdd(repo, path, "feature/keep", tc.attached, errors.New("seed failed"))
+			if err == nil || exists(path) {
+				t.Fatalf("rollback = %v, want the seed error with a removed checkout", err)
+			}
+			if kept := refExists(repo, "refs/heads/feature/keep"); kept != tc.attached {
+				t.Fatalf("branch survived = %v, want %v", kept, tc.attached)
+			}
+			if tc.attached && !strings.Contains(err.Error(), "left untouched") {
+				t.Fatalf("rollback = %v, want the branch-untouched note", err)
+			}
+		})
+	}
+}
+
 // TestAddAttachKeepsStoredSpelling pins request-first adoption: any spelling
 // attaches git's stored branch, never a duplicate. Covers names outside the
 // creation alphabet and a same-named tag that degrades %(refname:short).

@@ -242,7 +242,12 @@ func resolveAddTarget(root string, wts []gworktree, branch, override string) (st
 // rollbackAdd undoes a failed seed: pristine checkouts are removed, but any
 // seeded content (even gitignored, e.g. a copied MCP config) is user-inspectable
 // state, so the partial worktree survives and the caller is told to inspect it.
-func rollbackAdd(root, path, branch string, seedErr error) error {
+// A branch wtm attached belongs to the user and is never deleted; only a branch
+// wtm created is rolled back with the checkout.
+func rollbackAdd(root, path, branch string, attached bool, seedErr error) error {
+	if attached {
+		seedErr = fmt.Errorf("%w; the existing branch was left untouched", seedErr)
+	}
 	// --ignored keeps the check honest: a copied MCP config is ignored, yet is
 	// exactly the seeded state a user must be able to inspect.
 	changes, checkErr := git(path, "status", "--porcelain", "--untracked-files=all", "--ignored")
@@ -252,8 +257,10 @@ func rollbackAdd(root, path, branch string, seedErr error) error {
 	if cleanup := worktreeRemove(root, path); cleanup != nil {
 		return fmt.Errorf("%w; partial worktree kept at %s (branch %s): %v", seedErr, path, branch, cleanup)
 	}
-	if _, cleanup := git(root, "branch", "-d", branch); cleanup != nil {
-		return fmt.Errorf("%w; worktree removed but branch %s remains: %v", seedErr, branch, cleanup)
+	if !attached {
+		if _, cleanup := git(root, "branch", "-d", branch); cleanup != nil {
+			return fmt.Errorf("%w; worktree removed but branch %s remains: %v", seedErr, branch, cleanup)
+		}
 	}
 	return seedErr
 }
@@ -405,7 +412,7 @@ func addWorktree(g *globals, branchArg string, o addOptions) error {
 	}
 	indexed, err := seedWorktree(p.src, p.path, o.noIndex)
 	if err != nil {
-		return rollbackAdd(p.root, p.path, p.branch, err)
+		return rollbackAdd(p.root, p.path, p.branch, p.attach, err)
 	}
 	res := addResult{Path: p.path, Branch: p.branch, Base: p.base, Source: p.src, Indexed: indexed}
 	trackAddTemp(p, &res)
