@@ -180,12 +180,60 @@ func nestedIn(target string, wts []gworktree) (string, bool) {
 	return "", false
 }
 
+// branchChoice is the resolved identity of the requested branch before any
+// write: exists means attach instead of create.
+type branchChoice struct {
+	name   string
+	exists bool
+}
+
+// requestedBranch resolves raw to a stored branch or to the create name. The
+// raw spelling is matched first — exact, then case-folded — so git-valid names
+// creation rejects (Feature/C++) still attach; only a miss is normalized.
+// --temp never adopts, so it looks up only its tmp/ identity.
+func requestedBranch(refs map[string]bool, raw string, temp bool) (branchChoice, error) {
+	exact := strings.TrimSpace(raw)
+	if !temp {
+		if branch, err := matchLocalBranch(refs, exact); err != nil || branch.exists {
+			return branch, err
+		}
+	}
+	normalize := normalizeBranch
+	if temp {
+		normalize = tempBranch
+	}
+	normalized, err := normalize(raw)
+	if err != nil {
+		return branchChoice{}, err
+	}
+	return matchLocalBranch(refs, normalized)
+}
+
+// matchLocalBranch finds the stored branch for name: exact, else a unique case
+// fold. A miss returns name with exists=false, ready for the create path.
+func matchLocalBranch(refs map[string]bool, name string) (branchChoice, error) {
+	if refs[name] {
+		return branchChoice{name: name, exists: true}, nil
+	}
+	found := branchChoice{name: name}
+	for stored := range refs {
+		if !strings.EqualFold(stored, name) {
+			continue
+		}
+		if found.exists {
+			return branchChoice{}, fmt.Errorf("branch %q matches multiple local branches by case", name)
+		}
+		found = branchChoice{name: stored, exists: true}
+	}
+	return found, nil
+}
+
 // warnBranchConvention discloses a branch without a recognized type prefix.
-// It is a warning, not a rejection: conventions drive CI routing and search,
-// but the user may have a deliberate reason to skip them.
+// A warning, not a rejection: conventions drive CI routing and search, but the
+// user may skip them. Matching folds case, so a stored Feature/X still counts.
 func warnBranchConvention(branch string) {
 	for _, p := range branchPrefixes {
-		if strings.HasPrefix(branch, p) {
+		if strings.HasPrefix(strings.ToLower(branch), p) {
 			return
 		}
 	}

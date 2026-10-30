@@ -320,13 +320,235 @@ func TestAddRefusesNestedPath(t *testing.T) {
 	}
 }
 
-func TestAddBranchCollisionFails(t *testing.T) {
+// attachRepo returns a repo and tip for feature/attach: one commit ahead of
+// main, checked out nowhere, with a configured upstream.
+func attachRepo(t *testing.T) (string, string) {
+	t.Helper()
+	repo := addTestRepo(t)
+	mustGit(t, repo, "checkout", "-q", "-b", "feature/attach")
+	writeFile(t, filepath.Join(repo, "attach.txt"), "attach\n", 0o644)
+	gitCommit(t, repo, "attach commit", "attach.txt")
+	mustGit(t, repo, "checkout", "-q", "main")
+	mustGit(t, repo, "config", "branch.feature/attach.remote", "origin")
+	mustGit(t, repo, "config", "branch.feature/attach.merge", "refs/heads/feature/attach")
+	return repo, mustGit(t, repo, "rev-parse", "refs/heads/feature/attach")
+}
+
+// TestAddAttachesExistingBranch pins the contract: adopt the branch, never move it, seed the harness.
+func TestAddAttachesExistingBranch(t *testing.T) {
+	sandbox(t)
+	repo, tip := attachRepo(t)
+	writeFile(t, filepath.Join(repo, ".mcp.json"), `{"mcpServers":{}}`, 0o644)
+	target := addTarget(repo, "feature/attach")
+
+	res := addResultOf(t, &globals{root: repo}, "feature/attach", "--no-index")
+	if res.Branch != "feature/attach" || res.Path != target {
+		t.Fatalf("attach = %+v, want feature/attach at %s", res, target)
+	}
+	if res.Base != "refs/heads/feature/attach" {
+		t.Fatalf("base = %q, want the branch ref", res.Base)
+	}
+	if got := mustGit(t, target, "rev-parse", "HEAD"); got != tip {
+		t.Fatalf("checkout HEAD = %s, want branch tip %s", got, tip)
+	}
+	if got := mustGit(t, repo, "rev-parse", "refs/heads/feature/attach"); got != tip {
+		t.Fatalf("branch moved to %s, want %s", got, tip)
+	}
+	if got := mustGit(t, target, "rev-parse", "--abbrev-ref", "HEAD"); got != "feature/attach" {
+		t.Fatalf("checkout is not on the existing branch: %q", got)
+	}
+	if !exists(filepath.Join(target, ".mcp.json")) {
+		t.Fatal("attach must seed the agent harness like a new branch")
+	}
+	if !exists(filepath.Join(target, "attach.txt")) {
+		t.Fatal("attach must check out the branch tree")
+	}
+	// Attachment must write no branch config: the upstream survives because
+	// worktree add runs without -b/--track.
+	if got, err := git(repo, "config", "--get", "branch.feature/attach.remote"); err != nil || got != "origin" {
+		t.Fatalf("upstream remote = (%q,%v), want origin", got, err)
+	}
+	if got, err := git(repo, "config", "--get", "branch.feature/attach.merge"); err != nil || got != "refs/heads/feature/attach" {
+		t.Fatalf("upstream merge = (%q,%v), want refs/heads/feature/attach", got, err)
+	}
+}
+
+// TestAddAttachRejectsCheckedOutBranch pins that an occupied branch names its worktree and writes nothing.
+func TestAddAttachRejectsCheckedOutBranch(t *testing.T) {
 	sandbox(t)
 	repo := addTestRepo(t)
-	gitTestBranch(t, repo, "existing-branch")
-	err := addWorktree(&globals{root: repo}, "existing-branch", addOptions{noIndex: true})
-	if err == nil {
-		t.Fatal("add with an existing local branch must fail")
+	busy := canonical(filepath.Join(filepath.Dir(repo), "busy"))
+	gitWorktreeAdd(t, repo, busy, "feature/busy", "refs/heads/main")
+
+	err := addWorktree(&globals{root: repo}, "feature/busy", addOptions{noIndex: true})
+	if err == nil || isUsage(err) || !strings.Contains(err.Error(), "already checked out") || !strings.Contains(err.Error(), busy) {
+		t.Fatalf("add on a checked-out branch = %v, want a non-usage refusal naming %s", err, busy)
+	}
+	if err := addWorktree(&globals{root: repo}, "main", addOptions{noIndex: true}); err == nil || isUsage(err) || !strings.Contains(err.Error(), "at the main worktree") {
+		t.Fatalf("add on the main worktree's branch = %v, want non-usage main-worktree guidance", err)
+	}
+	if exists(addTarget(repo, "feature/busy")) {
+		t.Fatal("rejected attach must not create a checkout")
+	}
+}
+
+// TestAddAttachStartPoint pins the start-point contract: the tip attaches; a
+// different commit or unresolvable ref is refused without writes.
+func TestAddAttachStartPoint(t *testing.T) {
+	sandbox(t)
+	cases := []struct {
+		name    string
+		start   string // "tip" resolves to the branch commit
+		refusal bool
+		usage   bool
+		want    string
+	}{
+		{"tip ref", "refs/heads/feature/attach", false, false, ""},
+		{"tip sha", "tip", false, false, ""},
+		{"mismatch", "refs/heads/main", true, false, "does not match existing branch"},
+		{"invalid", "no-such-ref", true, true, "is not a commit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, tip := attachRepo(t)
+			start := tc.start
+			if start == "tip" {
+				start = tip
+			}
+			err := addWorktree(&globals{root: repo}, "feature/attach", addOptions{start: start, noIndex: true})
+			if !tc.refusal {
+				if err != nil {
+					t.Fatalf("attach via %s: %v", start, err)
+				}
+				target := addTarget(repo, "feature/attach")
+				if got := mustGit(t, target, "rev-parse", "HEAD"); got != tip {
+					t.Fatalf("attach via %s HEAD = %s, want %s", start, got, tip)
+				}
+				if got := mustGit(t, target, "rev-parse", "--abbrev-ref", "HEAD"); got != "feature/attach" {
+					t.Fatalf("attach via %s checked out %q, want the existing branch", start, got)
+				}
+				return
+			}
+			if err == nil || isUsage(err) != tc.usage || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("start-point %q = %v, want usage=%v naming %q", start, err, tc.usage, tc.want)
+			}
+			if got := mustGit(t, repo, "rev-parse", "refs/heads/feature/attach"); got != tip {
+				t.Fatalf("branch moved to %s, want %s", got, tip)
+			}
+			if exists(addTarget(repo, "feature/attach")) {
+				t.Fatal("rejected attach must not create a checkout")
+			}
+		})
+	}
+}
+
+// TestAddAttachRejectsOccupiedPath pins that an occupied target keeps its content and the branch stays put.
+func TestAddAttachRejectsOccupiedPath(t *testing.T) {
+	sandbox(t)
+	repo, tip := attachRepo(t)
+	target := canonical(filepath.Join(filepath.Dir(repo), "taken-attach"))
+	writeFile(t, filepath.Join(target, "keep.txt"), "keep", 0o644)
+
+	if err := addWorktree(&globals{root: repo}, "feature/attach", addOptions{path: target, noIndex: true}); err == nil {
+		t.Fatal("attach into an occupied path must fail")
+	}
+	if !exists(filepath.Join(target, "keep.txt")) {
+		t.Fatal("occupied path content must survive")
+	}
+	if got := mustGit(t, repo, "rev-parse", "refs/heads/feature/attach"); got != tip {
+		t.Fatalf("branch moved to %s, want %s", got, tip)
+	}
+	if wts, err := worktrees(repo); err != nil || len(wts) != 1 {
+		t.Fatalf("failed attach must leave only the main worktree, got %v (err %v)", wts, err)
+	}
+}
+
+// TestAddAttachKeepsStoredSpelling pins request-first adoption: any spelling
+// attaches git's stored branch, never a duplicate. Covers names outside the
+// creation alphabet and a same-named tag that degrades %(refname:short).
+func TestAddAttachKeepsStoredSpelling(t *testing.T) {
+	cases := []struct {
+		branch, request string
+		tag             bool
+	}{
+		{"Feature/X", "Feature/X", false},
+		{"Feature/X", "feature/x", false},
+		{"Feature/under_score", "feature/under_score", false},
+		{"Feature/C++", "Feature/C++", false},
+		{"Feature/tagged", "Feature/tagged", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.request, func(t *testing.T) {
+			sandbox(t)
+			repo := addTestRepo(t)
+			gitTestBranch(t, repo, tc.branch)
+			if tc.tag {
+				mustGit(t, repo, "tag", tc.branch)
+			}
+			target := addTarget(repo, tc.branch)
+
+			var res addResult
+			if warn := captureStderr(t, func() { res = addResultOf(t, &globals{root: repo}, tc.request, "--no-index") }); warn != "" {
+				t.Fatalf("attaching %q must not warn, got %q", tc.branch, warn)
+			}
+			if res.Branch != tc.branch || res.Path != target {
+				t.Fatalf("attach %q = %+v, want %s at %s", tc.request, res, tc.branch, target)
+			}
+			if got := mustGit(t, res.Path, "rev-parse", "--symbolic-full-name", "HEAD"); got != "refs/heads/"+tc.branch {
+				t.Fatalf("checkout branch = %q, want refs/heads/%s", got, tc.branch)
+			}
+		})
+	}
+}
+
+// TestMatchLocalBranch pins exact-first, then a unique case fold; several case variants are ambiguous.
+func TestMatchLocalBranch(t *testing.T) {
+	refs := map[string]bool{"Feature/X": true, "main": true}
+	if got, err := matchLocalBranch(refs, "Feature/X"); err != nil || got.name != "Feature/X" || !got.exists {
+		t.Fatalf("exact = (%+v,%v), want Feature/X", got, err)
+	}
+	if got, err := matchLocalBranch(refs, "feature/x"); err != nil || got.name != "Feature/X" || !got.exists {
+		t.Fatalf("case-fold = (%+v,%v), want Feature/X", got, err)
+	}
+	if got, err := matchLocalBranch(refs, "fix/x"); err != nil || got.name != "fix/x" || got.exists {
+		t.Fatalf("missing = (%+v,%v), want an absent fix/x", got, err)
+	}
+	twoVariants := map[string]bool{"Feature/X": true, "feature/x": true}
+	if _, err := matchLocalBranch(twoVariants, "FEATURE/X"); err == nil {
+		t.Fatal("ambiguous case variants must be rejected")
+	}
+	if got, err := matchLocalBranch(twoVariants, "Feature/X"); err != nil || got.name != "Feature/X" {
+		t.Fatalf("exact spelling must beat ambiguity: (%+v,%v)", got, err)
+	}
+}
+
+// TestRequestedBranch pins raw exact, raw case-fold, then normalization; --temp uses only its tmp/ identity.
+func TestRequestedBranch(t *testing.T) {
+	refs := map[string]bool{"Feature/X": true, "Feature/under_score": true, "Feature/C++": true}
+	cases := []struct {
+		raw, want string
+		temp      bool
+		exists    bool
+	}{
+		{"Feature/X", "Feature/X", false, true},
+		{"feature/x", "Feature/X", false, true},
+		{"feature/under_score", "Feature/under_score", false, true},
+		{"feature/c++", "Feature/C++", false, true},
+		{"Feature Login", "feature-login", false, false},
+		{"x", "tmp/x", true, false},
+		{"TMP/X", "tmp/x", true, false},
+	}
+	for _, tc := range cases {
+		got, err := requestedBranch(refs, tc.raw, tc.temp)
+		if err != nil || got.name != tc.want || got.exists != tc.exists {
+			t.Fatalf("requestedBranch(%q,%v) = (%+v,%v), want %q exists=%v", tc.raw, tc.temp, got, err, tc.want, tc.exists)
+		}
+	}
+	if _, err := requestedBranch(nil, "", false); err == nil {
+		t.Fatal("empty branch must be rejected")
+	}
+	if _, err := requestedBranch(nil, "feature/@{x}", false); err == nil {
+		t.Fatal("invalid ref must be rejected")
 	}
 }
 

@@ -276,6 +276,7 @@ func reportAddResult(g *globals, res addResult, ttl time.Duration) error {
 
 type addParams struct {
 	root, src, path, branch, base string
+	attach                        bool // branch exists and will be attached
 	temp                          bool
 	ttl                           time.Duration
 }
@@ -289,12 +290,18 @@ func prepareAdd(g *globals, branchArg string, o addOptions) (addParams, error) {
 	if err != nil {
 		return addParams{}, usagef("add: %v", err)
 	}
-	branch, err := branchForAdd(branchArg, o)
+	branch, err := resolveAddBranch(root, branchArg, o.temp)
 	if err != nil {
-		return addParams{}, usagef("add: %v", err)
+		return addParams{}, err
 	}
-	warnBranchConvention(branch)
-	return resolveAddParams(addParams{root: root, branch: branch, temp: o.temp, ttl: ttl}, o)
+	warnBranchConvention(branch.name)
+	return resolveAddParams(addParams{
+		root:   root,
+		branch: branch.name,
+		attach: branch.exists,
+		temp:   o.temp,
+		ttl:    ttl,
+	}, o)
 }
 
 func resolveAddParams(p addParams, o addOptions) (addParams, error) {
@@ -302,39 +309,98 @@ func resolveAddParams(p addParams, o addOptions) (addParams, error) {
 	if err != nil {
 		return addParams{}, err
 	}
-	p.path, err = resolveAddTarget(p.root, wts, p.branch, o.path)
-	if err != nil {
+	if p.attach {
+		// One branch cannot have two checkouts; name the blocker and a repair.
+		for _, w := range wts {
+			if w.Branch == p.branch {
+				return addParams{}, occupiedErr(p.branch, w)
+			}
+		}
+	}
+	if p.path, err = resolveAddTarget(p.root, wts, p.branch, o.path); err != nil {
 		return addParams{}, err
 	}
-	p.base = o.start
-	if p.base == "" {
-		p.base = baseRefFor(p.root)
+	if err = resolveAddBase(&p, o.start); err != nil {
+		return addParams{}, err
 	}
-	p.src, err = resolveAddSource(p.root, wts, p.base, o.from, p.path)
-	if err != nil {
+	if p.src, err = resolveAddSource(p.root, wts, p.base, o.from, p.path); err != nil {
 		return addParams{}, err
 	}
 	return p, nil
 }
 
-// branchForAdd picks the branch identity: a temp add owns the tmp/ namespace,
-// a permanent add keeps the requested name.
-func branchForAdd(arg string, o addOptions) (string, error) {
-	if o.temp {
-		return tempBranch(arg)
+// resolveAddBase picks the base ref: an attachment's own branch ref (guarded
+// against a contradictory start-point), else the requested or default
+// start-point.
+func resolveAddBase(p *addParams, start string) error {
+	if !p.attach {
+		p.base = start
+		if p.base == "" {
+			p.base = baseRefFor(p.root)
+		}
+		return nil
 	}
-	return normalizeBranch(arg)
+	p.base = "refs/heads/" + p.branch
+	if start == "" {
+		return nil
+	}
+	return verifyAttachStart(p.root, p.branch, start)
 }
 
-// addWorktree creates the branch and its sibling checkout, then replicates the
-// source's harness. Idempotent by construction: an existing path or branch
-// fails the git step before anything is written.
+// verifyAttachStart rejects a start-point that disagrees with the existing
+// branch tip: attachment never rewinds. An unresolvable ref is a usage error;
+// a valid ref that conflicts with repository state is an operational error.
+func verifyAttachStart(root, branch, start string) error {
+	tip, err := git(root, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch+"^{commit}")
+	if err != nil {
+		return fmt.Errorf("add: cannot resolve branch %q: %w", branch, err)
+	}
+	commit, err := git(root, "rev-parse", "--verify", "--quiet", start+"^{commit}")
+	if err != nil {
+		return usagef("add: start-point %q is not a commit", start)
+	}
+	if commit != tip {
+		return fmt.Errorf("add: start-point %q (%s) does not match existing branch %q (%s); refusing to attach",
+			start, commit, branch, tip)
+	}
+	return nil
+}
+
+// occupiedErr names the blocking worktree and a repair the tool itself allows.
+func occupiedErr(branch string, w gworktree) error {
+	if w.Prunable || !exists(w.Path) {
+		return fmt.Errorf("add: branch %q is already checked out at %s (missing; run git worktree prune)", branch, w.Path)
+	}
+	if w.Main {
+		return fmt.Errorf("add: branch %q is already checked out at the main worktree %s; switch it to another branch first", branch, w.Path)
+	}
+	return fmt.Errorf("add: branch %q is already checked out at %s; remove that worktree first", branch, w.Path)
+}
+
+// resolveAddBranch adopts an existing local branch with git's stored spelling,
+// so normalization never duplicates Feature/X as feature/x.
+func resolveAddBranch(root, raw string, temp bool) (branchChoice, error) {
+	refs, err := localBranches(root)
+	if err != nil {
+		return branchChoice{}, err
+	}
+	branch, err := requestedBranch(refs, raw, temp)
+	if err != nil {
+		return branchChoice{}, usagef("add: %v", err)
+	}
+	return branch, nil
+}
+
+// addWorktree creates or attaches the branch's sibling checkout, then
+// replicates the source's harness. Idempotent by construction: an existing
+// path, or a branch that is checked out elsewhere, fails before anything is
+// written; an existing free branch is attached, never recreated.
 func addWorktree(g *globals, branchArg string, o addOptions) error {
 	p, err := prepareAdd(g, branchArg, o)
 	if err != nil {
 		return err
 	}
-	if err := worktreeAdd(p.root, p.path, p.branch, p.base); err != nil {
+	if err := worktreeAdd(p.root, p.path, p.branch, p.base, p.attach); err != nil {
 		return err
 	}
 	indexed, err := seedWorktree(p.src, p.path, o.noIndex)
