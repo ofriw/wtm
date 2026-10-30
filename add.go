@@ -28,6 +28,7 @@ type addResult struct {
 	Base      string  `json:"base"`
 	Source    string  `json:"source"`
 	Indexed   bool    `json:"indexed"`
+	Attached  bool    `json:"attached"`
 	Temp      bool    `json:"temp"`
 	TTL       string  `json:"ttl,omitempty"`
 	ExpiresAt *string `json:"expiresAt,omitempty"`
@@ -273,8 +274,12 @@ func reportAddResult(g *globals, res addResult, ttl time.Duration) error {
 	if strings.HasPrefix(res.Base, "refs/remotes/") {
 		origin = "remote"
 	}
+	branch := res.Branch
+	if res.Attached {
+		branch += " (existing)"
+	}
 	fmt.Printf("worktree: %s\nbranch:   %s\nbase:     %s (%s)\nsource:   %s\nindexed:  %v\n",
-		res.Path, res.Branch, res.Base, origin, res.Source, res.Indexed)
+		res.Path, branch, res.Base, origin, res.Source, res.Indexed)
 	if res.Temp {
 		fmt.Printf("temp:     true (expires in %s)\n", compactWindow(ttl))
 	}
@@ -418,7 +423,7 @@ func addWorktree(g *globals, branchArg string, o addOptions) error {
 	if err != nil {
 		return rollbackAdd(p.root, p.path, p.branch, p.attach, err)
 	}
-	res := addResult{Path: p.path, Branch: p.branch, Base: p.base, Source: p.src, Indexed: indexed}
+	res := addResult{Path: p.path, Branch: p.branch, Base: p.base, Source: p.src, Indexed: indexed, Attached: p.attach}
 	trackAddTemp(p, &res)
 	return reportAddResult(g, res, p.ttl)
 }

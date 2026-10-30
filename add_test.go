@@ -342,7 +342,7 @@ func TestAddAttachesExistingBranch(t *testing.T) {
 	target := addTarget(repo, "feature/attach")
 
 	res := addResultOf(t, &globals{root: repo}, "feature/attach", "--no-index")
-	if res.Branch != "feature/attach" || res.Path != target {
+	if !res.Attached || res.Branch != "feature/attach" || res.Path != target {
 		t.Fatalf("attach = %+v, want feature/attach at %s", res, target)
 	}
 	if res.Base != "refs/heads/feature/attach" {
@@ -535,7 +535,7 @@ func TestAddAttachKeepsStoredSpelling(t *testing.T) {
 			if warn := captureStderr(t, func() { res = addResultOf(t, &globals{root: repo}, tc.request, "--no-index") }); warn != "" {
 				t.Fatalf("attaching %q must not warn, got %q", tc.branch, warn)
 			}
-			if res.Branch != tc.branch || res.Path != target {
+			if !res.Attached || res.Branch != tc.branch || res.Path != target {
 				t.Fatalf("attach %q = %+v, want %s at %s", tc.request, res, tc.branch, target)
 			}
 			if got := mustGit(t, res.Path, "rev-parse", "--symbolic-full-name", "HEAD"); got != "refs/heads/"+tc.branch {
