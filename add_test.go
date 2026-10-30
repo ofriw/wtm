@@ -566,6 +566,28 @@ func TestMatchLocalBranch(t *testing.T) {
 	}
 }
 
+// TestAddTempRefusesExistingBranch pins that --temp never adopts a branch: a
+// pre-existing tmp/ branch would otherwise fall under gc's reclaim rules.
+func TestAddTempRefusesExistingBranch(t *testing.T) {
+	sandbox(t)
+	repo := addTestRepo(t)
+	gitTestBranch(t, repo, "tmp/keep")
+	target := addTarget(repo, "tmp/keep")
+
+	for _, args := range [][]string{
+		{"tmp/keep", "--temp", "--no-index"},
+		{"tmp/keep", "--ttl", "30m", "--no-index"},
+	} {
+		err := cmdAdd(&globals{root: repo}, args)
+		if err == nil || isUsage(err) || !strings.Contains(err.Error(), "refusing --temp for existing branch") {
+			t.Fatalf("cmdAdd(%v) = %v, want a non-usage temp refusal", args, err)
+		}
+		if exists(target) {
+			t.Fatalf("refused temp add created %s", target)
+		}
+	}
+}
+
 // TestRequestedBranch pins raw exact, raw case-fold, then normalization; --temp uses only its tmp/ identity.
 func TestRequestedBranch(t *testing.T) {
 	refs := map[string]bool{"Feature/X": true, "Feature/under_score": true, "Feature/C++": true}

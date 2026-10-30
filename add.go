@@ -385,7 +385,8 @@ func occupiedErr(branch string, w gworktree) error {
 }
 
 // resolveAddBranch adopts an existing local branch with git's stored spelling,
-// so normalization never duplicates Feature/X as feature/x.
+// so normalization never duplicates Feature/X as feature/x. --temp never
+// attaches: adopting a tmp/ branch would hand it to gc.
 func resolveAddBranch(root, raw string, temp bool) (branchChoice, error) {
 	refs, err := localBranches(root)
 	if err != nil {
@@ -394,6 +395,9 @@ func resolveAddBranch(root, raw string, temp bool) (branchChoice, error) {
 	branch, err := requestedBranch(refs, raw, temp)
 	if err != nil {
 		return branchChoice{}, usagef("add: %v", err)
+	}
+	if temp && branch.exists {
+		return branchChoice{}, fmt.Errorf("add: refusing --temp for existing branch %q; attach it without --temp, or remove the branch first", branch.name)
 	}
 	return branch, nil
 }
