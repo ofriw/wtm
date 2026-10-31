@@ -379,14 +379,17 @@ func verifyAttachStart(root, branch, start string) error {
 }
 
 // occupiedErr names the blocking worktree and a repair the tool itself allows.
+// canonical() gives one spelling: git emits forward slashes on Windows and may
+// report 8.3 aliases, while every other wtm path is canonical.
 func occupiedErr(branch string, w gworktree) error {
-	if w.Prunable || !exists(w.Path) {
-		return fmt.Errorf("add: branch %q is already checked out at %s (missing; run git worktree prune)", branch, w.Path)
+	path := canonical(w.Path)
+	if w.Prunable || !exists(path) {
+		return fmt.Errorf("add: branch %q is already checked out at %s (missing; run git worktree prune)", branch, path)
 	}
 	if w.Main {
-		return fmt.Errorf("add: branch %q is already checked out at the main worktree %s; switch it to another branch first", branch, w.Path)
+		return fmt.Errorf("add: branch %q is already checked out at the main worktree %s; switch it to another branch first", branch, path)
 	}
-	return fmt.Errorf("add: branch %q is already checked out at %s; remove that worktree first", branch, w.Path)
+	return fmt.Errorf("add: branch %q is already checked out at %s; remove that worktree first", branch, path)
 }
 
 // resolveAddBranch adopts an existing local branch with git's stored spelling,
