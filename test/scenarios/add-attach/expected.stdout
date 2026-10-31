@@ -1,0 +1,5 @@
+worktree: /SBX/repo-feature-attach
+branch:   Feature/Attach (existing)
+base:     refs/heads/Feature/Attach (local)
+source:   /SBX/repo
+indexed:  false

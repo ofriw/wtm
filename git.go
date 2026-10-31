@@ -158,12 +158,37 @@ func gitTopLevel(dir string) (string, error) {
 	return git(dir, "rev-parse", "--show-toplevel")
 }
 
-// worktreeAdd mirrors `git worktree add -b`: new branch at baseRef, checked
-// out at path. --no-track is unconditional so a bare `git push` can never
-// target the base branch.
-func worktreeAdd(repoDir, path, branch, baseRef string) error {
-	_, err := git(repoDir, "worktree", "add", "--no-track", "-b", branch, path, baseRef)
+// worktreeAdd checks out branch at path. A new branch starts at baseRef with
+// --no-track, so a bare `git push` can never target the base branch. An attached
+// branch already exists: no -b and no --no-track, because git forbids --no-track
+// without -b and the branch must keep its configured upstream.
+func worktreeAdd(repoDir, path, branch, baseRef string, attach bool) error {
+	if !attach {
+		_, err := git(repoDir, "worktree", "add", "--no-track", "-b", branch, path, baseRef)
+		return err
+	}
+	// The short name lets git's branch dwim check out the branch itself, never a
+	// detached HEAD or a same-named tag; existence is verified through refs first.
+	_, err := git(repoDir, "worktree", "add", path, branch)
 	return err
+}
+
+// localBranches lists every local branch in one ref scan. The set keeps git's
+// stored spelling, which case-insensitive filesystems would hide. Scan full
+// %(refname): %(refname:short) degrades to heads/<name> when a tag shares the
+// branch name, which would hide the branch from attach.
+func localBranches(dir string) (map[string]bool, error) {
+	out, err := git(dir, "for-each-ref", "--format=%(refname)", "refs/heads/")
+	if err != nil {
+		return nil, err
+	}
+	refs := make(map[string]bool)
+	for _, ref := range strings.Split(out, "\n") {
+		if name, ok := strings.CutPrefix(ref, "refs/heads/"); ok && name != "" {
+			refs[name] = true
+		}
+	}
+	return refs, nil
 }
 
 // worktreeDirty reports whether git would refuse `worktree remove` for

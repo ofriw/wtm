@@ -16,7 +16,14 @@ if git rev-parse -q --verify refs/heads/wt-clean >/dev/null; then
   exit 1
 fi
 
-# Case 2: the seed copies an untracked .mcp.json, so the partial worktree must
+# Case 2: an attached pre-existing branch must survive a failed seed even when
+# the pristine checkout is rolled back.
+git branch keep-branch
+wtm add keep-branch >/dev/null 2>&1 && { echo 'add unexpectedly succeeded when attaching' >&2; exit 1; }
+git rev-parse -q --verify refs/heads/keep-branch >/dev/null || { echo 'attached branch was deleted' >&2; exit 1; }
+[[ ! -d ../repo-keep-branch ]] || { echo 'clean attached partial worktree kept' >&2; exit 1; }
+
+# Case 3: the seed copies an untracked .mcp.json, so the partial worktree must
 # survive for inspection and its branch must remain.
 echo '{"mcpServers":{}}' >.mcp.json
 if err=$(wtm add wt-keep 2>&1 >/dev/null); then
@@ -30,3 +37,4 @@ if ! git rev-parse -q --verify refs/heads/wt-keep >/dev/null; then
   exit 1
 fi
 echo 'add failure safety passed'
+echo 'attach failure safety passed'

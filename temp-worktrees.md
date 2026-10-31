@@ -11,6 +11,9 @@ wtm add <branch> --temp [--ttl <duration>]
 
 `--temp` creates a `tmp/<name>` branch. `--ttl` sets the idle window and implies
 `--temp`. The default is **1h**. Harness seeding and indexing do not change.
+`--temp` requires a new branch: an existing branch is refused so GC never
+inherits a branch wtm did not create. Attach an existing `tmp/…` branch without
+`--temp`; it then behaves as a permanent worktree.
 The checkout directory is named from the prefixed branch, so `add foo --temp`
 lands in `tmp/foo` inside `<repo>-tmp-foo`, and the `tmp/` prefix counts toward
 the 80-character branch limit. Human add output shows a compact countdown; the
