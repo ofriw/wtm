@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -243,6 +244,111 @@ func TestAddStartPointWithoutWorktreeWarns(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "no worktree checked out at refs/heads/topic") {
 		t.Fatalf("fallback must be disclosed, got stderr %q", errOut)
+	}
+	if strings.Contains(errOut, "re-embed") || strings.Contains(errOut, "cannot match") {
+		t.Fatalf("--no-index must not claim re-embedding, got stderr %q", errOut)
+	}
+}
+
+// TestAddAttachFallbackWarnsWithoutReembed pins the corrected attach wording:
+// a branch ref is expected to have no checkout, and --no-index cannot re-embed.
+func TestAddAttachFallbackWarnsWithoutReembed(t *testing.T) {
+	sandbox(t)
+	repo, _ := attachRepo(t)
+
+	var res addResult
+	errOut := captureStderr(t, func() {
+		res = addResultOf(t, &globals{root: repo}, "feature/attach", "--no-index")
+	})
+	if res.Source != canonical(repo) {
+		t.Fatalf("source = %q, want main worktree %q", res.Source, canonical(repo))
+	}
+	if !strings.Contains(errOut, "branch refs/heads/feature/attach is not checked out") {
+		t.Fatalf("attach fallback must name the branch ref, got %q", errOut)
+	}
+	if strings.Contains(errOut, "no worktree checked out") {
+		t.Fatalf("attach must not use the create-path wording, got %q", errOut)
+	}
+	if strings.Contains(errOut, "re-embed") || strings.Contains(errOut, "cannot match") {
+		t.Fatalf("--no-index must not claim re-embedding, got stderr %q", errOut)
+	}
+}
+
+// stubChunkHound puts a successful indexer first on PATH. The real git and the
+// rest of PATH stay available; this is a real process, not an in-process mock.
+func stubChunkHound(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX chunkhound stub")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "chunkhound"), "#!/bin/sh\nexit 0\n", 0o755)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestAddAttachReembedOnlyWithCopiedIndex pins the two sides of the index gate:
+// a copied database is required for the re-embed claim, and a successful index
+// run is required as well.
+func TestAddAttachReembedOnlyWithCopiedIndex(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		withIndex   bool
+		wantReembed bool
+	}{
+		{"copied index", true, true},
+		{"no copied index", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox(t)
+			repo, _ := attachRepo(t)
+			if tc.withIndex {
+				writeFile(t, chunkhoundDBPath(repo), "DB", 0o644)
+			}
+			stubChunkHound(t)
+
+			var res addResult
+			errOut := captureStderr(t, func() {
+				res = addResultOf(t, &globals{root: repo}, "feature/attach")
+			})
+			if !res.Indexed {
+				t.Fatalf("indexed = false, want the stub index run")
+			}
+			if !strings.Contains(errOut, "branch refs/heads/feature/attach is not checked out") {
+				t.Fatalf("attach fallback must name the branch ref, got %q", errOut)
+			}
+			if strings.Contains(errOut, "no worktree checked out") {
+				t.Fatalf("attach must not use the create-path wording, got %q", errOut)
+			}
+			if got := strings.Contains(errOut, "re-embed"); got != tc.wantReembed {
+				t.Fatalf("re-embed claim = %v, want %v; stderr %q", got, tc.wantReembed, errOut)
+			}
+			if tc.wantReembed && !strings.Contains(errOut, "the copied ChunkHound index cannot match") {
+				t.Fatalf("re-embed claim must name the copied index, got %q", errOut)
+			}
+		})
+	}
+}
+
+// TestWarnSeedFallbackText pins the exact source-only and re-embed variants.
+func TestWarnSeedFallbackText(t *testing.T) {
+	src := t.TempDir()
+	cases := []struct {
+		name, want string
+		attach     bool
+		reembed    bool
+	}{
+		{"create source only", "no worktree checked out at refs/heads/x; seeding from " + canonical(src), false, false},
+		{"attach source only", "branch refs/heads/x is not checked out; seeding from " + canonical(src), true, false},
+		{"create reembed", "no worktree checked out at refs/heads/x; seeding from " + canonical(src) + "; the copied ChunkHound index cannot match and indexing will re-embed", false, true},
+		{"attach reembed", "branch refs/heads/x is not checked out; seeding from " + canonical(src) + "; the copied ChunkHound index cannot match and indexing will re-embed", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := captureStderr(t, func() { warnSeedFallback("refs/heads/x", src, tc.attach, tc.reembed) })
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("warning = %q, want %q", out, tc.want)
+			}
+		})
 	}
 }
 

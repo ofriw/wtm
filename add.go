@@ -121,29 +121,36 @@ func warnIfChunkHoundExpected(path string) {
 	}
 }
 
+// seedSource is the worktree chosen for seeding and whether it is a fallback
+// for a start-point with no checkout. The warning is emitted after indexing so
+// it can state what actually happened.
+type seedSource struct {
+	path     string
+	fallback bool
+}
+
 // resolveAddSource picks the worktree to seed from. An explicit --from wins.
 // Otherwise the source is the worktree checked out at the start-point, so the
 // seeded harness — gitignored db/agent/mcp state git cannot carry — matches the
 // tree the new worktree is created from. When no worktree sits at the
-// start-point, the ref is checked out nowhere and no faithful index exists, so
-// the main worktree is the fallback and the mismatch is disclosed: the copied
-// index cannot match, so indexing must re-embed instead of being a no-op.
-func resolveAddSource(root string, wts []gworktree, base, from, target string) (string, error) {
+// start-point, the ref is checked out nowhere, so the main worktree is the
+// fallback; the caller discloses that source and, only when indexing really ran
+// over a copied index, the re-embed consequence.
+func resolveAddSource(root string, wts []gworktree, base, from, target string) (seedSource, error) {
 	if from != "" {
 		src, err := canonicalAbs(from)
 		if err != nil {
-			return "", err
+			return seedSource{}, err
 		}
 		if !exists(src) {
-			return "", fmt.Errorf("--from %s: not found", src)
+			return seedSource{}, fmt.Errorf("--from %s: not found", src)
 		}
-		return src, nil
+		return seedSource{path: src}, nil
 	}
 	if src, ok := worktreeAt(root, wts, base, target); ok {
-		return src, nil
+		return seedSource{path: src}, nil
 	}
-	warnf("no worktree checked out at %s; seeding from %s; the copied ChunkHound index cannot match and indexing will re-embed", base, canonical(root))
-	return canonical(root), nil
+	return seedSource{path: canonical(root), fallback: true}, nil
 }
 
 // worktreeAt returns the existing worktree checked out at base. It prefers the
@@ -289,6 +296,7 @@ func reportAddResult(g *globals, res addResult, ttl time.Duration) error {
 type addParams struct {
 	root, src, path, branch, base string
 	attach                        bool // branch exists and will be attached
+	sourceFallback                bool // src came from a start-point with no checkout
 	temp                          bool
 	ttl                           time.Duration
 }
@@ -335,9 +343,11 @@ func resolveAddParams(p addParams, o addOptions) (addParams, error) {
 	if err = resolveAddBase(&p, o.start); err != nil {
 		return addParams{}, err
 	}
-	if p.src, err = resolveAddSource(p.root, wts, p.base, o.from, p.path); err != nil {
+	source, err := resolveAddSource(p.root, wts, p.base, o.from, p.path)
+	if err != nil {
 		return addParams{}, err
 	}
+	p.src, p.sourceFallback = source.path, source.fallback
 	return p, nil
 }
 
@@ -426,13 +436,33 @@ func addWorktree(g *globals, branchArg string, o addOptions) error {
 	if err := worktreeAdd(p.root, p.path, p.branch, p.base, p.attach); err != nil {
 		return err
 	}
+	hadIndex := hasChunkHoundIndex(p.src)
 	indexed, err := seedWorktree(p.src, p.path, o.noIndex)
 	if err != nil {
 		return rollbackAdd(p.root, p.path, p.branch, p.attach, err)
 	}
+	if p.sourceFallback {
+		warnSeedFallback(p.base, p.src, p.attach, indexed && hadIndex)
+	}
 	res := addResult{Path: p.path, Branch: p.branch, Base: p.base, Source: p.src, Indexed: indexed, Attached: p.attach}
 	trackAddTemp(p, &res)
 	return reportAddResult(g, res, p.ttl)
+}
+
+// warnSeedFallback discloses the real seed source. A missing checkout is normal
+// for attach, so the reason is phrased without implying a broken state. The
+// re-embed sentence is conditional because it is false without an index run or a
+// copied ChunkHound index.
+func warnSeedFallback(base, src string, attach, reembed bool) {
+	reason := fmt.Sprintf("no worktree checked out at %s", base)
+	if attach {
+		reason = fmt.Sprintf("branch %s is not checked out", base)
+	}
+	msg := fmt.Sprintf("%s; seeding from %s", reason, canonical(src))
+	if reembed {
+		msg += "; the copied ChunkHound index cannot match and indexing will re-embed"
+	}
+	warnf("%s", msg)
 }
 
 // Record only after seeding: failed seeds or records leave durable checkouts.
