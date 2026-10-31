@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -118,6 +119,25 @@ func TestAddDeleteRoundTripKeepsStoredSpelling(t *testing.T) {
 	}
 	if got := mustGit(t, repo, "rev-parse", "refs/heads/main"); got != mainTip {
 		t.Fatalf("main moved from %s to %s", mainTip, got)
+	}
+}
+
+// TestBranchOnlyDeleteRefusesLiveCheckout pins the last-resort guard: even when
+// the ordinary worktree lookup is forced to miss, branch-only cleanup must not
+// delete a ref a live checkout holds.
+func TestBranchOnlyDeleteRefusesLiveCheckout(t *testing.T) {
+	sandbox(t)
+	repo := initRepo(t, "main")
+	gitTestCommit(t, repo)
+	linked := canonical(filepath.Join(filepath.Dir(repo), "linked"))
+	gitWorktreeAdd(t, repo, linked, "Feature/under_score", "refs/heads/main")
+
+	err := deleteOrphanFallback(&globals{root: repo, yes: true}, deleteOptions{branch: "feature/under_score"}, errNoWorktreeForBranch)
+	if err == nil || !strings.Contains(err.Error(), "refusing branch-only delete") {
+		t.Fatalf("fallback = %v, want a branch-only refusal", err)
+	}
+	if !exists(linked) || !refExists(repo, "refs/heads/Feature/under_score") {
+		t.Fatal("branch-only refusal damaged the live checkout or branch")
 	}
 }
 

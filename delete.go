@@ -216,8 +216,13 @@ func deleteOrphanFallback(g *globals, o deleteOptions, cause error) error {
 }
 
 // runBranchOnlyDelete confirms and runs the worktree-less retry: the remote
-// upstream (unless kept) via the shared veto-aware purge, then the branch.
+// upstream (unless kept) via the shared veto-aware purge, then the branch. It
+// refuses a branch a live worktree still holds; the resolved stored name makes
+// that comparison independent of the argument spelling.
 func runBranchOnlyDelete(g *globals, o deleteOptions, root string, wts []worktree, branch string) error {
+	if w := exactBranch(wts, branch); w != nil {
+		return fmt.Errorf("refusing branch-only delete of %q: checked out at %s", branch, displayPath(w.Path))
+	}
 	warnf("no worktree for branch %q; continuing with branch-only cleanup", branch)
 	ups, _ := branchUpstreams(root)
 	w := worktree{Branch: branch, Upstream: ups[branch]}
