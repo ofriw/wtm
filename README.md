@@ -62,6 +62,35 @@ branch, its configured upstream is preserved, and the same harness and index set
 branch that is already checked out in another worktree fails and names that worktree. A supplied
 start-point must match the branch tip. `--temp` always requires a new branch.
 
+Matching keeps Git's stored spelling. `wtm add` tries the raw name first, exact then as a unique
+case-insensitive match. If neither matches, it tries the normalized name (lowercase, `_` and
+spaces become `-`), again exact then case-insensitive. A request that matches several branches
+only by case is refused as ambiguous; an exact spelling wins. Names that normalization would
+rewrite or reject, such as `Feature/under_score` or `Feature/C++`, attach as written.
+
+Use the branch name reported by `add`: `--json` sets `attached` to `true` or `false`, and human
+output appends `(existing)`.
+
+```console
+$ wtm add feature/under_score --no-index
+worktree: /Users/you/dev/app-feature-under-score
+branch:   Feature/under_score (existing)
+base:     refs/heads/Feature/under_score (local)
+source:   /Users/you/dev/app
+indexed:  false
+
+$ wtm add feature/under_score --no-index --json
+{
+  "path": "/Users/you/dev/app-feature-under-score",
+  "branch": "Feature/under_score",
+  "base": "refs/heads/Feature/under_score",
+  "source": "/Users/you/dev/app",
+  "indexed": false,
+  "attached": true,
+  "temp": false
+}
+```
+
 ## Temporary worktrees
 
 For short-lived tasks — PR reviews, repros, throwaway experiments — `wtm add <name> --temp`
