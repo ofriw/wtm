@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -92,5 +93,53 @@ func TestDeleteBareTempNameRecoversRemoteFailure(t *testing.T) {
 	}
 	if remoteHasBranch(t, repo, origin, "feat") {
 		t.Fatal("retry must delete the retained remote upstream")
+	}
+}
+
+// TestAddDeleteRoundTripKeepsStoredSpelling pins that delete resolves the exact
+// stored branch add attached, even when the request differs only by case.
+func TestAddDeleteRoundTripKeepsStoredSpelling(t *testing.T) {
+	sandbox(t)
+	repo := initRepo(t, "main")
+	gitTestCommit(t, repo)
+	gitTestBranch(t, repo, "Feature/under_score")
+	mainTip := mustGit(t, repo, "rev-parse", "refs/heads/main")
+
+	res := addResultOf(t, &globals{root: repo}, "feature/under_score", "--no-index")
+	if !res.Attached || res.Branch != "Feature/under_score" {
+		t.Fatalf("attach = %+v, want Feature/under_score", res)
+	}
+	del := deleteResultOf(t, &globals{root: repo, yes: true}, "feature/under_score")
+	if del.DeletedBranch != "Feature/under_score" {
+		t.Fatalf("delete resolved %q, want Feature/under_score", del.DeletedBranch)
+	}
+	if exists(res.Path) || refExists(repo, "refs/heads/Feature/under_score") {
+		t.Fatal("round trip left the target checkout or branch")
+	}
+	if got := mustGit(t, repo, "rev-parse", "refs/heads/main"); got != mainTip {
+		t.Fatalf("main moved from %s to %s", mainTip, got)
+	}
+}
+
+// TestPromoteResolvesStoredSpelling pins that promote addresses the same stored
+// branch add attaches, not the caller's case-different spelling.
+func TestPromoteResolvesStoredSpelling(t *testing.T) {
+	sandbox(t)
+	repo := initRepo(t, "main")
+	gitTestCommit(t, repo)
+	linked := canonical(filepath.Join(filepath.Dir(repo), "linked"))
+	gitWorktreeAdd(t, repo, linked, "Feature/under_score", "refs/heads/main")
+
+	out := captureStdout(t, func() {
+		if err := cmdPromote(&globals{root: repo, json: true}, []string{"feature/under_score"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var res promoteResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Path != linked || res.Branch != "Feature/under_score" || res.Promoted {
+		t.Fatalf("promote = %+v, want the stored permanent branch", res)
 	}
 }

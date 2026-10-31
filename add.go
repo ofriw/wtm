@@ -400,7 +400,11 @@ func resolveAddBranch(root, raw string, temp bool) (branchChoice, error) {
 	if err != nil {
 		return branchChoice{}, err
 	}
-	branch, err := requestedBranch(refs, raw, temp)
+	mode := branchForAdd
+	if temp {
+		mode = branchForTempAdd
+	}
+	branch, err := resolveLocalBranch(refs, raw, mode)
 	if err != nil {
 		return branchChoice{}, usagef("add: %v", err)
 	}

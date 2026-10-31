@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -187,26 +188,100 @@ type branchChoice struct {
 	exists bool
 }
 
-// requestedBranch resolves raw to a stored branch or to the create name. The
-// raw spelling is matched first — exact, then case-folded — so git-valid names
-// creation rejects (Feature/C++) still attach; only a miss is normalized.
-// --temp never adopts, so it looks up only its tmp/ identity.
-func requestedBranch(refs map[string]bool, raw string, temp bool) (branchChoice, error) {
+// branchLookupMode selects the candidate spellings a command accepts. add
+// adopts before normalization so git-valid stored names stay untouched; address
+// mode adds the bare-name tmp/ alias shared by delete and promote.
+type branchLookupMode int
+
+const (
+	branchForAdd branchLookupMode = iota
+	branchForTempAdd
+	branchForAddress
+)
+
+// resolveLocalBranch resolves raw to a stored branch or to the caller's create
+// name. Each candidate tries Git's stored spelling, then one unique case-fold.
+// The first existing candidate wins. A miss returns the mode's fallback name so
+// add can create it and address commands keep their not-found errors.
+func resolveLocalBranch(refs map[string]bool, raw string, mode branchLookupMode) (branchChoice, error) {
+	switch mode {
+	case branchForTempAdd:
+		return resolveTempBranch(refs, raw)
+	case branchForAddress:
+		return resolveAddressBranch(refs, raw)
+	default:
+		return resolveCreateBranch(refs, raw)
+	}
+}
+
+func resolveTempBranch(refs map[string]bool, raw string) (branchChoice, error) {
+	name, err := tempBranch(raw)
+	if err != nil {
+		return branchChoice{}, err
+	}
+	return matchLocalBranch(refs, name)
+}
+
+func resolveAddressBranch(refs map[string]bool, raw string) (branchChoice, error) {
+	choice, err := firstStoredBranch(refs, addressCandidates(raw))
+	if err != nil || choice.exists {
+		return choice, err
+	}
+	return branchChoice{name: strings.TrimSpace(raw)}, nil
+}
+
+func resolveCreateBranch(refs map[string]bool, raw string) (branchChoice, error) {
 	exact := strings.TrimSpace(raw)
-	if !temp {
-		if branch, err := matchLocalBranch(refs, exact); err != nil || branch.exists {
-			return branch, err
-		}
+	if choice, err := matchLocalBranch(refs, exact); err != nil || choice.exists {
+		return choice, err
 	}
-	normalize := normalizeBranch
-	if temp {
-		normalize = tempBranch
-	}
-	normalized, err := normalize(raw)
+	normalized, err := normalizeBranch(raw)
 	if err != nil {
 		return branchChoice{}, err
 	}
 	return matchLocalBranch(refs, normalized)
+}
+
+func firstStoredBranch(refs map[string]bool, candidates []string) (branchChoice, error) {
+	for _, name := range candidates {
+		choice, err := matchLocalBranch(refs, name)
+		if err != nil || choice.exists {
+			return choice, err
+		}
+	}
+	return branchChoice{}, nil
+}
+
+// addressCandidates keeps delete's precedence: raw, normalized, then the tmp/
+// alias. Invalid normalized candidates are skipped because the raw spelling may
+// still be a valid stored ref. Option-like raw names never reach git as options.
+func addressCandidates(raw string) []string {
+	var out []string
+	add := func(name string) {
+		if name == "" || name[0] == '-' || slices.Contains(out, name) {
+			return
+		}
+		out = append(out, name)
+	}
+	add(strings.TrimSpace(raw))
+	if name, err := normalizeBranch(raw); err == nil {
+		add(name)
+	}
+	if name, err := tempBranch(raw); err == nil {
+		add(name)
+	}
+	return out
+}
+
+// storedBranchName maps name to Git's stored spelling when it exists, else
+// returns name unchanged. Used where two names must compare by identity, such
+// as the default-branch refusal on case-insensitive filesystems.
+func storedBranchName(refs map[string]bool, name string) string {
+	choice, err := matchLocalBranch(refs, name)
+	if err == nil && choice.exists {
+		return choice.name
+	}
+	return name
 }
 
 // matchLocalBranch finds the stored branch for name: exact, else a unique case

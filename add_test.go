@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // add_test.go — Tier-1 contracts for add.go. Every fixture passes --no-index
@@ -588,32 +589,119 @@ func TestAddTempRefusesExistingBranch(t *testing.T) {
 	}
 }
 
-// TestRequestedBranch pins raw exact, raw case-fold, then normalization; --temp uses only its tmp/ identity.
-func TestRequestedBranch(t *testing.T) {
+// TestAttachedTempBranchIsPermanent pins the safety rule behind the --temp
+// refusal: an existing tmp/ branch attaches as a permanent checkout. The 2h
+// backdate is past the default 1h temp TTL but inside the 90d permanent TTL, so
+// gc --all would collect a regression that treats the branch as temporary.
+func TestAttachedTempBranchIsPermanent(t *testing.T) {
+	sandbox(t)
+	repo := addTestRepo(t)
+	gitTestBranch(t, repo, "tmp/keep")
+
+	res := addResultOf(t, &globals{root: repo}, "tmp/keep", "--no-index")
+	if !res.Attached || res.Temp || res.TTL != "" || res.ExpiresAt != nil {
+		t.Fatalf("attach = %+v, want an attached permanent checkout", res)
+	}
+	if _, ok := mustReadTempStore(t)[res.Path]; ok {
+		t.Fatalf("attached %s got a temp record", res.Path)
+	}
+
+	out := captureStdout(t, func() {
+		if err := cmdStatus(&globals{root: repo, json: true}, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var rows []jsonWorktree
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range rows {
+		if row.Path == res.Path {
+			found = true
+			if row.Temp || row.ExpiresAt != nil {
+				t.Fatalf("status row = %+v, want permanent", row)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("status lost %s", res.Path)
+	}
+
+	out = captureStdout(t, func() {
+		if err := cmdStatus(&globals{root: repo}, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	line := statusLine(out, res.Path)
+	if fields := strings.Fields(strings.TrimPrefix(line, res.Path)); len(fields) < 5 || fields[4] != "-" {
+		t.Fatalf("status line %q must show TEMP - for the attached branch", line)
+	}
+
+	backdateGitActivity(t, res.Path, time.Now().Add(-2*time.Hour))
+	captureStdout(t, func() {
+		if err := cmdGC(&globals{root: repo, yes: true}, []string{"--all"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !exists(res.Path) || !refExists(repo, "refs/heads/tmp/keep") {
+		t.Fatal("gc collected an attached tmp/ branch that must be permanent")
+	}
+}
+
+func statusLine(out, path string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, path) {
+			return line
+		}
+	}
+	return ""
+}
+
+// TestResolveLocalBranch pins raw exact, raw case-fold, normalization, and the
+// address-mode tmp/ alias. --temp uses only its tmp/ identity.
+func TestResolveLocalBranch(t *testing.T) {
 	refs := map[string]bool{"Feature/X": true, "Feature/under_score": true, "Feature/C++": true}
 	cases := []struct {
 		raw, want string
-		temp      bool
+		mode      branchLookupMode
 		exists    bool
 	}{
-		{"Feature/X", "Feature/X", false, true},
-		{"feature/x", "Feature/X", false, true},
-		{"feature/under_score", "Feature/under_score", false, true},
-		{"feature/c++", "Feature/C++", false, true},
-		{"Feature Login", "feature-login", false, false},
-		{"x", "tmp/x", true, false},
-		{"TMP/X", "tmp/x", true, false},
+		{"Feature/X", "Feature/X", branchForAdd, true},
+		{"feature/x", "Feature/X", branchForAdd, true},
+		{"feature/under_score", "Feature/under_score", branchForAdd, true},
+		{"feature/c++", "Feature/C++", branchForAdd, true},
+		{"Feature Login", "feature-login", branchForAdd, false},
+		{"x", "tmp/x", branchForTempAdd, false},
+		{"TMP/X", "tmp/x", branchForTempAdd, false},
 	}
 	for _, tc := range cases {
-		got, err := requestedBranch(refs, tc.raw, tc.temp)
+		got, err := resolveLocalBranch(refs, tc.raw, tc.mode)
 		if err != nil || got.name != tc.want || got.exists != tc.exists {
-			t.Fatalf("requestedBranch(%q,%v) = (%+v,%v), want %q exists=%v", tc.raw, tc.temp, got, err, tc.want, tc.exists)
+			t.Fatalf("resolveLocalBranch(%q,%v) = (%+v,%v), want %q exists=%v", tc.raw, tc.mode, got, err, tc.want, tc.exists)
 		}
 	}
-	if _, err := requestedBranch(nil, "", false); err == nil {
+
+	addressRefs := map[string]bool{"Feature/under_score": true, "review-x": true, "tmp/keep": true}
+	for _, tc := range []struct {
+		raw, want string
+		exists    bool
+	}{
+		{"feature/under_score", "Feature/under_score", true},
+		{"Review X", "review-x", true},
+		{"keep", "tmp/keep", true},
+		{"missing", "missing", false},
+	} {
+		got, err := resolveLocalBranch(addressRefs, tc.raw, branchForAddress)
+		if err != nil || got.name != tc.want || got.exists != tc.exists {
+			t.Fatalf("resolveLocalBranch(%q,address) = (%+v,%v), want %q exists=%v", tc.raw, got, err, tc.want, tc.exists)
+		}
+	}
+
+	if _, err := resolveLocalBranch(nil, "", branchForAdd); err == nil {
 		t.Fatal("empty branch must be rejected")
 	}
-	if _, err := requestedBranch(nil, "feature/@{x}", false); err == nil {
+	if _, err := resolveLocalBranch(nil, "feature/@{x}", branchForAdd); err == nil {
 		t.Fatal("invalid ref must be rejected")
 	}
 }

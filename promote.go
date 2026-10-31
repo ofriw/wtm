@@ -34,8 +34,11 @@ func promoteWorktree(g *globals, branch string) error {
 	if err != nil {
 		return err
 	}
-	def, _ := defaultBranch(ws.root)
-	w, err := findWorktreeByBranch(ws.wts, branch, def)
+	choice, def, err := resolveRepoBranch(ws.root, branch)
+	if err != nil {
+		return err
+	}
+	w, err := checkedDeleteTarget(exactBranch(ws.wts, choice.name), choice.name, def)
 	if err != nil {
 		return err
 	}
