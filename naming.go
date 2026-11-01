@@ -296,7 +296,7 @@ func matchLocalBranch(refs map[string]bool, name string) (branchChoice, error) {
 			continue
 		}
 		if found.exists {
-			return branchChoice{}, fmt.Errorf("branch %q matches multiple local branches by case", name)
+			return branchChoice{}, fmt.Errorf("branch %q %w", name, errAmbiguousBranch)
 		}
 		found = branchChoice{name: stored, exists: true}
 	}

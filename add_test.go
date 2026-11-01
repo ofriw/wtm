@@ -693,8 +693,8 @@ func TestMatchLocalBranch(t *testing.T) {
 		t.Fatalf("missing = (%+v,%v), want an absent fix/x", got, err)
 	}
 	twoVariants := map[string]bool{"Feature/X": true, "feature/x": true}
-	if _, err := matchLocalBranch(twoVariants, "FEATURE/X"); err == nil {
-		t.Fatal("ambiguous case variants must be rejected")
+	if _, err := matchLocalBranch(twoVariants, "FEATURE/X"); !errors.Is(err, errAmbiguousBranch) || !isUsage(err) {
+		t.Fatalf("ambiguous case variants = %v, want the typed usage error", err)
 	}
 	if got, err := matchLocalBranch(twoVariants, "Feature/X"); err != nil || got.name != "Feature/X" {
 		t.Fatalf("exact spelling must beat ambiguity: (%+v,%v)", got, err)

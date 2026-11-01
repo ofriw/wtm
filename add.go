@@ -306,7 +306,7 @@ func prepareAdd(g *globals, branchArg string, o addOptions) (addParams, error) {
 	}
 	ttl, err := tempTTL(o)
 	if err != nil {
-		return addParams{}, usagef("add: %v", err)
+		return addParams{}, addUsage(err)
 	}
 	branch, err := resolveAddBranch(root, branchArg, o.temp)
 	if err != nil {
@@ -415,6 +415,17 @@ func occupiedErr(branch string, w gworktree) error {
 	return fmt.Errorf("add: branch %q is already checked out at %s; remove that worktree first", branch, path)
 }
 
+// addUsage decorates an add failure with the command prefix. A typed usage error
+// is preserved with %w so errors.Is still sees its cause (errAmbiguousBranch);
+// any other error degrades to a plain usage failure, keeping exit code 2.
+func addUsage(err error) error {
+	var ue usageError
+	if errors.As(err, &ue) {
+		return fmt.Errorf("add: %w", err)
+	}
+	return usagef("add: %v", err)
+}
+
 // resolveAddBranch adopts an existing local branch with git's stored spelling,
 // so normalization never duplicates Feature/X as feature/x. --temp never
 // attaches: adopting a tmp/ branch would hand it to gc.
@@ -429,7 +440,7 @@ func resolveAddBranch(root, raw string, temp bool) (branchChoice, error) {
 	}
 	branch, err := resolveLocalBranch(refs, raw, mode)
 	if err != nil {
-		return branchChoice{}, usagef("add: %v", err)
+		return branchChoice{}, addUsage(err)
 	}
 	if temp && branch.exists {
 		return branchChoice{}, fmt.Errorf("add: refusing --temp for existing branch %q; attach it without --temp, or remove the branch first", branch.name)
