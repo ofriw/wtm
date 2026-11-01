@@ -353,18 +353,33 @@ func resolveAddParams(p addParams, o addOptions) (addParams, error) {
 // against a contradictory start-point), else the requested or default
 // start-point.
 func resolveAddBase(p *addParams, start string) error {
-	if !p.attach {
-		p.base = start
-		if p.base == "" {
-			p.base = baseRefFor(p.root)
+	if p.attach {
+		p.base = "refs/heads/" + p.branch
+		if start == "" {
+			return nil
 		}
-		return nil
+		return verifyAttachStart(p.root, p.branch, start)
 	}
-	p.base = "refs/heads/" + p.branch
 	if start == "" {
+		p.base = baseRefFor(p.root)
 		return nil
 	}
-	return verifyAttachStart(p.root, p.branch, start)
+	if _, err := resolveStartPoint(p.root, start); err != nil {
+		return err
+	}
+	p.base = start
+	return nil
+}
+
+// resolveStartPoint validates a user-supplied start-point and returns its
+// commit. An unresolvable value is a usage error, so create and attach share one
+// exit contract.
+func resolveStartPoint(root, start string) (string, error) {
+	commit, err := git(root, "rev-parse", "--verify", "--quiet", start+"^{commit}")
+	if err != nil {
+		return "", usagef("add: start-point %q is not a commit", start)
+	}
+	return commit, nil
 }
 
 // verifyAttachStart rejects a start-point that disagrees with the existing
@@ -375,9 +390,9 @@ func verifyAttachStart(root, branch, start string) error {
 	if err != nil {
 		return fmt.Errorf("add: cannot resolve branch %q: %w", branch, err)
 	}
-	commit, err := git(root, "rev-parse", "--verify", "--quiet", start+"^{commit}")
+	commit, err := resolveStartPoint(root, start)
 	if err != nil {
-		return usagef("add: start-point %q is not a commit", start)
+		return err
 	}
 	if commit != tip {
 		return fmt.Errorf("add: start-point %q (%s) does not match existing branch %q (%s); refusing to attach",

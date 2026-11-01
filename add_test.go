@@ -186,6 +186,34 @@ func TestAddStartPointPositional(t *testing.T) {
 	}
 }
 
+// TestAddStartPointInvalidUsesUsageInBothModes pins one exit contract: an
+// unresolved user-supplied start-point is a usage mistake before any write,
+// whether the branch is new or already exists.
+func TestAddStartPointInvalidUsesUsageInBothModes(t *testing.T) {
+	for _, tc := range []struct {
+		name, branch string
+		attach       bool
+	}{
+		{"create", "feature/new", false},
+		{"attach", "feature/existing", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox(t)
+			repo := addTestRepo(t)
+			if tc.attach {
+				gitTestBranch(t, repo, tc.branch)
+			}
+			err := addWorktree(&globals{root: repo}, tc.branch, addOptions{start: "no-such-ref", noIndex: true})
+			if !isUsage(err) || !strings.Contains(err.Error(), "is not a commit") {
+				t.Fatalf("add %s bad start-point = %v, want a usage refusal", tc.name, err)
+			}
+			if exists(addTarget(repo, tc.branch)) || refExists(repo, "refs/heads/"+tc.branch) != tc.attach {
+				t.Fatal("rejected start-point must write nothing")
+			}
+		})
+	}
+}
+
 func TestAddFromSource(t *testing.T) {
 	sandbox(t)
 	repo := addTestRepo(t)

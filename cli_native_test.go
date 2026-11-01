@@ -33,6 +33,7 @@ func TestNativeExitCodes(t *testing.T) {
 	sandbox(t)
 	outside := t.TempDir()
 	repo := nativeRepo(t)
+	gitTestBranch(t, repo, "feature/existing")
 
 	cases := []struct {
 		name string
@@ -47,6 +48,8 @@ func TestNativeExitCodes(t *testing.T) {
 		{"wide with json is a usage error", repo, []string{"status", "--wide", "--json"}, 2},
 		{"invalid color after subcommand", repo, []string{"status", "--color", "bogus"}, 2},
 		{"invalid progress after subcommand", repo, []string{"status", "--progress", "bogus"}, 2},
+		{"bad start-point create", repo, []string{"add", "feature/new", "no-such-ref", "--no-index"}, 2},
+		{"bad start-point attach", repo, []string{"add", "feature/existing", "no-such-ref", "--no-index"}, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
