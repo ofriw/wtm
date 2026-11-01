@@ -224,23 +224,21 @@ func locationBase(root string, wts []gworktree) string {
 	return fallback
 }
 
-// resolveAddTarget picks the checkout directory: an explicit --path (guarded
-// against nesting), or a sibling named <project>-<branch-slug>.
+// resolveAddTarget picks the checkout directory: canonical --path or a derived
+// sibling, then one nesting guard shared by both.
 func resolveAddTarget(root string, wts []gworktree, branch, override string) (string, error) {
+	var target string
 	if override != "" {
-		target, err := canonicalAbs(override)
+		abs, err := canonicalAbs(override)
 		if err != nil {
 			return "", err
 		}
-		if parent, nested := nestedIn(target, wts); nested {
-			return "", usagef("add: refusing to create a worktree inside %s; worktrees must be siblings, not nested", parent)
-		}
-		return target, nil
+		target = abs
+	} else {
+		target = filepath.Join(locationBase(root, wts), deriveDirName(projectName(wts), branch))
 	}
-	// The derived path is guarded like --path: locationBase can return a
-	// directory inside another worktree when the current worktree is itself
-	// nested, and a sibling must never be nested either.
-	target := filepath.Join(locationBase(root, wts), deriveDirName(projectName(wts), branch))
+	// The derived path shares this guard: locationBase can return a directory
+	// inside another worktree when the current worktree is nested.
 	if parent, nested := nestedIn(target, wts); nested {
 		return "", usagef("add: refusing to create a worktree inside %s; worktrees must be siblings, not nested", parent)
 	}
