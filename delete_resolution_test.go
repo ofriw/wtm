@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -92,5 +95,114 @@ func TestDeleteBareTempNameRecoversRemoteFailure(t *testing.T) {
 	}
 	if remoteHasBranch(t, repo, origin, "feat") {
 		t.Fatal("retry must delete the retained remote upstream")
+	}
+}
+
+// TestAddDeleteRoundTripKeepsStoredSpelling pins that delete resolves the exact
+// stored branch add attached, even when the request differs only by case.
+func TestAddDeleteRoundTripKeepsStoredSpelling(t *testing.T) {
+	sandbox(t)
+	repo := initRepo(t, "main")
+	gitTestCommit(t, repo)
+	gitTestBranch(t, repo, "Feature/under_score")
+	mainTip := mustGit(t, repo, "rev-parse", "refs/heads/main")
+
+	res := addResultOf(t, &globals{root: repo}, "feature/under_score", "--no-index")
+	if !res.Attached || res.Branch != "Feature/under_score" {
+		t.Fatalf("attach = %+v, want Feature/under_score", res)
+	}
+	del := deleteResultOf(t, &globals{root: repo, yes: true}, "feature/under_score")
+	if del.DeletedBranch != "Feature/under_score" {
+		t.Fatalf("delete resolved %q, want Feature/under_score", del.DeletedBranch)
+	}
+	if exists(res.Path) || refExists(repo, "refs/heads/Feature/under_score") {
+		t.Fatal("round trip left the target checkout or branch")
+	}
+	if got := mustGit(t, repo, "rev-parse", "refs/heads/main"); got != mainTip {
+		t.Fatalf("main moved from %s to %s", mainTip, got)
+	}
+}
+
+// TestBranchOnlyDeleteRefusesLiveCheckout pins the last-resort guard: even when
+// the ordinary worktree lookup is forced to miss, branch-only cleanup must not
+// delete a ref a live checkout holds.
+func TestBranchOnlyDeleteRefusesLiveCheckout(t *testing.T) {
+	sandbox(t)
+	repo := initRepo(t, "main")
+	gitTestCommit(t, repo)
+	linked := canonical(filepath.Join(filepath.Dir(repo), "linked"))
+	gitWorktreeAdd(t, repo, linked, "Feature/under_score", "refs/heads/main")
+
+	err := deleteOrphanFallback(&globals{root: repo, yes: true}, deleteOptions{branch: "feature/under_score"}, errNoWorktreeForBranch)
+	if err == nil || !strings.Contains(err.Error(), "refusing branch-only delete") {
+		t.Fatalf("fallback = %v, want a branch-only refusal", err)
+	}
+	if !exists(linked) || !refExists(repo, "refs/heads/Feature/under_score") {
+		t.Fatal("branch-only refusal damaged the live checkout or branch")
+	}
+}
+
+// assertPromoteRefBesideAlias pins ref-first refusal and the alias hint for a
+// live temporary branch stored with the given spelling.
+func assertPromoteRefBesideAlias(t *testing.T, alias string) {
+	t.Helper()
+	sandbox(t)
+	repo := initRepo(t, "main")
+	gitTestCommit(t, repo)
+	linked := canonical(filepath.Join(filepath.Dir(repo), "linked"))
+	gitWorktreeAdd(t, repo, linked, alias, "refs/heads/main")
+	gitTestBranch(t, repo, "foo")
+	err := cmdPromote(&globals{root: repo}, []string{"foo"})
+	if !errors.Is(err, errNoWorktreeForBranch) {
+		t.Fatalf("promote foo = %v, want a missing-checkout refusal", err)
+	}
+	for _, want := range []string{"\"foo\"", fmt.Sprintf("%q", alias), linked, "wtm promote " + alias} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("promote foo error %q must name %q", err, want)
+		}
+	}
+	if !refExists(repo, "refs/heads/foo") || !refExists(repo, "refs/heads/"+alias) || !exists(linked) {
+		t.Fatal("refused promote must change nothing")
+	}
+	captureStdout(t, func() {
+		if err := cmdPromote(&globals{root: repo}, []string{alias}); err != nil {
+			t.Fatalf("promote %s: %v", alias, err)
+		}
+	})
+}
+
+// TestPromoteRefBesideLiveTempAlias pins the ref-first choice: a bare ref with
+// no checkout wins, so promote refuses instead of retargeting the live alias.
+func TestPromoteRefBesideLiveTempAlias(t *testing.T) {
+	assertPromoteRefBesideAlias(t, "tmp/foo")
+}
+
+// TestPromoteRefBesideMixedCaseAlias pins the alias hint to Git's stored
+// spelling: the refusal names the live tmp/Foo checkout even when the bare ref
+// is lowercase.
+func TestPromoteRefBesideMixedCaseAlias(t *testing.T) {
+	assertPromoteRefBesideAlias(t, "tmp/Foo")
+}
+
+// TestPromoteResolvesStoredSpelling pins that promote addresses the same stored
+// branch add attaches, not the caller's case-different spelling.
+func TestPromoteResolvesStoredSpelling(t *testing.T) {
+	sandbox(t)
+	repo := initRepo(t, "main")
+	gitTestCommit(t, repo)
+	linked := canonical(filepath.Join(filepath.Dir(repo), "linked"))
+	gitWorktreeAdd(t, repo, linked, "Feature/under_score", "refs/heads/main")
+
+	out := captureStdout(t, func() {
+		if err := cmdPromote(&globals{root: repo, json: true}, []string{"feature/under_score"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var res promoteResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Path != linked || res.Branch != "Feature/under_score" || res.Promoted {
+		t.Fatalf("promote = %+v, want the stored permanent branch", res)
 	}
 }

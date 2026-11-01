@@ -107,12 +107,12 @@ func assertWorktreeNotListed(t *testing.T, repo, wt string) {
 	}
 }
 
-// assertErrorNamesPath pins that err names path. Both sides compare canonically:
-// a raw t.TempDir path can be a Windows 8.3 alias (RUNNER~1), while production
-// errors embed the canonical store key, so a raw compare fails only on Windows.
+// assertErrorNamesPath pins that err names path. Both sides compare canonically
+// and in one separator spelling: git emits forward slashes on Windows, while
+// t.TempDir paths use backslashes.
 func assertErrorNamesPath(t *testing.T, what string, err error, path string) {
 	t.Helper()
-	if err == nil || !strings.Contains(err.Error(), canonical(path)) {
+	if err == nil || !strings.Contains(filepath.ToSlash(err.Error()), filepath.ToSlash(canonical(path))) {
 		t.Fatalf("%s (want %s): %v", what, path, err)
 	}
 }

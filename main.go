@@ -63,6 +63,11 @@ func (e usageError) Error() string { return string(e) }
 
 func usagef(format string, a ...any) error { return usageError(fmt.Sprintf(format, a...)) }
 
+// errAmbiguousBranch is a usage error so every command gives the same exit code
+// when a request matches several branches only by case. The stored spelling is
+// the repair, which makes the request a command-line mistake in all commands.
+var errAmbiguousBranch = usageError("matches multiple local branches by case")
+
 func main() { os.Exit(run(os.Args[1:])) }
 
 func validateGlobals(g *globals) error {

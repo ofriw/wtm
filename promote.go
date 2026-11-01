@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -34,16 +35,43 @@ func promoteWorktree(g *globals, branch string) error {
 	if err != nil {
 		return err
 	}
-	def, _ := defaultBranch(ws.root)
-	w, err := findWorktreeByBranch(ws.wts, branch, def)
+	choice, def, err := resolveRepoBranch(ws.root, branch)
 	if err != nil {
 		return err
+	}
+	w, err := checkedDeleteTarget(exactBranch(ws.wts, choice.name), choice.name, def)
+	if err != nil {
+		return explainPromoteMiss(ws.root, ws.wts, choice.name, err)
 	}
 	promoted, err := promoteTempRecord(w.Path)
 	if err != nil {
 		return fmt.Errorf("promote %s: %w", w.Path, err)
 	}
 	return printPromoteResult(g, promoteResult{Path: w.Path, Branch: w.Branch, Promoted: promoted})
+}
+
+// explainPromoteMiss adds the live tmp alias to a missing-checkout refusal. A
+// ref with no checkout wins resolution, so promote cannot silently retarget a
+// different checkout; the error names the command that reaches the alias.
+// The alias resolves through resolveRepoBranch so the hint uses Git's stored
+// spelling, which may differ by case from the requested tmp/ name.
+func explainPromoteMiss(root string, wts []worktree, branch string, cause error) error {
+	alias, err := tempBranch(branch)
+	if !errors.Is(cause, errNoWorktreeForBranch) || err != nil || alias == branch {
+		return cause
+	}
+	live, _, err := resolveRepoBranch(root, alias)
+	if err != nil {
+		return err
+	}
+	if !live.exists || live.name == branch {
+		return cause
+	}
+	if w := exactBranch(wts, live.name); w != nil {
+		return fmt.Errorf("%w; %q is checked out at %s; run `wtm promote %s`",
+			cause, live.name, displayPath(w.Path), live.name)
+	}
+	return cause
 }
 
 func printPromoteResult(g *globals, res promoteResult) error {

@@ -31,6 +31,16 @@ func TestHasChunkHoundWorkspace(t *testing.T) {
 		}
 	})
 
+	t.Run("empty db dir", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(chunkhoundDBDir(dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if hasChunkHoundWorkspace(dir) {
+			t.Fatal("empty db dir is not a workspace")
+		}
+	})
+
 	t.Run("neither", func(t *testing.T) {
 		if hasChunkHoundWorkspace(t.TempDir()) {
 			t.Fatal("empty dir is not a workspace")
@@ -250,6 +260,19 @@ func TestCopyChunkHound(t *testing.T) {
 		}
 		if exists(filepath.Join(dst, chunkhoundConfigFile)) || exists(chunkhoundDBDir(dst)) {
 			t.Fatal("nothing must land")
+		}
+	})
+
+	t.Run("empty db dir", func(t *testing.T) {
+		src, dst := t.TempDir(), t.TempDir()
+		if err := os.MkdirAll(chunkhoundDBDir(src), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := copyChunkHound(src, dst); err != nil {
+			t.Fatalf("copyChunkHound: %v", err)
+		}
+		if !exists(chunkhoundDBDir(dst)) {
+			t.Fatal("copy rule must preserve an existing db dir")
 		}
 	})
 }

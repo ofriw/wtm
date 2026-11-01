@@ -342,13 +342,14 @@ func TestDeleteDirtyWarnsOnce(t *testing.T) {
 	}
 }
 
-// TestOrphanBranchNameSkipsOptionLikeRaw pins that a leading-hyphen argument is
-// never treated as a raw ref name, which git could read as an option.
-func TestOrphanBranchNameSkipsOptionLikeRaw(t *testing.T) {
+// TestAddressResolutionSkipsOptionLikeRaw pins that a leading-hyphen argument
+// is never treated as a raw ref name, which git could read as an option.
+func TestAddressResolutionSkipsOptionLikeRaw(t *testing.T) {
 	sandbox(t)
 	repo := initRepo(t, "main")
 	gitTestCommit(t, repo)
-	if _, ok := orphanBranchName(repo, "-D"); ok {
-		t.Fatal("option-like argument must not resolve to a branch")
+	choice, _, err := resolveRepoBranch(repo, "-D")
+	if err != nil || choice.exists {
+		t.Fatalf("option-like argument resolved to %+v (err %v)", choice, err)
 	}
 }

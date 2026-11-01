@@ -35,6 +35,7 @@ d	755	-	/SBX/repo/.git/logs
 f	644	volatile	/SBX/repo/.git/logs/HEAD
 d	755	-	/SBX/repo/.git/logs/refs
 d	755	-	/SBX/repo/.git/logs/refs/heads
+f	644	volatile	/SBX/repo/.git/logs/refs/heads/keep-branch
 f	644	volatile	/SBX/repo/.git/logs/refs/heads/main
 f	644	volatile	/SBX/repo/.git/logs/refs/heads/wt-keep
 d	755	-	/SBX/repo/.git/objects
@@ -49,6 +50,7 @@ d	755	-	/SBX/repo/.git/objects/pack
 f	644	6110899c7adc374885f9552bddfb76fa28a7f7ca3c05fb8b74471a457e1e57c8	/SBX/repo/.git/packed-refs
 d	755	-	/SBX/repo/.git/refs
 d	755	-	/SBX/repo/.git/refs/heads
+f	644	df8be9babff81bdd9ac6bfdc48b1a44b00b92483e364950add7225fc51eb2407	/SBX/repo/.git/refs/heads/keep-branch
 f	644	df8be9babff81bdd9ac6bfdc48b1a44b00b92483e364950add7225fc51eb2407	/SBX/repo/.git/refs/heads/main
 f	644	df8be9babff81bdd9ac6bfdc48b1a44b00b92483e364950add7225fc51eb2407	/SBX/repo/.git/refs/heads/wt-keep
 d	755	-	/SBX/repo/.git/refs/tags

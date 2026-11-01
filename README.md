@@ -14,7 +14,7 @@ A fresh `git worktree add` gives you checked-out files and nothing else — no a
 
 ## What it does
 
-- **`add`** — create a worktree that's ready to work in: agent harness wired up, ChunkHound index seeded and refreshed.
+- **`add`** — create a worktree that's ready to work in: agent harness wired up, ChunkHound index seeded and refreshed. If the branch already exists, `add` attaches to it instead of creating a new one.
 - **`status`** — see every worktree at a glance, and whether it's `ACTIVE` or `UNUSED`.
 - **`delete`** — reclaim a single worktree by branch, even if it's `ACTIVE`.
 - **`gc`** — reclaim the `UNUSED` ones, and nothing else, with every destructive step disclosed first.
@@ -53,6 +53,42 @@ $ wtm gc --all --yes
 removed /Users/you/dev/old-spike
 pruned
 sessions purged: 1
+```
+
+## Attaching an existing branch
+
+`wtm add <branch>` attaches when the branch already exists locally. The checkout lands on that
+branch, its configured upstream is preserved, and the same harness and index setup runs. A
+branch that is already checked out in another worktree fails and names that worktree. A supplied
+start-point must match the branch tip. `--temp` always requires a new branch.
+
+Matching keeps Git's stored spelling. `wtm add` tries the raw name first, exact then as a unique
+case-insensitive match. If neither matches, it tries the normalized name (lowercase, `_` and
+spaces become `-`), again exact then case-insensitive. A request that matches several branches
+only by case is refused as ambiguous; an exact spelling wins. Names that normalization would
+rewrite or reject, such as `Feature/under_score` or `Feature/C++`, attach as written.
+
+Use the branch name reported by `add`: `--json` sets `attached` to `true` or `false`, and human
+output appends `(existing)`.
+
+```console
+$ wtm add feature/under_score --no-index
+worktree: /Users/you/dev/app-feature-under-score
+branch:   Feature/under_score (existing)
+base:     refs/heads/Feature/under_score (local)
+source:   /Users/you/dev/app
+indexed:  false
+
+$ wtm add feature/under_score --no-index --json
+{
+  "path": "/Users/you/dev/app-feature-under-score",
+  "branch": "Feature/under_score",
+  "base": "refs/heads/Feature/under_score",
+  "source": "/Users/you/dev/app",
+  "indexed": false,
+  "attached": true,
+  "temp": false
+}
 ```
 
 ## Temporary worktrees

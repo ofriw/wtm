@@ -28,6 +28,7 @@ type addResult struct {
 	Base      string  `json:"base"`
 	Source    string  `json:"source"`
 	Indexed   bool    `json:"indexed"`
+	Attached  bool    `json:"attached"`
 	Temp      bool    `json:"temp"`
 	TTL       string  `json:"ttl,omitempty"`
 	ExpiresAt *string `json:"expiresAt,omitempty"`
@@ -120,29 +121,36 @@ func warnIfChunkHoundExpected(path string) {
 	}
 }
 
+// seedSource is the worktree chosen for seeding and whether it is a fallback
+// for a start-point with no checkout. The warning is emitted after indexing so
+// it can state what actually happened.
+type seedSource struct {
+	path     string
+	fallback bool
+}
+
 // resolveAddSource picks the worktree to seed from. An explicit --from wins.
 // Otherwise the source is the worktree checked out at the start-point, so the
 // seeded harness — gitignored db/agent/mcp state git cannot carry — matches the
 // tree the new worktree is created from. When no worktree sits at the
-// start-point, the ref is checked out nowhere and no faithful index exists, so
-// the main worktree is the fallback and the mismatch is disclosed: the copied
-// index cannot match, so indexing must re-embed instead of being a no-op.
-func resolveAddSource(root string, wts []gworktree, base, from, target string) (string, error) {
+// start-point, the ref is checked out nowhere, so the main worktree is the
+// fallback; the caller discloses that source and, only when indexing really ran
+// over a copied index, the re-embed consequence.
+func resolveAddSource(root string, wts []gworktree, base, from, target string) (seedSource, error) {
 	if from != "" {
 		src, err := canonicalAbs(from)
 		if err != nil {
-			return "", err
+			return seedSource{}, err
 		}
 		if !exists(src) {
-			return "", fmt.Errorf("--from %s: not found", src)
+			return seedSource{}, fmt.Errorf("--from %s: not found", src)
 		}
-		return src, nil
+		return seedSource{path: src}, nil
 	}
 	if src, ok := worktreeAt(root, wts, base, target); ok {
-		return src, nil
+		return seedSource{path: src}, nil
 	}
-	warnf("no worktree checked out at %s; seeding from %s; the copied ChunkHound index cannot match and indexing will re-embed", base, canonical(root))
-	return canonical(root), nil
+	return seedSource{path: canonical(root), fallback: true}, nil
 }
 
 // worktreeAt returns the existing worktree checked out at base. It prefers the
@@ -216,23 +224,21 @@ func locationBase(root string, wts []gworktree) string {
 	return fallback
 }
 
-// resolveAddTarget picks the checkout directory: an explicit --path (guarded
-// against nesting), or a sibling named <project>-<branch-slug>.
+// resolveAddTarget picks the checkout directory: canonical --path or a derived
+// sibling, then one nesting guard shared by both.
 func resolveAddTarget(root string, wts []gworktree, branch, override string) (string, error) {
+	var target string
 	if override != "" {
-		target, err := canonicalAbs(override)
+		abs, err := canonicalAbs(override)
 		if err != nil {
 			return "", err
 		}
-		if parent, nested := nestedIn(target, wts); nested {
-			return "", usagef("add: refusing to create a worktree inside %s; worktrees must be siblings, not nested", parent)
-		}
-		return target, nil
+		target = abs
+	} else {
+		target = filepath.Join(locationBase(root, wts), deriveDirName(projectName(wts), branch))
 	}
-	// The derived path is guarded like --path: locationBase can return a
-	// directory inside another worktree when the current worktree is itself
-	// nested, and a sibling must never be nested either.
-	target := filepath.Join(locationBase(root, wts), deriveDirName(projectName(wts), branch))
+	// The derived path shares this guard: locationBase can return a directory
+	// inside another worktree when the current worktree is nested.
 	if parent, nested := nestedIn(target, wts); nested {
 		return "", usagef("add: refusing to create a worktree inside %s; worktrees must be siblings, not nested", parent)
 	}
@@ -242,7 +248,12 @@ func resolveAddTarget(root string, wts []gworktree, branch, override string) (st
 // rollbackAdd undoes a failed seed: pristine checkouts are removed, but any
 // seeded content (even gitignored, e.g. a copied MCP config) is user-inspectable
 // state, so the partial worktree survives and the caller is told to inspect it.
-func rollbackAdd(root, path, branch string, seedErr error) error {
+// A branch wtm attached belongs to the user and is never deleted; only a branch
+// wtm created is rolled back with the checkout.
+func rollbackAdd(root, path, branch string, attached bool, seedErr error) error {
+	if attached {
+		seedErr = fmt.Errorf("%w; the existing branch was left untouched", seedErr)
+	}
 	// --ignored keeps the check honest: a copied MCP config is ignored, yet is
 	// exactly the seeded state a user must be able to inspect.
 	changes, checkErr := git(path, "status", "--porcelain", "--untracked-files=all", "--ignored")
@@ -252,8 +263,10 @@ func rollbackAdd(root, path, branch string, seedErr error) error {
 	if cleanup := worktreeRemove(root, path); cleanup != nil {
 		return fmt.Errorf("%w; partial worktree kept at %s (branch %s): %v", seedErr, path, branch, cleanup)
 	}
-	if _, cleanup := git(root, "branch", "-d", branch); cleanup != nil {
-		return fmt.Errorf("%w; worktree removed but branch %s remains: %v", seedErr, branch, cleanup)
+	if !attached {
+		if _, cleanup := git(root, "branch", "-d", branch); cleanup != nil {
+			return fmt.Errorf("%w; worktree removed but branch %s remains: %v", seedErr, branch, cleanup)
+		}
 	}
 	return seedErr
 }
@@ -266,8 +279,12 @@ func reportAddResult(g *globals, res addResult, ttl time.Duration) error {
 	if strings.HasPrefix(res.Base, "refs/remotes/") {
 		origin = "remote"
 	}
+	branch := res.Branch
+	if res.Attached {
+		branch += " (existing)"
+	}
 	fmt.Printf("worktree: %s\nbranch:   %s\nbase:     %s (%s)\nsource:   %s\nindexed:  %v\n",
-		res.Path, res.Branch, res.Base, origin, res.Source, res.Indexed)
+		res.Path, branch, res.Base, origin, res.Source, res.Indexed)
 	if res.Temp {
 		fmt.Printf("temp:     true (expires in %s)\n", compactWindow(ttl))
 	}
@@ -276,6 +293,8 @@ func reportAddResult(g *globals, res addResult, ttl time.Duration) error {
 
 type addParams struct {
 	root, src, path, branch, base string
+	attach                        bool // branch exists and will be attached
+	sourceFallback                bool // src came from a start-point with no checkout
 	temp                          bool
 	ttl                           time.Duration
 }
@@ -287,14 +306,20 @@ func prepareAdd(g *globals, branchArg string, o addOptions) (addParams, error) {
 	}
 	ttl, err := tempTTL(o)
 	if err != nil {
-		return addParams{}, usagef("add: %v", err)
+		return addParams{}, addUsage(err)
 	}
-	branch, err := branchForAdd(branchArg, o)
+	branch, err := resolveAddBranch(root, branchArg, o.temp)
 	if err != nil {
-		return addParams{}, usagef("add: %v", err)
+		return addParams{}, err
 	}
-	warnBranchConvention(branch)
-	return resolveAddParams(addParams{root: root, branch: branch, temp: o.temp, ttl: ttl}, o)
+	warnBranchConvention(branch.name)
+	return resolveAddParams(addParams{
+		root:   root,
+		branch: branch.name,
+		attach: branch.exists,
+		temp:   o.temp,
+		ttl:    ttl,
+	}, o)
 }
 
 func resolveAddParams(p addParams, o addOptions) (addParams, error) {
@@ -302,48 +327,166 @@ func resolveAddParams(p addParams, o addOptions) (addParams, error) {
 	if err != nil {
 		return addParams{}, err
 	}
-	p.path, err = resolveAddTarget(p.root, wts, p.branch, o.path)
+	if p.attach {
+		// One branch cannot have two checkouts; name the blocker and a repair.
+		for _, w := range wts {
+			if w.Branch == p.branch {
+				return addParams{}, occupiedErr(p.branch, w)
+			}
+		}
+	}
+	if p.path, err = resolveAddTarget(p.root, wts, p.branch, o.path); err != nil {
+		return addParams{}, err
+	}
+	if err = resolveAddBase(&p, o.start); err != nil {
+		return addParams{}, err
+	}
+	source, err := resolveAddSource(p.root, wts, p.base, o.from, p.path)
 	if err != nil {
 		return addParams{}, err
 	}
-	p.base = o.start
-	if p.base == "" {
-		p.base = baseRefFor(p.root)
-	}
-	p.src, err = resolveAddSource(p.root, wts, p.base, o.from, p.path)
-	if err != nil {
-		return addParams{}, err
-	}
+	p.src, p.sourceFallback = source.path, source.fallback
 	return p, nil
 }
 
-// branchForAdd picks the branch identity: a temp add owns the tmp/ namespace,
-// a permanent add keeps the requested name.
-func branchForAdd(arg string, o addOptions) (string, error) {
-	if o.temp {
-		return tempBranch(arg)
+// resolveAddBase picks the base ref: an attachment's own branch ref (guarded
+// against a contradictory start-point), else the requested or default
+// start-point.
+func resolveAddBase(p *addParams, start string) error {
+	if p.attach {
+		p.base = "refs/heads/" + p.branch
+		if start == "" {
+			return nil
+		}
+		return verifyAttachStart(p.root, p.branch, start)
 	}
-	return normalizeBranch(arg)
+	if start == "" {
+		p.base = baseRefFor(p.root)
+		return nil
+	}
+	if _, err := resolveStartPoint(p.root, start); err != nil {
+		return err
+	}
+	p.base = start
+	return nil
 }
 
-// addWorktree creates the branch and its sibling checkout, then replicates the
-// source's harness. Idempotent by construction: an existing path or branch
-// fails the git step before anything is written.
+// resolveStartPoint validates a user-supplied start-point and returns its
+// commit. An unresolvable value is a usage error, so create and attach share one
+// exit contract.
+func resolveStartPoint(root, start string) (string, error) {
+	commit, err := git(root, "rev-parse", "--verify", "--quiet", start+"^{commit}")
+	if err != nil {
+		return "", usagef("add: start-point %q is not a commit", start)
+	}
+	return commit, nil
+}
+
+// verifyAttachStart rejects a start-point that disagrees with the existing
+// branch tip: attachment never rewinds. An unresolvable ref is a usage error;
+// a valid ref that conflicts with repository state is an operational error.
+func verifyAttachStart(root, branch, start string) error {
+	tip, err := git(root, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch+"^{commit}")
+	if err != nil {
+		return fmt.Errorf("add: cannot resolve branch %q: %w", branch, err)
+	}
+	commit, err := resolveStartPoint(root, start)
+	if err != nil {
+		return err
+	}
+	if commit != tip {
+		return fmt.Errorf("add: start-point %q (%s) does not match existing branch %q (%s); refusing to attach",
+			start, commit, branch, tip)
+	}
+	return nil
+}
+
+// occupiedErr names the blocking worktree and a repair the tool itself allows.
+// canonical() gives one spelling: git emits forward slashes on Windows and may
+// report 8.3 aliases, while every other wtm path is canonical.
+func occupiedErr(branch string, w gworktree) error {
+	path := canonical(w.Path)
+	if w.Prunable || !exists(path) {
+		return fmt.Errorf("add: branch %q is already checked out at %s (missing; run git worktree prune)", branch, path)
+	}
+	if w.Main {
+		return fmt.Errorf("add: branch %q is already checked out at the main worktree %s; switch it to another branch first", branch, path)
+	}
+	return fmt.Errorf("add: branch %q is already checked out at %s; remove that worktree first", branch, path)
+}
+
+// addUsage decorates an add failure with the command prefix. A typed usage error
+// is preserved with %w so errors.Is still sees its cause (errAmbiguousBranch);
+// any other error degrades to a plain usage failure, keeping exit code 2.
+func addUsage(err error) error {
+	var ue usageError
+	if errors.As(err, &ue) {
+		return fmt.Errorf("add: %w", err)
+	}
+	return usagef("add: %v", err)
+}
+
+// resolveAddBranch adopts an existing local branch with git's stored spelling,
+// so normalization never duplicates Feature/X as feature/x. --temp never
+// attaches: adopting a tmp/ branch would hand it to gc.
+func resolveAddBranch(root, raw string, temp bool) (branchChoice, error) {
+	refs, err := localBranches(root)
+	if err != nil {
+		return branchChoice{}, err
+	}
+	mode := branchForAdd
+	if temp {
+		mode = branchForTempAdd
+	}
+	branch, err := resolveLocalBranch(refs, raw, mode)
+	if err != nil {
+		return branchChoice{}, addUsage(err)
+	}
+	if temp && branch.exists {
+		return branchChoice{}, fmt.Errorf("add: refusing --temp for existing branch %q; attach it without --temp, or remove the branch first", branch.name)
+	}
+	return branch, nil
+}
+
+// addWorktree creates or attaches the branch's sibling checkout, then
+// replicates the source's harness. Idempotent by construction: an existing
+// path, or a branch that is checked out elsewhere, fails before anything is
+// written; an existing free branch is attached, never recreated.
 func addWorktree(g *globals, branchArg string, o addOptions) error {
 	p, err := prepareAdd(g, branchArg, o)
 	if err != nil {
 		return err
 	}
-	if err := worktreeAdd(p.root, p.path, p.branch, p.base); err != nil {
+	if err := worktreeAdd(p.root, p.path, p.branch, p.base, p.attach); err != nil {
 		return err
 	}
+	hadIndex := hasChunkHoundDB(p.src)
 	indexed, err := seedWorktree(p.src, p.path, o.noIndex)
 	if err != nil {
-		return rollbackAdd(p.root, p.path, p.branch, err)
+		return rollbackAdd(p.root, p.path, p.branch, p.attach, err)
 	}
-	res := addResult{Path: p.path, Branch: p.branch, Base: p.base, Source: p.src, Indexed: indexed}
+	if p.sourceFallback {
+		warnSeedFallback(p.base, p.src, p.attach, indexed && hadIndex)
+	}
+	res := addResult{Path: p.path, Branch: p.branch, Base: p.base, Source: p.src, Indexed: indexed, Attached: p.attach}
 	trackAddTemp(p, &res)
 	return reportAddResult(g, res, p.ttl)
+}
+
+// warnSeedFallback discloses the real seed source. A missing checkout is normal
+// for attach, so the reason is phrased without implying a broken state. The
+// re-embed sentence is conditional because it is false without an index run or a
+// copied ChunkHound index.
+func warnSeedFallback(base, src string, attach, reembed bool) {
+	reason := fmt.Sprintf("no worktree checked out at %s", base)
+	if attach {
+		reason = fmt.Sprintf("branch %s is not checked out", base)
+	}
+	msg := fmt.Sprintf("%s; seeding from %s", reason, canonical(src))
+	if reembed {
+		msg += "; the copied ChunkHound index cannot match and indexing will re-embed"
+	}
+	warnf("%s", msg)
 }
 
 // Record only after seeding: failed seeds or records leave durable checkouts.

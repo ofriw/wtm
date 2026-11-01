@@ -341,7 +341,7 @@ func TestWorktreeAddThenRemove(t *testing.T) {
 	gitTestCommit(t, repo)
 	wt := filepath.Join(filepath.Dir(repo), "linked")
 
-	if err := worktreeAdd(repo, wt, "feature", "refs/heads/main"); err != nil {
+	if err := worktreeAdd(repo, wt, "feature", "refs/heads/main", false); err != nil {
 		t.Fatalf("worktreeAdd: %v", err)
 	}
 	info, err := os.Stat(filepath.Join(wt, ".git"))
