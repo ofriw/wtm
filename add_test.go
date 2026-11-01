@@ -321,16 +321,24 @@ func TestAddAttachReembedOnlyWithCopiedIndex(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		withIndex   bool
+		withDBDir   bool
 		wantReembed bool
 	}{
-		{"copied index", true, true},
-		{"no copied index", false, false},
+		{"copied index", true, false, true},
+		{"no copied index", false, false, false},
+		{"empty db dir", false, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sandbox(t)
 			repo, _ := attachRepo(t)
 			if tc.withIndex {
 				writeFile(t, chunkhoundDBPath(repo), "DB", 0o644)
+			}
+			if tc.withDBDir {
+				writeFile(t, filepath.Join(repo, chunkhoundConfigFile), "{}", 0o644)
+				if err := os.MkdirAll(chunkhoundDBDir(repo), 0o755); err != nil {
+					t.Fatal(err)
+				}
 			}
 			stubChunkHound(t)
 

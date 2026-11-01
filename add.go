@@ -460,7 +460,7 @@ func addWorktree(g *globals, branchArg string, o addOptions) error {
 	if err := worktreeAdd(p.root, p.path, p.branch, p.base, p.attach); err != nil {
 		return err
 	}
-	hadIndex := hasChunkHoundIndex(p.src)
+	hadIndex := hasChunkHoundDB(p.src)
 	indexed, err := seedWorktree(p.src, p.path, o.noIndex)
 	if err != nil {
 		return rollbackAdd(p.root, p.path, p.branch, p.attach, err)

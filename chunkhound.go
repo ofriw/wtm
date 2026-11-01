@@ -37,11 +37,11 @@ func hasChunkHoundWorkspace(root string) bool {
 	return exists(filepath.Join(root, chunkhoundConfigFile)) || exists(chunkhoundDBPath(root))
 }
 
-// hasChunkHoundIndex reports whether root carries a database, the only part of
-// the workspace that copyChunkHound can copy as an index. Config alone means a
-// fresh index is built, not that a copied index is re-embedded.
-func hasChunkHoundIndex(root string) bool {
-	return exists(chunkhoundDBDir(root))
+// hasChunkHoundDB reports whether root carries the database file, the only
+// workspace part that gives a copied index. Config alone means a fresh index is
+// built. copyChunkHound still copies the directory: a copy rule, not presence.
+func hasChunkHoundDB(root string) bool {
+	return exists(chunkhoundDBPath(root))
 }
 
 func chunkhoundDBDir(root string) string {
