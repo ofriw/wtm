@@ -146,11 +146,15 @@ Promotion removes the registry record and identity metadata. It leaves checkout
 files and the branch unchanged. The checkout then uses ordinary `unusedTTL`
 rules. Output identifies a retained `tmp/` branch.
 
-`promote` and `delete` resolve their branch argument the same way. They try the
-raw name, the normalized name, then the bare name of a `tmp/<name>` branch. Each
-step prefers Git's stored spelling, then a unique case-insensitive match. So
-`wtm promote foo` addresses `tmp/foo` when no `foo` exists. The main worktree
-and the default branch are refused by both commands.
+`promote` and `delete` resolve their branch argument against local refs in the
+same order: the raw name, the normalized name, then the bare name of a
+`tmp/<name>` branch. Each step prefers Git's stored spelling, then a unique
+case-insensitive match. An existing ref wins even when no checkout holds it.
+`delete` may then finish branch-only. `promote` needs a checkout of the resolved
+ref. When no checkout holds it but a `tmp/<name>` checkout is live, the error
+names that alias and the command to use. So `wtm promote foo` addresses
+`tmp/foo` only when no `foo` ref exists. The main worktree and the default branch
+are refused by both commands.
 
 Promotion reads and removes the record under one lock. Success is reported only
 after permanent state is saved. An already-permanent checkout succeeds with

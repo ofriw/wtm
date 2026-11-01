@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -139,6 +140,48 @@ func TestBranchOnlyDeleteRefusesLiveCheckout(t *testing.T) {
 	if !exists(linked) || !refExists(repo, "refs/heads/Feature/under_score") {
 		t.Fatal("branch-only refusal damaged the live checkout or branch")
 	}
+}
+
+// assertPromoteRefBesideAlias pins ref-first refusal and the alias hint for a
+// live temporary branch stored with the given spelling.
+func assertPromoteRefBesideAlias(t *testing.T, alias string) {
+	t.Helper()
+	sandbox(t)
+	repo := initRepo(t, "main")
+	gitTestCommit(t, repo)
+	linked := canonical(filepath.Join(filepath.Dir(repo), "linked"))
+	gitWorktreeAdd(t, repo, linked, alias, "refs/heads/main")
+	gitTestBranch(t, repo, "foo")
+	err := cmdPromote(&globals{root: repo}, []string{"foo"})
+	if !errors.Is(err, errNoWorktreeForBranch) {
+		t.Fatalf("promote foo = %v, want a missing-checkout refusal", err)
+	}
+	for _, want := range []string{"\"foo\"", fmt.Sprintf("%q", alias), linked, "wtm promote " + alias} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("promote foo error %q must name %q", err, want)
+		}
+	}
+	if !refExists(repo, "refs/heads/foo") || !refExists(repo, "refs/heads/"+alias) || !exists(linked) {
+		t.Fatal("refused promote must change nothing")
+	}
+	captureStdout(t, func() {
+		if err := cmdPromote(&globals{root: repo}, []string{alias}); err != nil {
+			t.Fatalf("promote %s: %v", alias, err)
+		}
+	})
+}
+
+// TestPromoteRefBesideLiveTempAlias pins the ref-first choice: a bare ref with
+// no checkout wins, so promote refuses instead of retargeting the live alias.
+func TestPromoteRefBesideLiveTempAlias(t *testing.T) {
+	assertPromoteRefBesideAlias(t, "tmp/foo")
+}
+
+// TestPromoteRefBesideMixedCaseAlias pins the alias hint to Git's stored
+// spelling: the refusal names the live tmp/Foo checkout even when the bare ref
+// is lowercase.
+func TestPromoteRefBesideMixedCaseAlias(t *testing.T) {
+	assertPromoteRefBesideAlias(t, "tmp/Foo")
 }
 
 // TestPromoteResolvesStoredSpelling pins that promote addresses the same stored
