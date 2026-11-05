@@ -156,7 +156,7 @@ func claudeEvent(rec *claudeUsageRecord, dropped *int) (usageEvent, bool) {
 	if rec.Type != "assistant" || msg == nil || msg.Usage == nil || msg.Model == "<synthetic>" {
 		return usageEvent{}, false
 	}
-	at, ok := parseUsageTime(rec.Timestamp)
+	at, ok := parseRFC3339(rec.Timestamp)
 	if !ok {
 		*dropped++
 		return usageEvent{}, false
@@ -176,7 +176,7 @@ func claudeActivityFromUsage(rec *claudeUsageRecord) (activityEvent, bool) {
 	if rec.Type != "assistant" || msg == nil {
 		return activityEvent{}, false
 	}
-	at, ok := parseUsageTime(rec.Timestamp)
+	at, ok := parseRFC3339(rec.Timestamp)
 	if !ok {
 		return activityEvent{}, false
 	}
@@ -187,7 +187,7 @@ func claudeActivityFromUsage(rec *claudeUsageRecord) (activityEvent, bool) {
 // no billable usage: an assistant record (streaming fragment or empty turn) and
 // a user record (human prompt or tool result).
 func claudeActivityFromRecord(rec *claudeActivityRecord) (activityEvent, bool) {
-	at, ok := parseUsageTime(rec.Timestamp)
+	at, ok := parseRFC3339(rec.Timestamp)
 	if !ok {
 		return activityEvent{}, false
 	}

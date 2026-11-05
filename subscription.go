@@ -164,7 +164,8 @@ func claudeAccountProof(a *claudeOAuthAccount) (bool, time.Time, bool) {
 		return false, time.Time{}, false
 	}
 	allowanceOnly := a.HasExtraUsageEnabled != nil && !*a.HasExtraUsageEnabled
-	return true, parseSubscriptionSince(a.SubscriptionCreatedAt), allowanceOnly
+	since, _ := parseRFC3339(a.SubscriptionCreatedAt)
+	return true, since, allowanceOnly
 }
 
 // claudeMeteredRule is one configured value that bills Claude Code outside the
@@ -354,20 +355,6 @@ func managedMetered() bool {
 // outside the subscription.
 func claudeMeteredOverride() bool {
 	return claudeMeteredEnv(os.LookupEnv) || claudeUserMetered()
-}
-
-// parseSubscriptionSince reads the account's start mark; an absent or
-// unparseable value yields the zero time, which bounds nothing by itself —
-// claudeProven treats dated events as unproven when the start is unknown.
-func parseSubscriptionSince(s string) time.Time {
-	if s == "" {
-		return time.Time{}
-	}
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		return time.Time{}
-	}
-	return t
 }
 
 // coverage is the tri-state subscription verdict for one event. coverageNone

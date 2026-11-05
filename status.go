@@ -76,16 +76,16 @@ func parseStatusFlags(g *globals, args []string) (bool, error) {
 // A malformed value is a test-setup error, so warnNowEnv discloses it once
 // before any renderer starts: a raw warning inside the frame is erased.
 func nowFunc() time.Time {
-	if t, err := parseNowEnv(); err == nil {
+	if t, ok := parseNowEnv(); ok {
 		return t
 	}
 	return time.Now()
 }
 
-// parseNowEnv parses the WTM_NOW seam. An absent value is a parse error, so
-// nowFunc falls back to the wall clock without special-casing it.
-func parseNowEnv() (time.Time, error) {
-	return time.Parse(time.RFC3339, os.Getenv("WTM_NOW"))
+// parseNowEnv parses the WTM_NOW seam. An absent or malformed value reports
+// ok=false, so nowFunc falls back to the wall clock.
+func parseNowEnv() (time.Time, bool) {
+	return parseRFC3339(os.Getenv("WTM_NOW"))
 }
 
 // warnNowEnv runs at dispatch, before any subcommand can open a renderer.
@@ -94,7 +94,7 @@ func warnNowEnv() {
 	if raw == "" {
 		return
 	}
-	if _, err := parseNowEnv(); err != nil {
+	if _, ok := parseNowEnv(); !ok {
 		warnf("WTM_NOW %q is not RFC3339: using the wall clock", raw)
 	}
 }
@@ -112,8 +112,7 @@ func parseCreatedAtEnv() (time.Time, bool) {
 	if raw == "" {
 		return time.Time{}, false
 	}
-	t, err := time.Parse(time.RFC3339Nano, raw)
-	return t, err == nil
+	return parseRFC3339(raw)
 }
 
 // warnCreatedAtEnv runs at dispatch beside warnNowEnv: a raw warning inside a

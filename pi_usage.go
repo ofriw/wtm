@@ -186,7 +186,7 @@ func (s *piParseState) consume(line []byte, oversized bool, prefix []byte) {
 		s.dropped++
 		return
 	}
-	at, atOK := parseUsageTime(rec.Timestamp)
+	at, atOK := parseRFC3339(rec.Timestamp)
 	s.current, s.provider = appendPiRecord(&s.events, &rec, s.current, s.provider, s.spawnAt, &s.dropped)
 	if atOK {
 		if a, ok := piActivityFromRecord(&rec, at); ok {
@@ -202,7 +202,7 @@ func (s *piParseState) consumePiActivity(line []byte) {
 	if json.Unmarshal(line, &rec) != nil || rec.Type != "message" || rec.Message == nil {
 		return
 	}
-	at, ok := parseUsageTime(rec.Timestamp)
+	at, ok := parseRFC3339(rec.Timestamp)
 	if !ok {
 		return
 	}
@@ -318,7 +318,7 @@ func applyPiModelChange(rec *piUsageRecord, current, provider string) (string, s
 // it by type. A record with no usable timestamp cannot be placed on the
 // activity or cost timeline, so it drops; the count discloses that loss.
 func appendPiBilledRecord(events *[]usageEvent, rec *piUsageRecord, current, provider string, spawnAt map[string]time.Time, dropped *int) (string, string) {
-	at, ok := parseUsageTime(rec.Timestamp)
+	at, ok := parseRFC3339(rec.Timestamp)
 	if !ok {
 		*dropped++
 		return current, provider
@@ -697,16 +697,4 @@ func piInteresting(line []byte) bool {
 	return bytes.Contains(line, usageKey) || bytes.Contains(line, piStatsKey) ||
 		bytes.Contains(line, piModelChangeKey) || bytes.Contains(line, piDetailsKey) ||
 		bytes.Contains(line, piToolCallKey) || bytes.Contains(line, piIsErrorKey)
-}
-
-// parseUsageTime parses an entry's ISO timestamp.
-func parseUsageTime(s string) (time.Time, bool) {
-	if s == "" {
-		return time.Time{}, false
-	}
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return t, true
 }
