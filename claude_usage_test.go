@@ -154,29 +154,35 @@ type failReader struct{ err error }
 
 func (f failReader) Read([]byte) (int, error) { return 0, f.err }
 
-// TestClaudeUsageKeepsEventsBeforeReadError pins the internal parser contract:
-// when the session read fails mid-file, the records already parsed survive in
-// time order beside the error. buildUsage still drops the session and taints the
-// total, so this is not a user-visible salvage path.
-func TestClaudeUsageKeepsEventsBeforeReadError(t *testing.T) {
+// TestClaudeUsageReadErrorReturnsEmpty pins the one error policy: a failed read
+// yields no result, so a partial session can never read as complete. buildUsage
+// drops the session and taints the total.
+func TestClaudeUsageReadErrorReturnsEmpty(t *testing.T) {
 	first := `{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","requestId":"r2","message":{"id":"b","model":"m","usage":{"input_tokens":2}}}`
-	second := `{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"r1","message":{"id":"a","model":"m","usage":{"input_tokens":1}}}`
 	r := bufio.NewReader(io.MultiReader(
-		strings.NewReader(first+"\n"+second+"\n"),
+		strings.NewReader(first+"\n"),
 		failReader{err: io.ErrUnexpectedEOF},
 	))
 	parsed, err := claudeUsageEvents(r)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
 	}
-	if parsed.dropped != 0 {
-		t.Errorf("dropped = %d, want 0", parsed.dropped)
+	if parsed.events != nil || parsed.activity != nil || parsed.dropped != 0 {
+		t.Fatalf("parsed = %+v, want the zero result", parsed)
 	}
-	if len(parsed.events) != 2 {
-		t.Fatalf("got %d events, want the 2 parsed before the error", len(parsed.events))
+}
+
+// TestClaudeUsageTruncatedFinalRecordFails pins EOF handling: a record cut
+// before its newline is a failed read, never a complete total.
+func TestClaudeUsageTruncatedFinalRecordFails(t *testing.T) {
+	good := `{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"r1","message":{"id":"a","model":"m","usage":{"input_tokens":2}}}`
+	cut := `{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","requestId":"r2","message":{"id":"b","model":"m","content":[{"type":"text","text":"hel`
+	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(good + "\n" + cut)))
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
 	}
-	if !parsed.events[0].at.Before(parsed.events[1].at) {
-		t.Errorf("events are not time ordered: %v", parsed.events)
+	if parsed.events != nil || parsed.activity != nil || parsed.dropped != 0 {
+		t.Fatalf("parsed = %+v, want the zero result", parsed)
 	}
 }
 
@@ -190,7 +196,7 @@ func TestClaudeUsageUnclassifiedCacheWrite(t *testing.T) {
 
 func TestClaudeUsageSkipsUntimestamped(t *testing.T) {
 	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(
-		`{"type":"assistant","message":{"id":"x","model":"m","usage":{"input_tokens":1}}}`,
+		`{"type":"assistant","message":{"id":"x","model":"m","usage":{"input_tokens":1}}}` + "\n",
 	)))
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +237,7 @@ func TestClaudeUsageOversizedRecordIsDropped(t *testing.T) {
 // event.
 func TestClaudeUsageSkipsNonAssistant(t *testing.T) {
 	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(
-		`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"id":"x","model":"m","usage":{"input_tokens":1}}}`,
+		`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"id":"x","model":"m","usage":{"input_tokens":1}}}` + "\n",
 	)))
 	if err != nil {
 		t.Fatal(err)

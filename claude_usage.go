@@ -70,18 +70,17 @@ type claudeServerToolUse struct {
 func claudeUsageEvents(r *bufio.Reader) (sessionParse, error) {
 	var out sessionParse
 	for {
-		line, oversized, prefix, err := sessionRecord(r)
+		line, oversized, prefix, rerr := sessionRecord(r)
+		err := sessionRecordErr(line, oversized, rerr)
 		out.consumeClaudeLine(line, oversized, prefix)
-		if err != nil {
-			if err == io.EOF {
-				out.sortClaude()
-				return out, nil
-			}
-			// A read error must not discard the records already parsed: the
-			// caller drops the session (and taints the total), but the kept
-			// events stay available for diagnostics and tests.
+		if err == io.EOF {
 			out.sortClaude()
-			return out, err
+			return out, nil
+		}
+		if err != nil {
+			// One error policy: the caller drops the session and taints the
+			// total, so a partial result must never read as complete.
+			return sessionParse{}, err
 		}
 	}
 }

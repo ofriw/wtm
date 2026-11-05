@@ -133,13 +133,16 @@ type piSpawnUsage struct {
 func piUsageEvents(r *bufio.Reader) (sessionParse, error) {
 	s := piParseState{spawnAt: map[string]time.Time{}}
 	for {
-		line, oversized, prefix, err := sessionRecord(r)
+		line, oversized, prefix, rerr := sessionRecord(r)
+		err := sessionRecordErr(line, oversized, rerr)
 		s.consume(line, oversized, prefix)
 		if err == io.EOF {
 			return s.result(), nil
 		}
 		if err != nil {
-			return s.result(), err
+			// One error policy: the caller drops the session and taints the
+			// total, so a partial result must never read as complete.
+			return sessionParse{}, err
 		}
 	}
 }

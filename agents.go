@@ -340,6 +340,16 @@ func sessionRecord(r *bufio.Reader) (line []byte, oversized bool, prefix []byte,
 	}
 }
 
+// sessionRecordErr maps an unterminated final record to io.ErrUnexpectedEOF:
+// a killed writer leaves bytes without the JSONL newline; the parse then fails
+// so the lost turn can never read as a complete total.
+func sessionRecordErr(line []byte, oversized bool, err error) error {
+	if err == io.EOF && (len(line) > 0 || oversized) {
+		return io.ErrUnexpectedEOF
+	}
+	return err
+}
+
 // recordType reads the top-level "type" from a truncated prefix. Nested types
 // cannot classify the record, and a prefix that ends first fails closed.
 func recordType(prefix []byte) (string, bool) {

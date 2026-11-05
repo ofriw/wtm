@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"errors"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,6 +47,36 @@ func assertPiEvent(t *testing.T, e usageEvent, model string, cost *float64) {
 		t.Errorf("cost = nil, want %v", *cost)
 	case cost != nil && *e.cost != *cost:
 		t.Errorf("cost = %v, want %v", *e.cost, *cost)
+	}
+}
+
+// TestPiUsageReadErrorReturnsEmpty pins the same policy as Claude: a failed
+// read yields no result, so a partial session can never read as complete.
+func TestPiUsageReadErrorReturnsEmpty(t *testing.T) {
+	good := `{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}`
+	r := bufio.NewReader(io.MultiReader(
+		strings.NewReader(good+"\n"),
+		failReader{err: io.ErrUnexpectedEOF},
+	))
+	parsed, err := piUsageEvents(r)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if parsed.events != nil || parsed.activity != nil || parsed.dropped != 0 {
+		t.Fatalf("parsed = %+v, want the zero result", parsed)
+	}
+}
+
+// TestPiUsageTruncatedFinalRecordFails pins the same EOF contract for Pi.
+func TestPiUsageTruncatedFinalRecordFails(t *testing.T) {
+	good := `{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}`
+	cut := `{"type":"message","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"hel`
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(good + "\n" + cut)))
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if parsed.events != nil || parsed.activity != nil || parsed.dropped != 0 {
+		t.Fatalf("parsed = %+v, want the zero result", parsed)
 	}
 }
 
