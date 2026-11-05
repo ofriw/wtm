@@ -203,9 +203,9 @@ func sandbox(t *testing.T) sandboxEnv {
 	for _, k := range []string{"WTM_NOW", createdAtEnv, ratesEnv, "WTM_CLAUDE_PARENT_SCOPE", "CLAUDE_CODE_CUSTOM_OAUTH_URL", progressDelayEnv} {
 		t.Setenv(k, "")
 	}
-	// Replace the managed-settings path list with none, so a host's real
-	// /etc or /Library file cannot change a covered-cost test.
-	t.Setenv("WTM_MANAGED_SETTINGS", "")
+	// Point the managed-settings list at a path that does not exist, so a
+	// host's real /etc or /Library file cannot change a covered-cost test.
+	t.Setenv("WTM_MANAGED_SETTINGS", filepath.Join(home, "absent-managed-settings.json"))
 	t.Setenv("TZ", "UTC")
 	t.Setenv("LC_ALL", "C")
 	return sandboxEnv{Home: home, AgentDir: agent, ClaudeDir: claude}

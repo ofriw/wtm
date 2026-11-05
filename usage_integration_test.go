@@ -411,7 +411,7 @@ func TestBuildUsageProvenPiPlusEstimatedClaudeAsksNoOverageLegend(t *testing.T) 
 		{path: piPath, harness: piAgent.name},
 		{path: claudePath, harness: claudeAgent.name},
 	}}
-	u, err := buildUsage(dir, idx, testRates(t), loadSubscriptions())
+	u, err := buildUsage(dir, idx, testRates(t), loadSubscriptions(true))
 	if err != nil {
 		t.Fatal(err)
 	}

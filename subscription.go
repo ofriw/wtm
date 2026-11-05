@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,18 +43,25 @@ type subscriptions struct {
 	// claudeAllowanceOnly proves the account has no extra-usage billing, so a
 	// completed request costs exactly $0 instead of a possible overage charge.
 	claudeAllowanceOnly bool
-	managed             bool      // cached managed-settings metered verdict (machine-global)
-	since               time.Time // subscription start; zero when unknown
+	// claudeErr carries a failed account read so status can disclose why the
+	// proof is empty; absence stays silent because it proves nothing new.
+	claudeErr error
+	managed   bool      // cached managed-settings metered verdict (machine-global)
+	since     time.Time // subscription start; zero when unknown
 }
 
-// loadSubscriptions reads both credential sources once per status run. It never
-// fails: an absent or malformed file yields an empty proof.
-func loadSubscriptions() subscriptions {
+// loadSubscriptions reads the credential proofs once per status run. It never
+// fails: an absent or malformed file yields an empty proof. hasClaude gates the
+// account read, so a Pi-only repository never opens Claude Code's largest file.
+func loadSubscriptions(hasClaude bool) subscriptions {
 	s := subscriptions{piOAuth: map[string]bool{}}
 	if dir := piAgent.configDir(); dir != "" {
 		s.piOAuth = readPiOAuth(filepath.Join(dir, "auth.json"))
 	}
-	s.claude, s.since, s.claudeAllowanceOnly = readClaudeSubscription()
+	if !hasClaude {
+		return s
+	}
+	s.claude, s.since, s.claudeAllowanceOnly, s.claudeErr = readClaudeSubscription()
 	s.managed = s.claude && managedMetered()
 	return s
 }
@@ -136,24 +147,65 @@ type claudeAccount struct {
 	OAuthAccount *claudeOAuthAccount `json:"oauthAccount"`
 }
 
+// claudeAccountMaxBytes bounds the account read. A real account file can carry
+// tens of MB of project history; the cap rejects a corrupt or hostile file while
+// sitting well above a real one. The streaming decoder skips unknown fields
+// without retaining them, so memory stays flat regardless of history size.
+const claudeAccountMaxBytes = 64 << 20
+
+// readClaudeAccount decodes only the top-level facts, streaming past the history
+// fields instead of buffering the whole file the way readJSON would.
+func readClaudeAccount(path string) (*claudeAccount, error) {
+	f, err := openShared(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	// Stat before decoding: the LimitReader turns an oversized body into a
+	// truncated one, so the decoder's unexpected EOF would hide the real cause.
+	if info, err := f.Stat(); err == nil && info.Size() > claudeAccountMaxBytes {
+		return nil, fmt.Errorf("%w: account file is %d bytes (limit %d)", errFileTooLarge, info.Size(), claudeAccountMaxBytes)
+	}
+	var acct claudeAccount
+	dec := json.NewDecoder(io.LimitReader(f, claudeAccountMaxBytes))
+	if err := dec.Decode(&acct); err != nil {
+		return nil, err
+	}
+	// Match json.Unmarshal's strictness: trailing data means a corrupt file, so
+	// the proof stays empty instead of trusting a partial parse.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("account file: trailing data")
+	}
+	return &acct, nil
+}
+
 // readClaudeSubscription proves the Claude Code subscription: the account must
 // bill by one of claudeSubscriptionBillingTypes and no metered override may be
 // configured, since an API key, Bedrock or Vertex bills every request outside
 // the subscription. The third result is true only when the account explicitly
 // disables extra usage, which pins a completed request's marginal cost at $0.
-func readClaudeSubscription() (bool, time.Time, bool) {
+func readClaudeSubscription() (bool, time.Time, bool, error) {
 	if claudeMeteredOverride() {
-		return false, time.Time{}, false
+		return false, time.Time{}, false, nil
 	}
 	path, ok := claudeAccountFile()
 	if !ok {
-		return false, time.Time{}, false
+		return false, time.Time{}, false, nil
 	}
-	var acct claudeAccount
-	if readJSON(path, &acct) != nil || acct.OAuthAccount == nil {
-		return false, time.Time{}, false
+	acct, err := readClaudeAccount(path)
+	if err != nil {
+		// A machine that never signed in is not an anomaly worth a warning.
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil
+		}
+		return false, time.Time{}, false, err
 	}
-	return claudeAccountProof(acct.OAuthAccount)
+	if acct.OAuthAccount == nil {
+		return false, time.Time{}, false, nil
+	}
+	claude, since, allowanceOnly := claudeAccountProof(acct.OAuthAccount)
+	return claude, since, allowanceOnly, nil
 }
 
 // claudeAccountProof decides one account record's coverage. An absent
@@ -309,17 +361,21 @@ func claudeParentsMetered(root string) bool {
 
 // managedSettingsPaths lists every enterprise managed-settings.json location
 // Claude Code reads. All OS variants are checked on every platform (no GOOS
-// gate) so one binary stays fail-safe everywhere. WTM_MANAGED_SETTINGS replaces
-// the OS list when set, so sandboxed tests never read a real machine's file.
+// gate) so one binary stays fail-safe everywhere. A non-empty
+// WTM_MANAGED_SETTINGS replaces the OS list, so sandboxed tests never read a
+// real machine's file; an empty value or an all-empty list means "use the
+// defaults", so a stray empty variable cannot hide an enterprise override.
 func managedSettingsPaths() []string {
-	if raw, ok := os.LookupEnv("WTM_MANAGED_SETTINGS"); ok {
+	if raw := os.Getenv("WTM_MANAGED_SETTINGS"); raw != "" {
 		var paths []string
 		for _, p := range filepath.SplitList(raw) {
 			if p != "" {
 				paths = append(paths, p)
 			}
 		}
-		return paths
+		if len(paths) > 0 {
+			return paths
+		}
 	}
 	return defaultManagedSettingsPaths()
 }

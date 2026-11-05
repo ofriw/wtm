@@ -3,8 +3,11 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +34,7 @@ func piUsageWorktree(t *testing.T, sessions ...string) worktreeUsage {
 		writeFile(t, path, body, 0o644)
 		refs = append(refs, sessionRef{path: path, harness: piAgent.name})
 	}
-	u, err := buildUsage(dir, sessionIndex{canonical(dir): refs}, nil, loadSubscriptions())
+	u, err := buildUsage(dir, sessionIndex{canonical(dir): refs}, nil, loadSubscriptions(false))
 	if err != nil {
 		t.Fatalf("buildUsage: %v", err)
 	}
@@ -95,7 +98,7 @@ func claudeUsageWorktree(t *testing.T) worktreeUsage {
 // buildClaudeUsage folds a seeded Claude worktree through the run's proof.
 func buildClaudeUsage(t *testing.T, dir string, idx sessionIndex) worktreeUsage {
 	t.Helper()
-	u, err := buildUsage(dir, idx, testRates(t), loadSubscriptions())
+	u, err := buildUsage(dir, idx, testRates(t), loadSubscriptions(true))
 	if err != nil {
 		t.Fatalf("buildUsage: %v", err)
 	}
@@ -780,7 +783,7 @@ func TestSubscriptionClaudeWorktreeSettingsIsolation(t *testing.T) {
 	base := t.TempDir()
 	dirty := filepath.Join(base, "dirty")
 	writeFile(t, filepath.Join(dirty, claudeSettingsFile), `{"apiKeyHelper":"/bin/fetch"}`, 0o600)
-	subs := loadSubscriptions()
+	subs := loadSubscriptions(true)
 	if !subs.claude {
 		t.Fatal("the account proof must load before scoping")
 	}
@@ -964,7 +967,7 @@ func TestSubscriptionClaudeZeroTokenStaysExact(t *testing.T) {
 		claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "true"))
 	dir := t.TempDir()
 	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{}`))
-	u, err := buildUsage(dir, idx, testRates(t), loadSubscriptions())
+	u, err := buildUsage(dir, idx, testRates(t), loadSubscriptions(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1037,7 +1040,7 @@ func TestSubscriptionOverageUnknownListShape(t *testing.T) {
 		claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "true"))
 	dir := t.TempDir()
 	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{"input_tokens":100000}`))
-	u, err := buildUsage(dir, idx, nil, loadSubscriptions())
+	u, err := buildUsage(dir, idx, nil, loadSubscriptions(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1073,7 +1076,7 @@ func TestSubscriptionOverageWebSearchOnlyIsEstimated(t *testing.T) {
 	dir := t.TempDir()
 	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name,
 		claudeUsageLine(`{"server_tool_use":{"web_search_requests":2}}`))
-	u, err := buildUsage(dir, idx, nil, loadSubscriptions())
+	u, err := buildUsage(dir, idx, nil, loadSubscriptions(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1092,14 +1095,107 @@ func TestParentScopeKillSwitchWarnsOncePerRun(t *testing.T) {
 	sandbox(t)
 	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
 	t.Setenv("WTM_CLAUDE_PARENT_SCOPE", "0")
-	if subs := loadSubscriptions(); !subs.claude {
+	if subs := loadSubscriptions(true); !subs.claude {
 		t.Fatal("fixture must seed a proven Claude subscription")
 	}
-	var ws workspace
+	dir, idx := claudeWorktreeDir(t)
+	ratesPath := filepath.Join(t.TempDir(), "rates.json")
+	writeFile(t, ratesPath, testCatalog, 0o644)
+	t.Setenv(ratesEnv, ratesPath)
+	ws := workspace{wts: []worktree{{Path: dir}}, idx: idx}
 	for run := 1; run <= 2; run++ {
 		errOut := captureStderr(t, func() { ws.loadUsage(nil) })
 		if got := strings.Count(errOut, "WTM_CLAUDE_PARENT_SCOPE=0"); got != 1 {
 			t.Fatalf("run %d warnings = %d, want exactly 1 per run:\n%s", run, got, errOut)
 		}
+	}
+}
+
+// TestClaudeAccountLargeHistoryProves pins the streaming read: a multi-MB
+// history field ahead of oauthAccount must not void the proof.
+func TestClaudeAccountLargeHistoryProves(t *testing.T) {
+	sandbox(t)
+	history := strings.Repeat("x", 4<<20)
+	body := fmt.Sprintf(`{"projects":{"p":{"history":[%q]}},"oauthAccount":{"billingType":"stripe_subscription","subscriptionCreatedAt":"2020-01-01T00:00:00Z","hasExtraUsageEnabled":false}}`, history)
+	writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"), body)
+	subs := loadSubscriptions(true)
+	if !subs.claude {
+		t.Fatal("a large history field must not void the proof")
+	}
+	if want := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC); !subs.since.Equal(want) {
+		t.Fatalf("since = %v, want %v", subs.since, want)
+	}
+}
+
+// TestClaudeAccountOversizedWarns pins the size failure: a capped read must not
+// read as a corrupt file, because a silent list-price fallback hides its cause.
+func TestClaudeAccountOversizedWarns(t *testing.T) {
+	sandbox(t)
+	path := filepath.Join(claudeAgent.configDir(), ".claude.json")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := f.Truncate(claudeAccountMaxBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	subs := loadSubscriptions(true)
+	if subs.claude || !errors.Is(subs.claudeErr, errFileTooLarge) {
+		t.Fatalf("proof = %v, err = %v; want no proof and errFileTooLarge", subs.claude, subs.claudeErr)
+	}
+	dir, idx := claudeWorktreeDir(t)
+	ratesPath := filepath.Join(t.TempDir(), "rates.json")
+	writeFile(t, ratesPath, testCatalog, 0o644)
+	t.Setenv(ratesEnv, ratesPath)
+	ws := workspace{wts: []worktree{{Path: dir}}, idx: idx}
+	errOut := captureStderr(t, func() { ws.loadUsage(nil) })
+	if !strings.Contains(errOut, "67108865") || !strings.Contains(errOut, "list price") {
+		t.Fatalf("warning must name the size and the list-price fallback:\n%s", errOut)
+	}
+}
+
+// TestClaudeAccountTrailingDataStaysUnproven pins strict decoding: a valid
+// object followed by garbage is a corrupt file, not a proof.
+func TestClaudeAccountTrailingDataStaysUnproven(t *testing.T) {
+	sandbox(t)
+	writeClaudeAccountAt(t, filepath.Join(claudeAgent.configDir(), ".claude.json"),
+		claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "false")+" trailing")
+	if loadSubscriptions(true).claude {
+		t.Fatal("trailing data must not prove the subscription")
+	}
+}
+
+// TestLoadSubscriptionsSkipsUnusedClaude pins the gated read: a Pi-only run must
+// not let a Claude account file prove anything, while the Pi proof still loads.
+func TestLoadSubscriptionsSkipsUnusedClaude(t *testing.T) {
+	sandbox(t)
+	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+	writeAuthJSON(t, `{"anthropic":{"type":"oauth"}}`)
+	subs := loadSubscriptions(false)
+	if subs.claude || subs.managed {
+		t.Fatal("a Pi-only run must not read the Claude account or its managed verdict")
+	}
+	if !subs.piOAuth["anthropic"] {
+		t.Fatal("the Pi credential proof must still load")
+	}
+	if !loadSubscriptions(true).claude {
+		t.Fatal("the same fixture must prove when Claude is used")
+	}
+}
+
+// TestManagedSettingsPathsEmptyMeansDefault pins the override grammar: an empty
+// value or an all-empty list cannot disable the enterprise check.
+func TestManagedSettingsPathsEmptyMeansDefault(t *testing.T) {
+	for _, raw := range []string{"", string(os.PathListSeparator)} {
+		t.Setenv("WTM_MANAGED_SETTINGS", raw)
+		if got, want := managedSettingsPaths(), defaultManagedSettingsPaths(); !slices.Equal(got, want) {
+			t.Errorf("value %q: paths = %v, want defaults %v", raw, got, want)
+		}
+	}
+	explicit := filepath.Join(t.TempDir(), "managed.json")
+	t.Setenv("WTM_MANAGED_SETTINGS", explicit)
+	if got := managedSettingsPaths(); len(got) != 1 || got[0] != explicit {
+		t.Errorf("paths = %v, want [%s]", got, explicit)
 	}
 }

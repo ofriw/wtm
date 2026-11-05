@@ -127,20 +127,25 @@ func warnCreatedAtEnv() {
 	}
 }
 
-// loadUsage attaches every worktree's cost/active-time summary. The catalog is
-// loaded only when the repo owns a Claude session, so a Pi-only repo never
-// reaches the network. An unreadable session degrades to a warning: status is
-// read-only and must still report what it knows.
+// loadUsage attaches every worktree's cost/active-time summary. The harness
+// check runs once: a Pi-only repo never reaches the network and never opens
+// Claude Code's account file. An unreadable session degrades to a warning:
+// status is read-only and must still report what it knows.
 func (ws *workspace) loadUsage(p *progress) {
-	subs := loadSubscriptions()
+	hasClaude := ws.idx.hasHarness(ws.wts, claudeAgent.name)
+	subs := loadSubscriptions(hasClaude)
+	// An unread account keeps list price; silence would overstate the bill.
+	if subs.claudeErr != nil {
+		warnProgress(p, "claude subscription unproven: %s; claude costs use list price", subs.claudeErr)
+	}
 	warnParentScopeDisabled(subs, p)
-	ws.parseUsage(ws.loadCatalog(p), subs, p)
+	ws.parseUsage(ws.loadCatalog(p, hasClaude), subs, p)
 }
 
 // loadCatalog resolves the price catalog, naming its source in the progress
 // label so a network wait reads as work, not as a hang.
-func (ws *workspace) loadCatalog(p *progress) catalog {
-	if !ws.idx.hasHarness(ws.wts, claudeAgent.name) {
+func (ws *workspace) loadCatalog(p *progress, hasClaude bool) catalog {
+	if !hasClaude {
 		return nil
 	}
 	p.phase("loading rate catalog", 0)
