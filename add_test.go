@@ -12,8 +12,9 @@ import (
 	"time"
 )
 
-// add_test.go — Tier-1 contracts for add.go. Every fixture passes --no-index
-// (or addOptions.noIndex) so runIndex never shells out to chunkhound.
+// add_test.go — Tier-1 contracts for add.go. Fixtures that exercise indexing
+// install a stub chunkhound on PATH; the rest skip it with --no-index so
+// runIndex never reaches a real provider.
 
 func addTestRepo(t *testing.T) string {
 	t.Helper()
@@ -344,7 +345,11 @@ func TestAddAttachStaleOnlyWhenSkippedWithCopiedIndex(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			stubChunkHound(t)
+			// --no-index never runs the indexer, so only a refreshed case needs
+			// the stub. Other cases prove the flag without any indexer on PATH.
+			if !tc.noIndex {
+				stubChunkHound(t)
+			}
 
 			args := []string{"feature/attach"}
 			if tc.noIndex {
