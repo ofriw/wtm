@@ -368,6 +368,9 @@ func TestAddAttachStaleOnlyWhenSkippedWithCopiedIndex(t *testing.T) {
 			if strings.Contains(errOut, "no worktree checked out") {
 				t.Fatalf("attach must not use the create-path wording, got %q", errOut)
 			}
+			if tc.noIndex && strings.Contains(errOut, "chunkhound not on PATH") {
+				t.Fatalf("--no-index must not consult the indexer, got %q", errOut)
+			}
 			if got := strings.Contains(errOut, "index is stale"); got != tc.wantStale {
 				t.Fatalf("stale claim = %v, want %v; stderr %q", got, tc.wantStale, errOut)
 			}
