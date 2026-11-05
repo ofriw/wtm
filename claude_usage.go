@@ -87,16 +87,14 @@ func claudeUsageEvents(r *bufio.Reader) (sessionParse, error) {
 
 func (p *sessionParse) sortClaude() {
 	sortUsageEvents(p.events)
-	sort.SliceStable(p.activity, func(i, j int) bool { return p.activity[i].at.Before(p.activity[j].at) })
+	sortActivity(p.activity)
 }
 
 // consumeClaudeLine folds one record: a billed assistant drives cost, and any
 // user/assistant record drives the turn state.
 func (p *sessionParse) consumeClaudeLine(line []byte, oversized bool, prefix []byte) {
 	if oversized {
-		if oversizedClaudeBillable(prefix) {
-			p.dropped++
-		}
+		p.consumeOversizedClaude(prefix)
 		return
 	}
 	if len(line) == 0 {
@@ -108,25 +106,45 @@ func (p *sessionParse) consumeClaudeLine(line []byte, oversized bool, prefix []b
 	case !ok && bytes.Contains(line, usageKey):
 		p.dropped++
 	case ok && t == "assistant" && bytes.Contains(line, usageKey):
-		var rec claudeUsageRecord
-		if json.Unmarshal(line, &rec) != nil {
-			p.dropped++
-			return
-		}
-		if e, ok := claudeEvent(&rec, &p.dropped); ok {
-			p.events = append(p.events, e)
-		}
-		if a, ok := claudeActivityFromUsage(&rec); ok {
-			p.activity = append(p.activity, a)
-		}
+		p.consumeClaudeBilled(line)
 	case ok && (t == "user" || t == "assistant"):
-		var rec claudeActivityRecord
-		if json.Unmarshal(line, &rec) != nil {
-			return
-		}
-		if a, ok := claudeActivityFromRecord(&rec); ok {
-			p.activity = append(p.activity, a)
-		}
+		p.consumeClaudeActivity(line)
+	}
+}
+
+// consumeOversizedClaude counts a discarded record only when it could have
+// billed.
+func (p *sessionParse) consumeOversizedClaude(prefix []byte) {
+	if oversizedClaudeBillable(prefix) {
+		p.dropped++
+	}
+}
+
+// consumeClaudeBilled folds one assistant record carrying usage: the priced
+// event and the turn activity share the record identity.
+func (p *sessionParse) consumeClaudeBilled(line []byte) {
+	var rec claudeUsageRecord
+	if json.Unmarshal(line, &rec) != nil {
+		p.dropped++
+		return
+	}
+	if e, ok := claudeEvent(&rec, &p.dropped); ok {
+		p.events = append(p.events, e)
+	}
+	if a, ok := claudeActivityFromUsage(&rec); ok {
+		p.activity = append(p.activity, a)
+	}
+}
+
+// consumeClaudeActivity folds one usage-less user or assistant record into the
+// turn state.
+func (p *sessionParse) consumeClaudeActivity(line []byte) {
+	var rec claudeActivityRecord
+	if json.Unmarshal(line, &rec) != nil {
+		return
+	}
+	if a, ok := claudeActivityFromRecord(&rec); ok {
+		p.activity = append(p.activity, a)
 	}
 }
 

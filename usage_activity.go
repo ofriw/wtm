@@ -42,50 +42,69 @@ type activityEvent struct {
 	kind activityKind
 }
 
+// sortActivity orders turn markers by time. Stable, so records at the same
+// instant keep file order.
+func sortActivity(events []activityEvent) {
+	sort.SliceStable(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
+}
+
+// turnState tracks one session's open turn. A human prompt while a turn is open
+// closes the previous turn at its last work record, which keeps a missing
+// end_turn from counting the user's idle time.
+type turnState struct {
+	blocks []span
+	open   bool
+	start  time.Time
+	last   time.Time
+}
+
+func (s *turnState) closeAt(end time.Time) {
+	if end.After(s.start) {
+		s.blocks = append(s.blocks, span{start: s.start, end: end})
+	}
+	s.open = false
+}
+
+func (s *turnState) openAt(at time.Time) { s.open, s.start, s.last = true, at, at }
+
+func (s *turnState) apply(e activityEvent) {
+	switch e.kind {
+	case activityHuman:
+		if s.open {
+			s.closeAt(s.last)
+		}
+		s.openAt(e.at)
+	case activityWork:
+		if s.open {
+			s.last = maxTime(s.last, e.at)
+			return
+		}
+		s.openAt(e.at)
+	case activityEnd:
+		if s.open {
+			s.last = maxTime(s.last, e.at)
+			s.closeAt(s.last)
+		}
+	}
+}
+
 // sessionBlocks reconstructs the agent turns in one session. Records are sorted
-// by time so file order cannot open or close a turn out of sequence. A human
-// prompt while a turn is open closes the previous turn at its last work record,
-// which keeps a missing end_turn from counting the user's idle time. EOF closes
-// at the last work record for the same reason.
+// by time so file order cannot open or close a turn out of sequence. EOF closes
+// at the last work record, so trailing idle never counts.
 func sessionBlocks(events []activityEvent) []span {
 	if len(events) == 0 {
 		return nil
 	}
 	sorted := slices.Clone(events)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].at.Before(sorted[j].at) })
-	var blocks []span
-	open, start, last := false, time.Time{}, time.Time{}
-	closeAt := func(end time.Time) {
-		if end.After(start) {
-			blocks = append(blocks, span{start: start, end: end})
-		}
-		open = false
-	}
+	sortActivity(sorted)
+	var st turnState
 	for _, e := range sorted {
-		switch e.kind {
-		case activityHuman:
-			if open {
-				closeAt(last)
-			}
-			open, start, last = true, e.at, e.at
-		case activityWork:
-			if !open {
-				open, start, last = true, e.at, e.at
-				continue
-			}
-			last = maxTime(last, e.at)
-		case activityEnd:
-			if !open {
-				continue
-			}
-			last = maxTime(last, e.at)
-			closeAt(last)
-		}
+		st.apply(e)
 	}
-	if open {
-		closeAt(last)
+	if st.open {
+		st.closeAt(st.last)
 	}
-	return blocks
+	return st.blocks
 }
 
 // activityFromEvents is the fallback for a caller that has usage events but no

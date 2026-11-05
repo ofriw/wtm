@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
 	"time"
 )
 
@@ -148,7 +147,7 @@ func piUsageEvents(r *bufio.Reader) (sessionParse, error) {
 }
 
 func (s *piParseState) result() sessionParse {
-	sort.SliceStable(s.activity, func(i, j int) bool { return s.activity[i].at.Before(s.activity[j].at) })
+	sortActivity(s.activity)
 	return sessionParse{events: s.events, activity: s.activity, dropped: s.dropped}
 }
 
@@ -170,9 +169,7 @@ type piParseState struct {
 // total.
 func (s *piParseState) consume(line []byte, oversized bool, prefix []byte) {
 	if oversized {
-		if oversizedPiBillable(prefix) {
-			s.dropped++
-		}
+		s.consumeOversized(prefix)
 		return
 	}
 	if len(line) == 0 {
@@ -184,6 +181,19 @@ func (s *piParseState) consume(line []byte, oversized bool, prefix []byte) {
 		}
 		return
 	}
+	s.consumePiRecord(line)
+}
+
+// consumeOversized counts a discarded line only when it could have billed.
+func (s *piParseState) consumeOversized(prefix []byte) {
+	if oversizedPiBillable(prefix) {
+		s.dropped++
+	}
+}
+
+// consumePiRecord folds one interesting line into priced events and turn
+// activity.
+func (s *piParseState) consumePiRecord(line []byte) {
 	var rec piUsageRecord
 	if json.Unmarshal(line, &rec) != nil {
 		s.dropped++
@@ -225,21 +235,26 @@ func oversizedPiBillable(prefix []byte) bool {
 	case "usage", "compaction", "branch_summary":
 		return true
 	case "message":
-		if bytes.Contains(prefix, []byte(`"role":"user"`)) {
-			return false
-		}
-		if bytes.Contains(prefix, []byte(`"role":"assistant"`)) ||
-			bytes.Contains(prefix, []byte(`"toolName":"spawn"`)) ||
-			bytes.Contains(prefix, usageKey) || bytes.Contains(prefix, piDetailsKey) ||
-			bytes.Contains(prefix, piStatsKey) {
-			return true
-		}
-		// Missing role/name is unknown; only a visible non-spawn tool result is free.
-		return !bytes.Contains(prefix, []byte(`"role":"toolResult"`)) ||
-			!bytes.Contains(prefix, []byte(`"toolName":"`))
+		return oversizedPiMessageBillable(prefix)
 	default:
 		return false
 	}
+}
+
+// oversizedPiMessageBillable decides one oversized message record. Missing
+// role/name is unknown; only a visible non-spawn tool result is free.
+func oversizedPiMessageBillable(prefix []byte) bool {
+	if bytes.Contains(prefix, []byte(`"role":"user"`)) {
+		return false
+	}
+	if bytes.Contains(prefix, []byte(`"role":"assistant"`)) ||
+		bytes.Contains(prefix, []byte(`"toolName":"spawn"`)) ||
+		bytes.Contains(prefix, usageKey) || bytes.Contains(prefix, piDetailsKey) ||
+		bytes.Contains(prefix, piStatsKey) {
+		return true
+	}
+	return !bytes.Contains(prefix, []byte(`"role":"toolResult"`)) ||
+		!bytes.Contains(prefix, []byte(`"toolName":"`))
 }
 
 // piActivityFromRecord maps a fully decoded record to its turn state. Only
