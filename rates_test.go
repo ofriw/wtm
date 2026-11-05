@@ -226,6 +226,31 @@ func TestLoadCatalogUnreadableOverride(t *testing.T) {
 	}
 }
 
+// TestLocalCatalogTooLargeFails pins the local bound: an oversized pinned
+// catalog reports a size error, not a parse failure or a missing file.
+func TestLocalCatalogTooLargeFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rates.json")
+	writeFile(t, path, strings.Repeat("x", ratesMaxBytes+1), 0o644)
+	t.Setenv(ratesEnv, path)
+	if _, err := loadCatalog(); !errors.Is(err, errRateCatalogTooLarge) {
+		t.Fatalf("err = %v, want errRateCatalogTooLarge", err)
+	}
+}
+
+// TestFreshCacheTooLargeIsRefused pins the same bound on the cache route: a
+// corrupt fresh cache cannot be served and cannot OOM the run.
+func TestFreshCacheTooLargeIsRefused(t *testing.T) {
+	t.Setenv("WTM_NOW", "")
+	path := filepath.Join(t.TempDir(), "rates.json")
+	writeFile(t, path, strings.Repeat("x", ratesMaxBytes+1), 0o644)
+	if _, ok := readFreshCache(path); ok {
+		t.Fatal("an oversized fresh cache must not be served")
+	}
+	if _, err := parseCatalogFile(path); !errors.Is(err, errRateCatalogTooLarge) {
+		t.Fatalf("parseCatalogFile err = %v, want errRateCatalogTooLarge", err)
+	}
+}
+
 func TestCacheFreshness(t *testing.T) {
 	pinned := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 	t.Setenv("WTM_NOW", pinned.Format(time.RFC3339))

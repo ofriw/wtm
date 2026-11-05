@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -193,6 +194,10 @@ func readFileShared(path string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
+// errFileTooLarge marks a readFileLimited overflow, so callers map it to their
+// own size error without matching text.
+var errFileTooLarge = errors.New("file exceeds size limit")
+
 // readFileLimited reads at most limit bytes and reports overflow. Small
 // control files use it so a corrupted or hostile file cannot exhaust memory.
 func readFileLimited(path string, limit int64) ([]byte, error) {
@@ -206,7 +211,7 @@ func readFileLimited(path string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%s exceeds %d bytes", path, limit)
+		return nil, fmt.Errorf("%w: %s exceeds %d bytes", errFileTooLarge, path, limit)
 	}
 	return data, nil
 }

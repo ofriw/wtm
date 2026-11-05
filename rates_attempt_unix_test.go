@@ -3,8 +3,10 @@
 package main
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,5 +59,25 @@ func TestFetchCoolingDownRejectsFIFOMarker(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("fetchCoolingDown blocked on a FIFO marker")
+	}
+}
+
+// TestMarkerWriteFailureWarns pins the disclosure: when neither marker location
+// can be written, the run still reports the fetch failure and names the failed
+// cooldown, so the operator can see why later runs stall.
+func TestMarkerWriteFailureWarns(t *testing.T) {
+	_, _ = blockRatesCacheWrite(t, true)
+	// Point TMPDIR at a regular file, so the fallback directory cannot exist.
+	tmp := filepath.Join(t.TempDir(), "tmpdir-file")
+	writeFile(t, tmp, "x", 0o644)
+	t.Setenv("TMPDIR", tmp)
+	url := serveRates(t, http.StatusInternalServerError, "")
+	var loadErr error
+	errOut := captureStderr(t, func() { _, loadErr = loadCatalogFrom(url) })
+	if loadErr == nil {
+		t.Fatal("a failed fetch with no cache must report an error")
+	}
+	if !strings.Contains(errOut, "rate cooldown marker write failed") {
+		t.Fatalf("stderr must disclose the marker failure:\n%s", errOut)
 	}
 }

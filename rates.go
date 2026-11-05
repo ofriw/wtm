@@ -36,10 +36,10 @@ const (
 	// write failure does not start a cooldown: the next run can still fetch and
 	// price, so a broken cache never hides a working network.
 	ratesRetryCooldown = 15 * time.Minute
-	// ratesMaxBytes bounds the network catalog read. The real catalog is a few
-	// MB; a larger body is a wrong endpoint or a hostile response, and parsing a
-	// truncated catalog would silently drop models. The cap+1 read lets the
-	// loader detect the overflow without buffering an unbounded body.
+	// ratesMaxBytes bounds every catalog body read, network and local. The real
+	// catalog is a few MB; a larger body is a wrong endpoint or a hostile file,
+	// and parsing a truncated catalog would silently drop models. The cap+1 read
+	// lets the loader detect the overflow without buffering an unbounded body.
 	ratesMaxBytes = 16 << 20
 	// maxAttemptMarkerBytes bounds a cooldown marker read. A marker is a tiny
 	// JSON object; a larger file is corruption, not a cause worth reading.
@@ -456,33 +456,44 @@ func loadCatalogFromNotify(url string, p *progress) (catalog, error) {
 }
 
 // loadFromCachePath resolves a fresh cache, then a fetch, then the stale cache
-// as the last resort. When the refresh fails, now or inside a cooldown, and no
-// fallback catalog exists, the recorded cause is returned: it names the real
-// failure (status, size, network), where the missing cache would only report
-// ENOENT.
+// as the last resort.
 func loadFromCachePath(path, url string, p *progress) (catalog, error) {
 	if c, ok := readFreshCache(path); ok {
 		p.detail(string(catalogCache))
 		return c, nil
 	}
-	// A failed fetch starts a cooldown to avoid repeated stalls. The stale cache
-	// still serves as the fallback.
-	var fetchErr error
-	if cooling, cause := fetchCoolingDown(path); cooling {
-		fetchErr = cause
-		if !errors.Is(cause, errRateCatalogCoolingDown) {
-			fetchErr = fmt.Errorf("%w: %w", errRateCatalogCoolingDown, cause)
-		}
-	} else {
-		p.detail(string(catalogFetching))
-		if c, err := fetchAndCache(path, url, p); err == nil {
-			p.detail(string(catalogFetched))
-			return c, nil
-		} else {
-			fetchErr = err
-		}
-		_ = markFetchAttempt(path, fetchErr)
+	c, fetchErr := tryFetch(path, url, p)
+	if fetchErr == nil {
+		return c, nil
 	}
+	return staleCatalog(path, p, fetchErr)
+}
+
+// tryFetch refreshes the cache or reports why it could not. A failed fetch
+// starts a cooldown to avoid repeated stalls.
+func tryFetch(path, url string, p *progress) (catalog, error) {
+	if cooling, cause := fetchCoolingDown(path); cooling {
+		if errors.Is(cause, errRateCatalogCoolingDown) {
+			return nil, cause
+		}
+		return nil, fmt.Errorf("%w: %w", errRateCatalogCoolingDown, cause)
+	}
+	p.detail(string(catalogFetching))
+	c, err := fetchAndCache(path, url, p)
+	if err == nil {
+		p.detail(string(catalogFetched))
+		return c, nil
+	}
+	if markErr := markFetchAttempt(path, err); markErr != nil {
+		warnProgress(p, "rate cooldown marker write failed: %s; the next run may retry the fetch", markErr)
+	}
+	return nil, err
+}
+
+// staleCatalog serves the last good catalog when the refresh failed. The fetch
+// cause wins over the read error: it names the real failure (status, size,
+// network), where a missing cache would only report ENOENT.
+func staleCatalog(path string, p *progress, fetchErr error) (catalog, error) {
 	c, err := parseCatalogFile(path)
 	if err == nil {
 		p.detail(string(catalogStale))
@@ -578,10 +589,12 @@ func sanitizeAttemptMessage(s string) string {
 }
 
 // markFetchAttempt records a fetch failure and its cause. A marker-write
-// failure must not prevent pricing, so callers ignore the error. When the cache
-// directory is unwritable (a file named .wtm, a read-only home), a marker in the
-// fallback directory still arms the cooldown after ensureFallbackDir validates
-// the directory.
+// failure must not prevent pricing, so the caller continues; it must disclose
+// the error, because without a marker every later run retries the fetch and
+// waits out the timeout with no named cause. When the cache directory is
+// unwritable (a file named .wtm, a read-only home), a marker in the fallback
+// directory still arms the cooldown after ensureFallbackDir validates the
+// directory.
 func markFetchAttempt(path string, cause error) error {
 	rec := rateAttemptRecord{Message: cause.Error(), TooLarge: errors.Is(cause, errRateCatalogTooLarge)}
 	data, err := json.Marshal(rec)
@@ -705,11 +718,16 @@ func ratesCachePath() (string, error) {
 	return filepath.Join(home, ".wtm", "rates.json"), nil
 }
 
-// parseCatalogFile reads through readFileShared: on Windows a plain os.Open
-// handle blocks a concurrent writeFileAtomic replace, so the refresh would be
-// silently dropped (open_windows.go, rename_windows.go).
+// parseCatalogFile reads through readFileLimited: the cap stops a corrupt or
+// hostile file from exhausting memory, and openShared keeps the Windows
+// atomic-replace behavior (open_windows.go, rename_windows.go).
 func parseCatalogFile(path string) (catalog, error) {
-	data, err := readFileShared(path)
+	data, err := readFileLimited(path, ratesMaxBytes)
+	if errors.Is(err, errFileTooLarge) {
+		// Keep a size failure distinct from a parse failure, so the caller and
+		// the cooldown marker can name the real cause.
+		return nil, fmt.Errorf("%w: %w", errRateCatalogTooLarge, err)
+	}
 	if err != nil {
 		return nil, err
 	}
