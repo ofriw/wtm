@@ -62,7 +62,7 @@ func bindAddFlags(fs *flag.FlagSet, o *addOptions) {
 	fs.StringVar(&o.path, "p", "", "worktree directory (default: sibling of the current worktree)")
 	fs.StringVar(&o.path, "path", "", "alias of -p")
 	fs.StringVar(&o.from, "from", "", "source worktree to seed from (default: for a new branch with no start-point, a usable default-branch worktree; else the worktree at the start-point, or the main worktree)")
-	fs.BoolVar(&o.noIndex, "no-index", false, "skip `chunkhound index` after seeding (also skipped when chunkhound is absent)")
+	fs.BoolVar(&o.noIndex, "no-index", false, "skip chunkhound index after seeding (also skipped when chunkhound is absent)")
 	fs.BoolVar(&o.temp, "temp", false, "ephemeral worktree on a tmp/ branch that gc reclaims once idle")
 	fs.StringVar(&o.ttl, "ttl", "", "temp idle window (e.g. 30m, 1h, 7d); implies --temp; temp defaults to 1h")
 }
