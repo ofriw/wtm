@@ -272,7 +272,7 @@ func TestAddStartPointWithoutWorktreeWarns(t *testing.T) {
 	if res.Source != canonical(repo) {
 		t.Fatalf("source = %q, want main worktree fallback %q", res.Source, canonical(repo))
 	}
-	if !strings.Contains(errOut, "no worktree checked out at refs/heads/topic") {
+	if !strings.Contains(errOut, "no usable worktree for refs/heads/topic") {
 		t.Fatalf("fallback must be disclosed, got stderr %q", errOut)
 	}
 	if strings.Contains(errOut, "re-embed") || strings.Contains(errOut, "cannot match") {
@@ -296,7 +296,7 @@ func TestAddAttachFallbackWarnsWithoutReembed(t *testing.T) {
 	if !strings.Contains(errOut, "branch refs/heads/feature/attach is not checked out") {
 		t.Fatalf("attach fallback must name the branch ref, got %q", errOut)
 	}
-	if strings.Contains(errOut, "no worktree checked out") {
+	if strings.Contains(errOut, "no usable worktree") {
 		t.Fatalf("attach must not use the create-path wording, got %q", errOut)
 	}
 	if strings.Contains(errOut, "re-embed") || strings.Contains(errOut, "cannot match") {
@@ -365,7 +365,7 @@ func TestAddAttachStaleOnlyWhenSkippedWithCopiedIndex(t *testing.T) {
 			if !strings.Contains(errOut, "branch refs/heads/feature/attach is not checked out") {
 				t.Fatalf("attach fallback must name the branch ref, got %q", errOut)
 			}
-			if strings.Contains(errOut, "no worktree checked out") {
+			if strings.Contains(errOut, "no usable worktree") {
 				t.Fatalf("attach must not use the create-path wording, got %q", errOut)
 			}
 			if tc.noIndex && strings.Contains(errOut, "chunkhound not on PATH") {
@@ -386,7 +386,7 @@ func TestAddAttachStaleOnlyWhenSkippedWithCopiedIndex(t *testing.T) {
 // over a copied index claims staleness.
 func TestWarnSeedSourceText(t *testing.T) {
 	src := t.TempDir()
-	fallback := "no worktree checked out at refs/heads/x; seeding from " + canonical(src)
+	fallback := "no usable worktree for refs/heads/x; seeding from " + canonical(src)
 	attach := "branch refs/heads/x is not checked out; seeding from " + canonical(src)
 	stale := "; the copied ChunkHound index is stale: indexing was skipped"
 	cases := []struct {
@@ -1040,7 +1040,7 @@ func addCapturingStderr(t *testing.T, repo string, args ...string) (addResult, s
 
 func assertSeedWarning(t *testing.T, errOut string, notice, stale bool) {
 	t.Helper()
-	gotNotice := strings.Contains(errOut, "seeding from") || strings.Contains(errOut, "no worktree checked out at")
+	gotNotice := strings.Contains(errOut, "seeding from") || strings.Contains(errOut, "no usable worktree for")
 	gotStale := strings.Contains(errOut, "copied ChunkHound index")
 	if gotNotice != notice || gotStale != stale {
 		t.Fatalf("seed warning = (notice %v, stale %v), want (%v, %v): %q", gotNotice, gotStale, notice, stale, errOut)
@@ -1144,7 +1144,7 @@ func TestAddDefaultSourceFollowsCheckedOutDefaultBranch(t *testing.T) {
 				}
 				res, errOut := addCapturingStderr(t, repo, args...)
 				assertAddSeed(t, res, "refs/heads/main", repo, `{"from":"central"}`)
-				if !strings.Contains(errOut, "no worktree checked out at refs/heads/main") {
+				if !strings.Contains(errOut, "no usable worktree for refs/heads/main") {
 					t.Fatalf("offline (locked %v) at start %q must be disclosed, not seeded: %q", lock, start, errOut)
 				}
 			}
@@ -1174,7 +1174,7 @@ func TestAddSkipsWorktreeWithoutGitLink(t *testing.T) {
 				}
 				res, errOut := addCapturingStderr(t, repo, args...)
 				assertAddSeed(t, res, "refs/heads/main", repo, `{"from":"central"}`)
-				if !strings.Contains(errOut, "no worktree checked out at refs/heads/main") {
+				if !strings.Contains(errOut, "no usable worktree for refs/heads/main") {
 					t.Fatalf("missing .git link (locked %v) at start %q must be disclosed, not seeded: %q", lock, start, errOut)
 				}
 			})

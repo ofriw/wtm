@@ -171,7 +171,7 @@ func seedNotice(root, src, base, branch string) string {
 		return ""
 	}
 	if branch == "" {
-		return fmt.Sprintf("no worktree checked out at %s; seeding from %s", base, src)
+		return fmt.Sprintf("no usable worktree for %s; seeding from %s", base, src)
 	}
 	return fmt.Sprintf("seeding from %s: default branch %s is checked out there, but the start-point is %s", src, branch, base)
 }
@@ -185,7 +185,9 @@ func seedable(w gworktree, target string) bool {
 		canonical(w.Path) != target
 }
 
-// defaultBranchWorktree returns the worktree that has branch checked out.
+// defaultBranchWorktree returns the first usable worktree that has branch
+// checked out. Entries arrive primary-first, then linked by path (git.go), so
+// the primary wins; otherwise the lowest path wins.
 func defaultBranchWorktree(wts []gworktree, branch, target string) (gworktree, bool) {
 	for _, w := range wts {
 		if w.Branch == branch && seedable(w, target) {
