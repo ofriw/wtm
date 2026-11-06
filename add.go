@@ -122,13 +122,14 @@ func warnIfChunkHoundExpected(path string) {
 }
 
 // seedSource is the worktree chosen for seeding, whether it is a fallback for
-// a start-point with no checkout, and the tree-difference notice. The notice is
-// empty when the source and base trees match; the warning is emitted after
-// indexing so it can also state the index outcome.
+// a start-point with no checkout, the tree-difference notice, and whether the
+// committed trees differ. The warning is emitted after indexing so it can also
+// state the index outcome.
 type seedSource struct {
 	path     string
 	fallback bool
 	note     string
+	differs  bool
 }
 
 // resolveAddSource picks the worktree to seed from. An explicit --from wins.
@@ -151,29 +152,35 @@ func resolveAddSource(root string, wts []gworktree, base, from, target, defaultN
 	if defaultName != "" {
 		if w, ok := defaultBranchWorktree(wts, defaultName, target); ok {
 			src := canonical(w.Path)
-			return seedSource{path: src, note: seedNotice(root, src, base, defaultName)}, nil
+			note, differs := seedNotice(root, src, base, defaultName)
+			return seedSource{path: src, note: note, differs: differs}, nil
 		}
 	}
 	if src, ok := worktreeAt(root, wts, base, target); ok {
 		return seedSource{path: src}, nil
 	}
 	src := canonical(root)
-	return seedSource{path: src, fallback: true, note: seedNotice(root, src, base, "")}, nil
+	note, differs := seedNotice(root, src, base, "")
+	return seedSource{path: src, fallback: true, note: note, differs: differs}, nil
 }
 
-// seedNotice returns why a differing seed tree does not match base; equal trees stay silent.
-func seedNotice(root, src, base, branch string) string {
+// seedNotice returns why a differing seed tree does not match base, and whether
+// the committed trees differ. Equal committed trees stay silent and report
+// differs=false, so no caller can claim staleness from wording. It compares
+// base^{tree} with the source HEAD^{tree}; live and ignored files are out of
+// scope because git cannot carry them between worktrees.
+func seedNotice(root, src, base, branch string) (string, bool) {
 	want, err := git(root, "rev-parse", "--verify", "--quiet", base+"^{tree}")
 	if err != nil {
-		return ""
+		return "", false
 	}
 	if got, err := git(src, "rev-parse", "--verify", "--quiet", "HEAD^{tree}"); err != nil || got == want {
-		return ""
+		return "", false
 	}
 	if branch == "" {
-		return fmt.Sprintf("no usable worktree for %s; seeding from %s", base, src)
+		return fmt.Sprintf("no usable worktree for %s; seeding from %s", base, src), true
 	}
-	return fmt.Sprintf("seeding from %s: default branch %s is checked out there, but the start-point is %s", src, branch, base)
+	return fmt.Sprintf("seeding from %s: default branch %s is checked out there, but the start-point is %s", src, branch, base), true
 }
 
 // seedable reports whether w can be a seed source: it needs a directory to copy
@@ -199,8 +206,9 @@ func defaultBranchWorktree(wts []gworktree, branch, target string) (gworktree, b
 
 // warnSeedSource discloses the real seed source. A missing checkout is normal
 // for attach, so the reason is phrased without implying a broken state. The
-// stale suffix is only valid when --no-index skipped a refresh over a copied
-// index; a missing db makes no claim, and a refreshed one already matches.
+// stale suffix needs a differing committed tree: --no-index over a copied index
+// is only stale relative to base when the trees differ. A missing db makes no
+// claim, and a refreshed one already matches.
 func warnSeedSource(source seedSource, base string, attach, noIndex, hadIndex bool) {
 	note := source.note
 	if attach && source.fallback {
@@ -209,7 +217,7 @@ func warnSeedSource(source seedSource, base string, attach, noIndex, hadIndex bo
 	if note == "" {
 		return
 	}
-	if noIndex && hadIndex {
+	if source.differs && noIndex && hadIndex {
 		note += "; the copied ChunkHound index is stale: indexing was skipped"
 	}
 	warnf("%s", note)

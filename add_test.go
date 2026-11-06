@@ -381,9 +381,35 @@ func TestAddAttachStaleOnlyWhenSkippedWithCopiedIndex(t *testing.T) {
 	}
 }
 
+// TestAddAttachEqualTreeDoesNotClaimStaleIndex pins the tree gate on attach: an
+// empty commit keeps the tree equal, so a copied index is still current even
+// when --no-index skipped a refresh.
+func TestAddAttachEqualTreeDoesNotClaimStaleIndex(t *testing.T) {
+	sandbox(t)
+	repo := addTestRepo(t)
+	tree := mustGit(t, repo, "rev-parse", "HEAD^{tree}")
+	empty := mustGit(t, repo, "commit-tree", tree, "-p", "HEAD", "-m", "empty")
+	mustGit(t, repo, "update-ref", "refs/heads/feature/equal", empty)
+	writeFile(t, chunkhoundDBPath(repo), "DB", 0o644)
+
+	var res addResult
+	errOut := captureStderr(t, func() {
+		res = addResultOf(t, &globals{root: repo}, "feature/equal", "--no-index")
+	})
+	if !res.Attached {
+		t.Fatalf("attach = %+v, want attached", res)
+	}
+	if !strings.Contains(errOut, "branch refs/heads/feature/equal is not checked out") {
+		t.Fatalf("attach fallback must name the branch ref, got %q", errOut)
+	}
+	if strings.Contains(errOut, "index is stale") {
+		t.Fatalf("equal trees must not claim a stale index, got %q", errOut)
+	}
+}
+
 // TestWarnSeedSourceText pins the one emitter's exact text: create fallback is
 // tree-gated, attach fallback keeps its own wording, and only a skipped refresh
-// over a copied index claims staleness.
+// over a differing tree claims staleness.
 func TestWarnSeedSourceText(t *testing.T) {
 	src := t.TempDir()
 	fallback := "no usable worktree for refs/heads/x; seeding from " + canonical(src)
@@ -397,14 +423,16 @@ func TestWarnSeedSourceText(t *testing.T) {
 		hadDB   bool
 		want    string
 	}{
-		{"create fallback", seedSource{path: src, fallback: true, note: fallback}, false, false, false, fallback},
+		{"create fallback", seedSource{path: src, fallback: true, note: fallback, differs: true}, false, false, false, fallback},
 		{"create fallback equal trees", seedSource{path: src, fallback: true}, false, false, false, ""},
-		{"default source", seedSource{path: src, note: "seeding from " + src}, false, false, false, "seeding from " + src},
+		{"default source", seedSource{path: src, note: "seeding from " + src, differs: true}, false, false, false, "seeding from " + src},
 		{"attach fallback", seedSource{path: src, fallback: true}, true, false, false, attach},
-		{"attach overrides tree note", seedSource{path: src, fallback: true, note: fallback}, true, false, false, attach},
-		{"create stale", seedSource{path: src, fallback: true, note: fallback}, false, true, true, fallback + stale},
-		{"refreshed index", seedSource{path: src, fallback: true, note: fallback}, false, false, true, fallback},
-		{"skipped without copied index", seedSource{path: src, fallback: true, note: fallback}, false, true, false, fallback},
+		{"attach overrides tree note", seedSource{path: src, fallback: true, note: fallback, differs: true}, true, false, false, attach},
+		{"attach equal trees skipped", seedSource{path: src, fallback: true}, true, true, true, attach},
+		{"attach differing trees skipped", seedSource{path: src, fallback: true, note: fallback, differs: true}, true, true, true, attach + stale},
+		{"create stale", seedSource{path: src, fallback: true, note: fallback, differs: true}, false, true, true, fallback + stale},
+		{"refreshed index", seedSource{path: src, fallback: true, note: fallback, differs: true}, false, false, true, fallback},
+		{"skipped without copied index", seedSource{path: src, fallback: true, note: fallback, differs: true}, false, true, false, fallback},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
