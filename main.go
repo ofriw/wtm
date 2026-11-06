@@ -44,6 +44,7 @@ type globals struct {
 	color    string
 	progress string
 	yes      bool
+	flags    map[string]bool // names registered here; subcommand help hides them
 }
 
 func (g *globals) register(fs *flag.FlagSet) {
@@ -54,6 +55,10 @@ func (g *globals) register(fs *flag.FlagSet) {
 	fs.StringVar(&g.color, "color", g.color, "color output: auto, always, never")
 	fs.StringVar(&g.progress, "progress", g.progress, "progress display: auto, always, never")
 	fs.BoolVar(&g.yes, "yes", g.yes, "never prompt")
+	// register runs before a subcommand binds its own flags, so every flag here
+	// is global. Deriving the set keeps the names in one place.
+	g.flags = map[string]bool{}
+	fs.VisitAll(func(f *flag.Flag) { g.flags[f.Name] = true })
 }
 
 // usageError maps to exit code 2.
@@ -153,13 +158,25 @@ func subFlags(name string, g *globals) *flag.FlagSet {
 	return fs
 }
 
-// printSubFlags shows a subcommand's flag descriptions. subFlags discards flag
-// output so parse errors stay quiet; -h must still expose the descriptions.
-func printSubFlags(fs *flag.FlagSet) {
+// printSubFlags shows a subcommand's own flag descriptions. The global block in
+// usage is their single printed home, so globals are filtered out here.
+func printSubFlags(fs *flag.FlagSet, g *globals) {
+	local := flag.NewFlagSet(fs.Name(), flag.ContinueOnError)
+	fs.VisitAll(func(f *flag.Flag) {
+		if g.flags[f.Name] {
+			return
+		}
+		local.Var(f.Value, f.Name, f.Usage)
+		local.Lookup(f.Name).DefValue = f.DefValue
+	})
+	count := 0
+	local.VisitAll(func(*flag.Flag) { count++ })
+	if count == 0 {
+		return
+	}
 	fmt.Printf("options for wtm %s:\n", fs.Name())
-	fs.SetOutput(os.Stdout)
-	fs.PrintDefaults()
-	fs.SetOutput(io.Discard)
+	local.SetOutput(os.Stdout)
+	local.PrintDefaults()
 }
 
 // parseSub parses subcommand arguments allowing flags and positionals to be
@@ -174,7 +191,7 @@ func parseSub(fs *flag.FlagSet, g *globals, args []string) ([]string, error) {
 	for {
 		if err := fs.Parse(args); err != nil {
 			if errors.Is(err, flag.ErrHelp) {
-				printSubFlags(fs)
+				printSubFlags(fs, g)
 				fmt.Print(usage)
 				return nil, errHelpOK
 			}

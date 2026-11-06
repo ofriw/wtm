@@ -118,6 +118,8 @@ reclamation and safety rules, and promotion.
 - `--no-index` with a copied database appends: `; the copied ChunkHound index is stale: indexing was skipped`.
 - The old `the copied ChunkHound index cannot match and indexing will re-embed` suffix is removed. It appeared only when indexing ran over a copied database. `--no-index` did not emit it. Scripts that match it must change.
 
+**Changed:** `-h` on a subcommand lists only that subcommand's own flags. The global flags (`--root`, `--json`, `--color`, `--progress`, `--yes`) appear once, in the usage block.
+
 Copied worktree configs may hold API keys. `wtm` never commits them — add them to `.gitignore` if they do.
 
 ## Configuration

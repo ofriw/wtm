@@ -41,6 +41,38 @@ func TestNativeAddHelpShowsSeedDefault(t *testing.T) {
 	}
 }
 
+// TestNativeHelpPrintsGlobalsOnce pins the -h contract: the subcommand list
+// carries only local flags because the usage block is the globals' single home.
+func TestNativeHelpPrintsGlobalsOnce(t *testing.T) {
+	locals := map[string][]string{
+		"add":     {"-from", "-no-index"},
+		"gc":      {"-all", "-keep-remote"},
+		"status":  {"-wide"},
+		"config":  {},
+		"promote": {},
+		"delete":  {"-keep-remote"},
+	}
+	for _, cmd := range []string{"add", "gc", "status", "config", "promote", "delete"} {
+		t.Run(cmd, func(t *testing.T) {
+			out, errOut, rc := runWTM(t, t.TempDir(), nil, cmd, "-h")
+			if rc != 0 {
+				t.Fatalf("%s -h rc = %d, stderr = %s", cmd, rc, errOut)
+			}
+			help := out + errOut
+			for _, name := range []string{"root", "json", "color", "progress", "yes"} {
+				if n := strings.Count(help, "\n  -"+name) + strings.Count(help, "\n  --"+name); n != 1 {
+					t.Fatalf("%s -h shows -%s %d times, want once:\n%s", cmd, name, n, help)
+				}
+			}
+			for _, flag := range locals[cmd] {
+				if !strings.Contains(help, "\n  "+flag) {
+					t.Fatalf("%s -h must show %s:\n%s", cmd, flag, help)
+				}
+			}
+		})
+	}
+}
+
 func TestNativeExitCodes(t *testing.T) {
 	sandbox(t)
 	outside := t.TempDir()
