@@ -452,6 +452,30 @@ func TestWarnSeedSourceText(t *testing.T) {
 	}
 }
 
+// TestSeedNoticeRejectsOptionLikeBase pins that an option-like base is treated
+// as a revision, never as a rev-parse option.
+func TestSeedNoticeRejectsOptionLikeBase(t *testing.T) {
+	sandbox(t)
+	repo := addTestRepo(t)
+	for _, base := range []string{"-x", "--all", "--", "--end-of-options"} {
+		if note, differs := seedNotice(repo, repo, base, ""); note != "" || differs {
+			t.Fatalf("seedNotice(%q) = %q, differs %v, want silence", base, note, differs)
+		}
+	}
+}
+
+// TestResolveStartPointRejectsOptionLikeValue pins the same terminator on the
+// user-supplied start-point path.
+func TestResolveStartPointRejectsOptionLikeValue(t *testing.T) {
+	sandbox(t)
+	repo := addTestRepo(t)
+	for _, start := range []string{"-x", "--all", "--", "--end-of-options"} {
+		if _, err := resolveStartPoint(repo, start); err == nil {
+			t.Fatalf("resolveStartPoint(%q) succeeded, want an error", start)
+		}
+	}
+}
+
 func TestAddFromMissing(t *testing.T) {
 	sandbox(t)
 	repo := addTestRepo(t)

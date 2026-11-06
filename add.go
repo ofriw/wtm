@@ -170,7 +170,7 @@ func resolveAddSource(root string, wts []gworktree, base, from, target, defaultN
 // base^{tree} with the source HEAD^{tree}; live and ignored files are out of
 // scope because git cannot carry them between worktrees.
 func seedNotice(root, src, base, branch string) (string, bool) {
-	want, err := git(root, "rev-parse", "--verify", "--quiet", base+"^{tree}")
+	want, err := git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", base+"^{tree}")
 	if err != nil {
 		return "", false
 	}
@@ -447,7 +447,7 @@ func resolveAddBase(p *addParams, start string) (string, error) {
 // commit. An unresolvable value is a usage error, so create and attach share one
 // exit contract.
 func resolveStartPoint(root, start string) (string, error) {
-	commit, err := git(root, "rev-parse", "--verify", "--quiet", start+"^{commit}")
+	commit, err := git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", start+"^{commit}")
 	if err != nil {
 		return "", usagef("add: start-point %q is not a commit", start)
 	}
