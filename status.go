@@ -20,8 +20,7 @@ func cmdStatus(g *globals, args []string) error {
 		if ws, lerr = loadWorkspace(g, p, false); lerr != nil {
 			return lerr
 		}
-		ws.loadUsage(p)
-		return nil
+		return ws.loadUsage(p)
 	})
 	if err != nil {
 		return err
@@ -131,15 +130,23 @@ func warnCreatedAtEnv() {
 // check runs once: a Pi-only repo never reaches the network and never opens
 // Claude Code's account file. An unreadable session degrades to a warning:
 // status is read-only and must still report what it knows.
-func (ws *workspace) loadUsage(p *progress) {
+func (ws *workspace) loadUsage(p *progress) error {
 	hasClaude := ws.idx.hasHarness(ws.wts, claudeAgent.name)
+	hasPi := ws.idx.hasHarness(ws.wts, piAgent.name)
 	subs := loadSubscriptions(hasClaude)
 	// An unread account keeps list price; silence would overstate the bill.
 	if subs.claudeErr != nil {
 		warnProgress(p, "claude subscription unproven: %s; claude costs use list price", subs.claudeErr)
 	}
+	if subs.piErr != nil && hasPi {
+		warnProgress(p, "pi subscription unproven: %s; pi costs use list price", subs.piErr)
+	}
 	warnParentScopeDisabled(subs, p)
-	ws.parseUsage(ws.loadCatalog(p, hasClaude), subs, p)
+	cat := ws.loadCatalog(p, hasClaude)
+	if err := p.abort(); err != nil {
+		return err
+	}
+	return ws.parseUsage(cat, subs, p)
 }
 
 // loadCatalog resolves the price catalog, naming its source in the progress
@@ -162,8 +169,9 @@ func (ws *workspace) loadCatalog(p *progress, hasClaude bool) catalog {
 // usageResult carries one worker's outcome, so warnings emit from the parent in
 // worktree order after the join (a worker must not write stderr; parallel.go).
 type usageResult struct {
-	usage *worktreeUsage
-	err   error
+	usage    *worktreeUsage
+	err      error
+	warnings []error
 }
 
 // parseUsage reads every worktree's sessions concurrently: each worktree owns
@@ -171,28 +179,38 @@ type usageResult struct {
 // independent. The label follows the worktree a worker picked up; results
 // attach by index after the join, keeping the render order tied to git's order,
 // not to completion order.
-func (ws *workspace) parseUsage(cat catalog, subs subscriptions, p *progress) {
+func (ws *workspace) parseUsage(cat catalog, subs subscriptions, p *progress) error {
 	p.phase("parsing sessions", len(ws.wts))
 	if len(ws.wts) == 0 {
-		return
+		return nil
 	}
 	usages := mapParallel(len(ws.wts), scanWorkers, func(i int) usageResult {
+		if err := p.abort(); err != nil {
+			return usageResult{err: err}
+		}
 		path := ws.wts[i].Path
 		p.detail(displayPath(path))
-		u, err := buildUsageFor(path, ws.wts, ws.idx, cat, subs)
+		u, warnings, err := buildUsageForReport(path, ws.wts, ws.idx, cat, subs)
 		p.advance(1)
 		// Keep a total loss so the loss reads as unknown, never as no usage.
 		if u.hasEvents() || u.partial {
-			return usageResult{usage: &u, err: err}
+			return usageResult{usage: &u, err: err, warnings: warnings}
 		}
-		return usageResult{err: err}
+		return usageResult{err: err, warnings: warnings}
 	})
 	for i, r := range usages {
+		if err := p.abort(); err != nil {
+			return err
+		}
 		ws.wts[i].Usage = r.usage
 		if r.err != nil {
 			warnProgress(p, "usage for %s: %s", displayPath(ws.wts[i].Path), r.err)
 		}
+		for _, warning := range r.warnings {
+			warnProgress(p, "%s; claude costs use list price", warning)
+		}
 	}
+	return nil
 }
 
 // cost is the worktree's price pair; empty when it has no events.

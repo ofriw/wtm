@@ -310,8 +310,9 @@ func TestClaudeSettingsMeteredOverrideKeys(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "settings.json")
 			writeFile(t, path, fmt.Sprintf(`{"env":{%q:"1"}}`, key), 0o600)
-			if !settingsMetered(path) {
-				t.Fatalf("settings with %s must invalidate proof", key)
+			metered, err := settingsMetered(path)
+			if err != nil || !metered {
+				t.Fatalf("settings with %s must invalidate proof: metered=%v err=%v", key, metered, err)
 			}
 		})
 	}
@@ -1104,7 +1105,7 @@ func TestParentScopeKillSwitchWarnsOncePerRun(t *testing.T) {
 	t.Setenv(ratesEnv, ratesPath)
 	ws := workspace{wts: []worktree{{Path: dir}}, idx: idx}
 	for run := 1; run <= 2; run++ {
-		errOut := captureStderr(t, func() { ws.loadUsage(nil) })
+		errOut := captureStderr(t, func() { _ = ws.loadUsage(nil) })
 		if got := strings.Count(errOut, "WTM_CLAUDE_PARENT_SCOPE=0"); got != 1 {
 			t.Fatalf("run %d warnings = %d, want exactly 1 per run:\n%s", run, got, errOut)
 		}
@@ -1149,7 +1150,7 @@ func TestClaudeAccountOversizedWarns(t *testing.T) {
 	writeFile(t, ratesPath, testCatalog, 0o644)
 	t.Setenv(ratesEnv, ratesPath)
 	ws := workspace{wts: []worktree{{Path: dir}}, idx: idx}
-	errOut := captureStderr(t, func() { ws.loadUsage(nil) })
+	errOut := captureStderr(t, func() { _ = ws.loadUsage(nil) })
 	if !strings.Contains(errOut, "67108865") || !strings.Contains(errOut, "list price") {
 		t.Fatalf("warning must name the size and the list-price fallback:\n%s", errOut)
 	}
@@ -1197,5 +1198,119 @@ func TestManagedSettingsPathsEmptyMeansDefault(t *testing.T) {
 	t.Setenv("WTM_MANAGED_SETTINGS", explicit)
 	if got := managedSettingsPaths(); len(got) != 1 || got[0] != explicit {
 		t.Errorf("paths = %v, want [%s]", got, explicit)
+	}
+}
+
+// TestForWorktreeReportMissingSettingsKeepsProof pins the harmless case: an
+// absent settings file leaves the subscription proof intact with no warning.
+func TestForWorktreeReportMissingSettingsKeepsProof(t *testing.T) {
+	sandbox(t)
+	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+	dir, _ := claudeWorktreeDir(t)
+	subs := loadSubscriptions(true)
+	if !subs.claude {
+		t.Fatal("account proof must load")
+	}
+	scoped, warnings := subs.forWorktree(dir)
+	if !scoped.claude || len(warnings) != 0 {
+		t.Fatalf("missing settings: claude=%v warnings=%v, want proof and silence", scoped.claude, warnings)
+	}
+}
+
+// TestForWorktreeReportRefusedSettingsFailsClosed pins the disclosure: a
+// directory at the settings path invalidates the proof and reports the path and
+// reason for the parent to emit.
+func TestForWorktreeReportRefusedSettingsFailsClosed(t *testing.T) {
+	sandbox(t)
+	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+	dir, _ := claudeWorktreeDir(t)
+	settings := filepath.Join(dir, claudeSettingsFile)
+	if err := os.MkdirAll(settings, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	subs := loadSubscriptions(true)
+	scoped, warnings := subs.forWorktree(dir)
+	if scoped.claude {
+		t.Fatal("a refused settings file must invalidate the proof")
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Error(), settings) ||
+		!strings.Contains(warnings[0].Error(), "not a regular file") {
+		t.Fatalf("warnings = %v, want the path and the refusal reason", warnings)
+	}
+}
+
+// TestReadPiOAuthRefusalIsReported pins auth.json disclosure: a missing file is
+// silent, while an unreadable one returns the path and reason.
+func TestReadPiOAuthRefusalIsReported(t *testing.T) {
+	sandbox(t)
+	path := filepath.Join(piAgent.configDir(), "auth.json")
+	if _, err := readPiOAuth(path); err != nil {
+		t.Fatalf("missing auth.json = %v, want silence", err)
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readPiOAuth(path)
+	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("unreadable auth.json = %v, want path and reason", err)
+	}
+}
+
+// TestStatusWarnsOnRefusedProjectSettings pins the e2e path: status finishes and
+// warns with the settings path and the reason, instead of silently using list
+// price.
+func TestStatusWarnsOnRefusedProjectSettings(t *testing.T) {
+	sandbox(t)
+	repo := initRepo(t, "main")
+	writeFile(t, filepath.Join(repo, "README.md"), "hello\n", 0o644)
+	gitCommit(t, repo, "seed", "README.md")
+	wt := filepath.Join(filepath.Dir(repo), "wt")
+	gitWorktreeAdd(t, repo, wt, "wt", "main")
+	mkClaudeSession(t, wt, "owned", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+	rates, err := filepath.Abs("test/fixtures/rates.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(ratesEnv, rates)
+	settings := filepath.Join(wt, claudeSettingsFile)
+	if err := os.MkdirAll(settings, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, rc := runWTM(t, repo, nil, "status")
+	if rc != 0 {
+		t.Fatalf("rc = %d, want 0\n%s", rc, stderr)
+	}
+	if !strings.Contains(stderr, settings) || !strings.Contains(stderr, "not a regular file") ||
+		!strings.Contains(stderr, "claude costs use list price") {
+		t.Fatalf("status must disclose the refused settings path and reason; stderr:\n%s", stderr)
+	}
+}
+
+// TestUsageReportCarriesWorktreeWarnings pins the disclosure seam: a refused
+// project settings file voids the Claude proof (list price) and must reach status
+// as a warning through buildUsageForReport's slice. Dropping or corrupting that
+// slice must fail here, not show up as an unexplained bill.
+func TestUsageReportCarriesWorktreeWarnings(t *testing.T) {
+	sandbox(t)
+	dir, idx := claudeWorktreeDir(t)
+	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+	settings := filepath.Join(dir, claudeSettingsFile)
+	if err := os.MkdirAll(settings, 0o700); err != nil {
+		t.Fatalf("seed settings directory: %v", err)
+	}
+	u, warnings, err := buildUsageForReport(dir, []worktree{{Path: dir}}, idx, testRates(t), loadSubscriptions(true))
+	if err != nil {
+		t.Fatalf("buildUsageForReport: %v", err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want the one settings refusal", warnings)
+	}
+	if w := warnings[0].Error(); !strings.Contains(w, settings) || !strings.Contains(w, "not a regular file") {
+		t.Fatalf("warning = %q, want the settings path and the refusal reason", w)
+	}
+	if got := u.cost().cell(); got != "$0.10" {
+		t.Fatalf("cost = %q, want the list price $0.10 (the proof must be voided)", got)
 	}
 }

@@ -747,16 +747,29 @@ func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions
 // work done from a repo subdirectory still counts for that worktree. The exact
 // index stays the authority for destructive operations (see purgeSessions).
 func buildUsageFor(wtPath string, wts []worktree, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
-	return buildUsageSessions(wtPath, sessionsForWorktree(wtPath, wts, idx), cat, subs)
+	u, _, err := buildUsageForReport(wtPath, wts, idx, cat, subs)
+	return u, err
+}
+
+// buildUsageForReport is buildUsageFor plus the per-worktree settings refusals,
+// so status can emit them from the parent after the worker join. Its warnings
+// slice is the disclosure seam: TestUsageReportCarriesWorktreeWarnings pins it.
+func buildUsageForReport(wtPath string, wts []worktree, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, []error, error) {
+	return buildUsageSessionsReport(wtPath, sessionsForWorktree(wtPath, wts, idx), cat, subs)
 }
 
 func buildUsageSessions(wtPath string, refs []sessionRef, cat catalog, subs subscriptions) (worktreeUsage, error) {
-	subs = subs.forWorktree(wtPath)
+	u, _, err := buildUsageSessionsReport(wtPath, refs, cat, subs)
+	return u, err
+}
+
+func buildUsageSessionsReport(wtPath string, refs []sessionRef, cat catalog, subs subscriptions) (worktreeUsage, []error, error) {
+	subs, warnings := subs.forWorktree(wtPath)
 	sessions, loss := parseWorktreeSessions(refs, cat, subs)
 	var u worktreeUsage
 	foldParsedSessions(&u, sessions)
 	markPartial(&u, loss.lost)
-	return u, usageLossErr(loss.firstErr, loss.dropped)
+	return u, warnings, usageLossErr(loss.firstErr, loss.dropped)
 }
 
 // sessionsForWorktree returns the sessions whose cwd is the worktree or a

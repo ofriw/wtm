@@ -43,11 +43,14 @@ type subscriptions struct {
 	// claudeAllowanceOnly proves the account has no extra-usage billing, so a
 	// completed request costs exactly $0 instead of a possible overage charge.
 	claudeAllowanceOnly bool
-	// claudeErr carries a failed account read so status can disclose why the
-	// proof is empty; absence stays silent because it proves nothing new.
+	// claudeErr carries a failed account or settings read so status can disclose
+	// why the proof is empty; absence stays silent because it proves nothing new.
 	claudeErr error
-	managed   bool      // cached managed-settings metered verdict (machine-global)
-	since     time.Time // subscription start; zero when unknown
+	// piErr carries a failed auth.json read so status can disclose why dual-mode
+	// proof is empty; a missing file stays silent.
+	piErr   error
+	managed bool      // cached managed-settings metered verdict (machine-global)
+	since   time.Time // subscription start; zero when unknown
 }
 
 // loadSubscriptions reads the credential proofs once per status run. It never
@@ -56,13 +59,17 @@ type subscriptions struct {
 func loadSubscriptions(hasClaude bool) subscriptions {
 	s := subscriptions{piOAuth: map[string]bool{}}
 	if dir := piAgent.configDir(); dir != "" {
-		s.piOAuth = readPiOAuth(filepath.Join(dir, "auth.json"))
+		s.piOAuth, s.piErr = readPiOAuth(filepath.Join(dir, "auth.json"))
 	}
 	if !hasClaude {
 		return s
 	}
 	s.claude, s.since, s.claudeAllowanceOnly, s.claudeErr = readClaudeSubscription()
-	s.managed = s.claude && managedMetered()
+	if s.claude {
+		var managedErr error
+		s.managed, managedErr = managedMetered()
+		s.claudeErr = errors.Join(s.claudeErr, managedErr)
+	}
 	return s
 }
 
@@ -70,20 +77,23 @@ func loadSubscriptions(hasClaude bool) subscriptions {
 // record holds no credential type, so dual-mode proof reads this current state:
 // a past metered run under a now-OAuth credential reads as covered. That is the
 // documented history caveat, and the reason oauth-only providers need no file.
-func readPiOAuth(path string) map[string]bool {
+func readPiOAuth(path string) (map[string]bool, error) {
 	oauth := map[string]bool{}
 	var providers map[string]struct {
 		Type string `json:"type"`
 	}
-	if readJSON(path, &providers) != nil {
-		return oauth
+	if err := readJSON(path, &providers); err != nil {
+		if os.IsNotExist(err) {
+			return oauth, nil
+		}
+		return oauth, fmt.Errorf("pi auth %s: %w", path, err)
 	}
 	for name, p := range providers {
 		if p.Type == "oauth" {
 			oauth[name] = true
 		}
 	}
-	return oauth
+	return oauth, nil
 }
 
 // claudeAccountFile resolves Claude Code's global account file the way the
@@ -186,7 +196,11 @@ func readClaudeAccount(path string) (*claudeAccount, error) {
 // the subscription. The third result is true only when the account explicitly
 // disables extra usage, which pins a completed request's marginal cost at $0.
 func readClaudeSubscription() (bool, time.Time, bool, error) {
-	if claudeMeteredOverride() {
+	metered, err := claudeMeteredOverride()
+	if err != nil {
+		return false, time.Time{}, false, err
+	}
+	if metered {
 		return false, time.Time{}, false, nil
 	}
 	path, ok := claudeAccountFile()
@@ -293,30 +307,37 @@ type claudeSettings struct {
 
 // settingsMetered reports a settings file that bills outside the subscription.
 // A missing file is harmless; other read/decode failures invalidate proof.
-func settingsMetered(path string) bool {
+func settingsMetered(path string) (bool, error) {
 	var s claudeSettings
 	if err := readJSON(path, &s); err != nil {
-		return !os.IsNotExist(err)
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		// Fail closed: a file we cannot read may hold a metered override.
+		return true, fmt.Errorf("claude settings %s: %w", path, err)
 	}
 	if s.APIKeyHelper != "" {
-		return true
+		return true, nil
 	}
 	return claudeMeteredEnv(func(k string) (string, bool) {
 		v, ok := s.Env[k]
 		return v, ok
-	})
+	}), nil
 }
 
 // claudeUserMetered reports a user settings file that bills outside the
 // subscription. Both files are checked because a key helper in either one
 // changes every request's billing.
-func claudeUserMetered() bool {
+func claudeUserMetered() (bool, error) {
 	dir := claudeAgent.configDir()
 	if dir == "" {
-		return false
+		return false, nil
 	}
-	return settingsMetered(filepath.Join(dir, "settings.json")) ||
-		settingsMetered(filepath.Join(dir, "settings.local.json"))
+	metered, err := settingsMetered(filepath.Join(dir, "settings.json"))
+	if err != nil || metered {
+		return metered, err
+	}
+	return settingsMetered(filepath.Join(dir, "settings.local.json"))
 }
 
 // claudeProjectMetered reports a worktree settings file that bills outside the
@@ -325,9 +346,12 @@ func claudeUserMetered() bool {
 // account. Parent directories are a separate check (claudeParentsMetered); the
 // enterprise managed-settings.json is machine-global (managedMetered and the
 // cached subscriptions.managed).
-func claudeProjectMetered(root string) bool {
-	return settingsMetered(filepath.Join(root, claudeSettingsFile)) ||
-		settingsMetered(filepath.Join(root, claudeLocalSettingsFile))
+func claudeProjectMetered(root string) (bool, error) {
+	metered, err := settingsMetered(filepath.Join(root, claudeSettingsFile))
+	if err != nil || metered {
+		return metered, err
+	}
+	return settingsMetered(filepath.Join(root, claudeLocalSettingsFile))
 }
 
 // claudeParentScopeEnabled reports whether ancestor settings void the proof.
@@ -340,20 +364,24 @@ func claudeParentScopeEnabled() bool { return os.Getenv("WTM_CLAUDE_PARENT_SCOPE
 // merges .claude/settings*.json up the tree. The worktree root itself belongs
 // to claudeProjectMetered, so the walk starts at its parent; every file reuses
 // settingsMetered (missing is harmless).
-func claudeParentsMetered(root string) bool {
+func claudeParentsMetered(root string) (bool, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		// WHY: an unresolvable root cannot prove a clean ancestor chain.
-		return true
+		return true, fmt.Errorf("claude ancestor settings for %s: %w", root, err)
 	}
 	for dir := filepath.Dir(abs); ; {
-		if settingsMetered(filepath.Join(dir, claudeSettingsFile)) ||
-			settingsMetered(filepath.Join(dir, claudeLocalSettingsFile)) {
-			return true
+		metered, err := settingsMetered(filepath.Join(dir, claudeSettingsFile))
+		if err != nil || metered {
+			return metered, err
+		}
+		metered, err = settingsMetered(filepath.Join(dir, claudeLocalSettingsFile))
+		if err != nil || metered {
+			return metered, err
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return false
+			return false, nil
 		}
 		dir = parent
 	}
@@ -398,19 +426,23 @@ func defaultManagedSettingsPaths() []string {
 // managedMetered reports an enterprise managed-settings.json that bills
 // outside the subscription. IT deploys this file, so the user cannot remove
 // it; a helper or metered env key there voids every worktree's proof at once.
-func managedMetered() bool {
+func managedMetered() (bool, error) {
 	for _, p := range managedSettingsPaths() {
-		if settingsMetered(p) {
-			return true
+		metered, err := settingsMetered(p)
+		if err != nil || metered {
+			return metered, err
 		}
 	}
-	return false
+	return false, nil
 }
 
 // claudeMeteredOverride reports a process or user-level setting that bills
 // outside the subscription.
-func claudeMeteredOverride() bool {
-	return claudeMeteredEnv(os.LookupEnv) || claudeUserMetered()
+func claudeMeteredOverride() (bool, error) {
+	if claudeMeteredEnv(os.LookupEnv) {
+		return true, nil
+	}
+	return claudeUserMetered()
 }
 
 // coverage is the tri-state subscription verdict for one event. coverageNone
@@ -475,20 +507,28 @@ func warnParentScopeDisabled(s subscriptions, p *progress) {
 // managed verdict voids it too.
 //
 // The returned value is independent: it replaces value fields only and never
-// writes the shared snapshot. status parses worktrees in a pool, so a write
-// here would race every sibling worker (see parallel.go's contract).
-func (s subscriptions) forWorktree(root string) subscriptions {
+// writes the shared snapshot. status parses worktrees in a pool, so the caller
+// emits the returned warnings after the join instead of a worker writing
+// stderr itself (see parallel.go's contract).
+func (s subscriptions) forWorktree(root string) (subscriptions, []error) {
 	if !s.claude {
-		return s
+		return s, nil
 	}
-	if !claudeParentScopeEnabled() {
-		// Fail-open: the kill switch proves the harness never merges parent
-		// settings, so the ancestor walk is skipped.
-		s.claude = !s.managed && !claudeProjectMetered(root)
-		return s
+	var warnings []error
+	project, err := claudeProjectMetered(root)
+	if err != nil {
+		warnings = append(warnings, err)
 	}
-	s.claude = !s.managed && !claudeProjectMetered(root) && !claudeParentsMetered(root)
-	return s
+	metered := project
+	if !metered && claudeParentScopeEnabled() {
+		parents, err := claudeParentsMetered(root)
+		if err != nil {
+			warnings = append(warnings, err)
+		}
+		metered = parents
+	}
+	s.claude = !s.managed && !metered
+	return s, warnings
 }
 
 // claudeProven bounds the account proof by the subscription start: an event
