@@ -241,20 +241,33 @@ func oversizedPiBillable(prefix []byte) bool {
 	}
 }
 
-// oversizedPiMessageBillable decides one oversized message record. Missing
-// role/name is unknown; only a visible non-spawn tool result is free.
+// oversizedPiMessageBillable decides one oversized message record. The order
+// matters: a spawn checks before the non-spawn exemption, and any visible
+// `usage` bills because appendPiToolResult prices non-spawn tool results too.
+// Only a complete non-spawn tool result without usage is free; everything else
+// fails closed, because a discarded record's billing is unknowable.
 func oversizedPiMessageBillable(prefix []byte) bool {
-	if bytes.Contains(prefix, []byte(`"role":"user"`)) {
+	switch {
+	case bytes.Contains(prefix, []byte(`"role":"user"`)):
 		return false
-	}
-	if bytes.Contains(prefix, []byte(`"role":"assistant"`)) ||
-		bytes.Contains(prefix, []byte(`"toolName":"spawn"`)) ||
-		bytes.Contains(prefix, usageKey) || bytes.Contains(prefix, piDetailsKey) ||
-		bytes.Contains(prefix, piStatsKey) {
+	case bytes.Contains(prefix, []byte(`"role":"assistant"`)),
+		bytes.Contains(prefix, usageKey):
 		return true
+	case bytes.Contains(prefix, []byte(`"role":"toolResult"`)):
+		name, ok := piToolName(prefix)
+		return !ok || name == "spawn"
 	}
-	return !bytes.Contains(prefix, []byte(`"role":"toolResult"`)) ||
-		!bytes.Contains(prefix, []byte(`"toolName":"`))
+	return true
+}
+
+// piToolName reads a structurally complete toolName; a cut name reports false.
+func piToolName(prefix []byte) (string, bool) {
+	_, rest, ok := bytes.Cut(prefix, []byte(`"toolName":"`))
+	if !ok {
+		return "", false
+	}
+	name, _, ok := bytes.Cut(rest, []byte(`"`))
+	return string(name), ok
 }
 
 // piActivityFromRecord maps a fully decoded record to its turn state. Only

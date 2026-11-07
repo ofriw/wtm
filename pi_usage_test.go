@@ -814,3 +814,118 @@ func TestPiOversizedNonBilledRecordsDoNotDrop(t *testing.T) {
 		t.Fatalf("events = %d, want the good record", len(parsed.events))
 	}
 }
+
+// TestOversizedPiMessageBillable pins the classifier for a discarded message.
+// A tool result body may contain any text, so only structured evidence counts:
+// escaped body words must not bill, but a real `usage` field must, because
+// appendPiToolResult prices non-spawn tool results too.
+func TestOversizedPiMessageBillable(t *testing.T) {
+	pad := strings.Repeat("a", maxSessionPrefix)
+	for _, tc := range []struct {
+		name   string
+		prefix string
+		want   bool
+	}{
+		{
+			name:   "toolResult body mentions stats",
+			prefix: `{"type":"message","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"{\"stats\":1}"}]}}`,
+			want:   false,
+		},
+		{
+			name:   "toolResult structured details without usage",
+			prefix: `{"type":"message","message":{"role":"toolResult","toolName":"bash","details":{"stats":{"cost":0}},"content":[]}}`,
+			want:   false,
+		},
+		{
+			name:   "toolResult real usage",
+			prefix: `{"type":"message","message":{"role":"toolResult","toolName":"bash","usage":{"cost":{"total":1}}}}`,
+			want:   true,
+		},
+		{name: "toolResult truncated toolName", prefix: `{"type":"message","message":{"role":"toolResult","toolName":"bash`, want: true},
+		{
+			name:   "spawn toolResult",
+			prefix: `{"type":"message","message":{"role":"toolResult","toolName":"spawn","details":{"stats":{"cost":1}}}}`,
+			want:   true,
+		},
+		{
+			name:   "assistant usage",
+			prefix: `{"type":"message","message":{"role":"assistant","usage":{"cost":{"total":1}}}}`,
+			want:   true,
+		},
+		{
+			name:   "no readable role",
+			prefix: `{"type":"message","message":{"content":[]}}`,
+			want:   true,
+		},
+		{
+			name:   "prefix ends before role",
+			prefix: `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"pad":"` + pad + `"`,
+			want:   true,
+		},
+		{
+			name:   "user",
+			prefix: `{"type":"message","message":{"role":"user","content":[]}}`,
+			want:   false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := oversizedPiMessageBillable([]byte(tc.prefix)); got != tc.want {
+				t.Errorf("oversizedPiMessageBillable = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPiOversizedToolResultTextDoesNotDrop pins end-to-end that escaped body
+// text mentioning every key word cannot taint a cost that is fully read.
+func TestPiOversizedToolResultTextDoesNotDrop(t *testing.T) {
+	pad := strings.Repeat(`\"stats\":1,\"usage\":{},\"details\":{`, maxSessionHeader/16)
+	result := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"` + pad + `"}]}}`
+	good := `{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}`
+	if len(result) <= maxSessionHeader {
+		t.Fatalf("record = %d bytes, want oversized", len(result))
+	}
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(result + "\n" + good + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.dropped != 0 {
+		t.Fatalf("dropped = %d, want 0: escaped body text is not billing", parsed.dropped)
+	}
+	if len(parsed.events) != 1 {
+		t.Fatalf("events = %d, want the good record", len(parsed.events))
+	}
+	assertPiEvent(t, parsed.events[0], "m", fptr(1))
+}
+
+// TestPiOversizedToolResultWithoutToolNameIsDropped pins that a tool result
+// without a complete non-spawn name bills.
+func TestPiOversizedToolResultWithoutToolNameIsDropped(t *testing.T) {
+	pad := strings.Repeat("a", maxSessionHeader)
+	result := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"toolResult","content":[{"type":"text","text":"` + pad + `"}]}}`
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(result + "\n")))
+	if err != nil || parsed.dropped != 1 {
+		t.Fatalf("dropped = %d, err = %v, want 1", parsed.dropped, err)
+	}
+}
+
+// TestPiOversizedToolResultUsageIsDropped pins the fail-closed half: a non-spawn
+// tool result whose visible head carries real usage is dropped and counted, so
+// the total reads partial instead of silently losing a priced record.
+func TestPiOversizedToolResultUsageIsDropped(t *testing.T) {
+	pad := strings.Repeat("a", maxSessionHeader)
+	result := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"toolResult","toolName":"bash","usage":{"cost":{"total":0.5}},"content":[{"type":"text","text":"` + pad + `"}]}}`
+	if len(result) <= maxSessionHeader {
+		t.Fatalf("record = %d bytes, want oversized", len(result))
+	}
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(result + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.dropped != 1 {
+		t.Fatalf("dropped = %d, want 1: real usage must taint the total", parsed.dropped)
+	}
+	if len(parsed.events) != 0 {
+		t.Fatalf("events = %d, want none", len(parsed.events))
+	}
+}
