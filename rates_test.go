@@ -414,6 +414,30 @@ func pinStaleCatalog(t *testing.T, body string) string {
 	return path
 }
 
+// pinFutureCatalog leaves a future-dated cache: the clock-skew shape that must
+// read as stale rather than exceptionally fresh.
+func pinFutureCatalog(t *testing.T) string {
+	t.Helper()
+	path := isolatedRatesCache(t)
+	writeFile(t, path, testCatalog, 0o644)
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// fileAgeLabel is the age a warning must report, read from the file itself so
+// the test does not depend on the label helper under test.
+func fileAgeLabel(t *testing.T, path string) string {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return humanDuration(time.Since(info.ModTime()))
+}
+
 // TestRatesFetchSuccessCachesAndPrices pins the refresh path through the real
 // loader: a 200 body is cached to disk and prices models, so a later offline
 // run can serve it.
@@ -442,6 +466,89 @@ func TestRatesFetchErrorFallsBackToStale(t *testing.T) {
 	}
 	if hits.Load() != 1 {
 		t.Errorf("fetches = %d, want 1: the retry must cool down", hits.Load())
+	}
+}
+
+// TestStaleCatalogWarningNamesCauseAndAge pins the stale-serving disclosure: one
+// stderr notice carries the failed refresh cause and the real cache age, so an
+// outage never silently shows old prices.
+func TestStaleCatalogWarningNamesCauseAndAge(t *testing.T) {
+	path := pinStaleCatalog(t, testCatalog)
+	age := fileAgeLabel(t, path)
+	url := serveRates(t, http.StatusInternalServerError, "boom")
+	stderr := captureStderr(t, func() {
+		if _, err := loadCatalogFrom(url); err != nil {
+			t.Fatalf("stale fallback: %v", err)
+		}
+	})
+	if n := strings.Count(stderr, "rate catalog refresh failed"); n != 1 {
+		t.Fatalf("notices = %d, want exactly one: %q", n, stderr)
+	}
+	for _, want := range []string{"HTTP 500", age} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+	}
+}
+
+// TestStaleCatalogWarningSurvivesRenderer pins the delivery path: the stale
+// notice must ride the progress handle, or the next frame would erase it.
+func TestStaleCatalogWarningSurvivesRenderer(t *testing.T) {
+	path := pinStaleCatalog(t, testCatalog)
+	age := fileAgeLabel(t, path)
+	url := serveRates(t, http.StatusInternalServerError, "boom")
+	var g globals
+	g.progress = progressAlways
+	var out strings.Builder
+	err := withProgressTo(&out, &g, progressOptions{}, func(p *progress) error {
+		_, err := loadCatalogFromNotify(url, p)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("withProgressTo: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"rate catalog refresh failed", "HTTP 500", age} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plain progress = %q, want %q", got, want)
+		}
+	}
+}
+
+// TestFutureCacheMtimeIsStale pins the clock-skew guard: a future mtime must
+// not masquerade as a fresh cache, so the loader still tries the network and
+// keeps the file for the stale fallback.
+func TestFutureCacheMtimeIsStale(t *testing.T) {
+	path := pinFutureCatalog(t)
+	if fresh, err := cacheFresh(path); err != nil || fresh {
+		t.Fatalf("future mtime fresh=%v err=%v, want stale", fresh, err)
+	}
+	url, hits := serveRatesCounting(t, http.StatusInternalServerError, "boom")
+	if _, err := loadCatalogFrom(url); err != nil {
+		t.Fatalf("stale fallback: %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("fetches = %d, want 1: a future mtime must not skip the network", hits.Load())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("cache file removed: %v", err)
+	}
+}
+
+// TestFutureCacheMtimeNoticeExplainsReason pins the honest label: a warning for
+// a future-dated cache names the reason instead of a plausible age.
+func TestFutureCacheMtimeNoticeExplainsReason(t *testing.T) {
+	pinFutureCatalog(t)
+	url := serveRates(t, http.StatusInternalServerError, "boom")
+	stderr := captureStderr(t, func() {
+		if _, err := loadCatalogFrom(url); err != nil {
+			t.Fatalf("stale fallback: %v", err)
+		}
+	})
+	for _, want := range []string{"HTTP 500", "mtime in the future"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
 	}
 }
 

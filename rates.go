@@ -492,11 +492,14 @@ func tryFetch(path, url string, p *progress) (catalog, error) {
 
 // staleCatalog serves the last good catalog when the refresh failed. The fetch
 // cause wins over the read error: it names the real failure (status, size,
-// network), where a missing cache would only report ENOENT.
+// network), where a missing cache would only report ENOENT. Serving old prices
+// is a disclosure, not a silent degradation: one persistent warning names the
+// cause and the cache age so the user can judge the numbers.
 func staleCatalog(path string, p *progress, fetchErr error) (catalog, error) {
 	c, err := parseCatalogFile(path)
 	if err == nil {
 		p.detail(string(catalogStale))
+		warnProgress(p, "rate catalog refresh failed: %s; using the cached copy (%s)", fetchErr, cacheAgeLabel(path))
 		return c, nil
 	}
 	if fetchErr != nil {
@@ -736,12 +739,35 @@ func parseCatalogFile(path string) (catalog, error) {
 	return parseCatalog(bytes.NewReader(data))
 }
 
+// cacheFresh reports whether the cache is inside its TTL. A future mtime is
+// invalid, not an exceptionally long-lived cache: report stale so clock skew or
+// a bad copy cannot pin old prices forever. The file stays for the stale
+// fallback.
 func cacheFresh(path string) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false, err
 	}
-	return nowFunc().Sub(info.ModTime()) < ratesCacheTTL, nil
+	age := nowFunc().Sub(info.ModTime())
+	if age < 0 {
+		return false, nil
+	}
+	return age < ratesCacheTTL, nil
+}
+
+// cacheAgeLabel names how old the cached copy is. A failed stat or a future
+// mtime yields a reason instead of a plausible duration, so the warning never
+// states a false age.
+func cacheAgeLabel(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "age unknown"
+	}
+	age := nowFunc().Sub(info.ModTime())
+	if age < 0 {
+		return "age unknown (mtime in the future)"
+	}
+	return humanDuration(age)
 }
 
 func fetchRates(url string) ([]byte, error) {
