@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -99,7 +100,7 @@ func clonePlatform(src, dst string) error {
 	default:
 		return fmt.Errorf("no reflink support on %s", runtime.GOOS)
 	}
-	return exec.Command("cp", args...).Run()
+	return childCommand("cp", args...).Run()
 }
 
 // copyTree mirrors a tree. Live daemon sidecars never cross over: a copied
@@ -172,25 +173,87 @@ func copyTree(src, dst string) error {
 	})
 }
 
+// maxControlFileBytes bounds settings, auth and MCP config reads. These files
+// are small; the cap turns a corrupt or hostile body into a visible refusal
+// instead of unbounded memory growth. The Claude account keeps its own larger
+// streaming cap (subscription.go).
+const maxControlFileBytes = 1 << 20
+
+// errNotRegularFile marks a path that is not a regular file, so callers map it
+// to their own verdict without matching text.
+var errNotRegularFile = errors.New("not a regular file")
+
+// openRegularFile opens path and refuses a non-regular target. The type check
+// runs on the opened handle, never on the path: a path Stat leaves a window where
+// the target can become a FIFO, and a blocking open then hangs status. The open
+// itself is non-blocking (openNoBlock) so a FIFO handle can be inspected and
+// refused. A symlink still works because the handle resolves it.
+func openRegularFile(path string) (*os.File, error) {
+	f, err := openNoBlock(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s is %s", errNotRegularFile, path, info.Mode().Type())
+	}
+	return f, nil
+}
+
+// readControlFile is the guarded read for small config/control files. The type
+// guard stops a symlink to a FIFO or device from hanging status; the size cap
+// bounds a large regular target.
+func readControlFile(path string) ([]byte, error) {
+	f, err := openRegularFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return readCapped(f, path, maxControlFileBytes)
+}
+
 func readJSON(path string, v any) error {
-	b, err := os.ReadFile(path)
+	b, err := readControlFile(path)
 	if err != nil {
 		return err
 	}
 	return json.Unmarshal(b, v)
 }
 
-// readFileShared reads path while permitting a concurrent atomic replace or
-// delete of that path. On Windows the reader must share delete, and the writer
-// must rename with POSIX semantics: FILE_SHARE_DELETE alone does not let
-// MoveFileEx replace an open destination (open_windows.go, rename_windows.go).
-func readFileShared(path string) ([]byte, error) {
-	f, err := openShared(path)
+// errFileTooLarge marks a readFileLimited overflow, so callers map it to their
+// own size error without matching text.
+var errFileTooLarge = errors.New("file exceeds size limit")
+
+// readFileLimited reads at most limit bytes and reports overflow. Small
+// control files use it so a corrupted or hostile file cannot exhaust memory.
+// The open is openRegularFile: its handle check refuses a FIFO, device or
+// directory before any read, so a hostile path cannot hang the caller; the
+// handle still shares delete, so an atomic replace is never blocked.
+func readFileLimited(path string, limit int64) ([]byte, error) {
+	f, err := openRegularFile(path)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	return io.ReadAll(f)
+	return readCapped(f, path, limit)
+}
+
+// readCapped reads at most limit bytes and reports overflow. One helper keeps the
+// overflow rule shared by every capped reader.
+func readCapped(r io.Reader, path string, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%w: %s exceeds %d bytes", errFileTooLarge, path, limit)
+	}
+	return data, nil
 }
 
 // writeFileAtomic replaces path by writing a sibling temp file and renaming it

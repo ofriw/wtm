@@ -381,7 +381,7 @@ func TestPrintStatusJSONTempFields(t *testing.T) {
 		{Path: "/temp", Branch: "tmp/x", Temp: true, TempCreated: created, TempTTL: 2*time.Hour + 1*time.Nanosecond},
 	}
 	out := captureStdout(t, func() {
-		if err := printStatusJSON(wts, now, ttl); err != nil {
+		if err := printStatusJSON(wts, now, ttl, ""); err != nil {
 			t.Fatalf("printStatusJSON: %v", err)
 		}
 	})

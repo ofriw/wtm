@@ -1,0 +1,88 @@
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE    COST  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -       -  ACTIVE  -     -
+/SBX/wt    wt      -         2020-01-01  6y 2d      0s  ~$0.12  ACTIVE  -     -
+
+~ estimated = a usage record omitted the cache-write lifetime (5m vs 1h), so wtm priced those tokens at the 5-minute rate; a 1-hour write costs more, so the value is a lower bound, not exact data
+
+current worktree  /SBX/repo
+age               6y 2d
+active time       -
+cost              -
+no agent usage recorded
+[
+  {
+    "path": "/SBX/repo",
+    "branch": "main",
+    "upstream": "",
+    "main": true,
+    "current": true,
+    "lastUsed": "2020-01-01T00:00:00Z",
+    "status": "ACTIVE",
+    "ageSeconds": 189388800,
+    "cost": null,
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    },
+    "temp": false,
+    "expiresAt": null
+  },
+  {
+    "path": "/SBX/wt",
+    "branch": "wt",
+    "upstream": "",
+    "main": false,
+    "current": false,
+    "lastUsed": "2020-01-01T00:00:00Z",
+    "status": "ACTIVE",
+    "ageSeconds": 189388800,
+    "cost": 0.121684,
+    "costEstimated": true,
+    "activeSeconds": 0,
+    "usage": {
+      "claude": {
+        "cost": 0.121684,
+        "costEstimated": true,
+        "activeSeconds": 0,
+        "models": {
+          "claude-sonnet-4-6": {
+            "cost": 0.121684,
+            "costEstimated": true,
+            "activeSeconds": 0,
+            "tiers": {
+              "cacheRead": {
+                "tokens": 0,
+                "cost": null
+              },
+              "cacheWrite": {
+                "tokens": 32449,
+                "cost": 0.121684,
+                "costEstimated": true
+              },
+              "input": {
+                "tokens": 0,
+                "cost": null
+              },
+              "output": {
+                "tokens": 0,
+                "cost": null
+              }
+            },
+            "cacheMissTokens": 32449,
+            "cacheHitRate": 0
+          }
+        }
+      }
+    },
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    },
+    "temp": false,
+    "expiresAt": null
+  }
+]

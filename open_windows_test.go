@@ -16,14 +16,14 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// TestOpenSharedAllowsReplaceAndRemove pins the invariant behind every store
+// TestOpenNoBlockAllowsReplaceAndRemove pins the invariant behind every store
 // reader: a held reader handle must not block the writer's atomic replace or
 // delete, or Windows fails them with ERROR_ACCESS_DENIED. It also pins snapshot
 // semantics: the handle keeps reading the replaced file, never a half-written mix.
-func TestOpenSharedAllowsReplaceAndRemove(t *testing.T) {
+func TestOpenNoBlockAllowsReplaceAndRemove(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "store.json")
 	mustWriteWindowsStore(t, p, `{"v":"old"}`)
-	f := openWindowsReader(t, p, openShared)
+	f := openWindowsReader(t, p, openNoBlock)
 	mustWriteWindowsStore(t, p, `{"v":"new"}`)
 	assertWindowsSnapshots(t, f, p, `{"v":"old"}`, `{"v":"new"}`)
 
@@ -32,7 +32,7 @@ func TestOpenSharedAllowsReplaceAndRemove(t *testing.T) {
 
 func assertWindowsRemoveSnapshot(t *testing.T, path, want string) {
 	t.Helper()
-	current := openWindowsReader(t, path, openShared)
+	current := openWindowsReader(t, path, openNoBlock)
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove while held open: %v", err)
 	}
@@ -65,9 +65,9 @@ func TestExtendedPath(t *testing.T) {
 	}
 }
 
-// TestReadFileSharedLongPath pins the end-to-end long-path contract: a path
+// TestReadControlFileLongPath pins the end-to-end long-path contract: a path
 // beyond MAX_PATH written atomically can be read through the shared primitive.
-func TestReadFileSharedLongPath(t *testing.T) {
+func TestReadControlFileLongPath(t *testing.T) {
 	p := longWindowsStorePath(t, "store.json")
 
 	mustWriteWindowsStore(t, p, "long-path")
@@ -79,7 +79,7 @@ func TestReadFileSharedLongPath(t *testing.T) {
 func TestWriteFileAtomicLongPathOverSharedHandle(t *testing.T) {
 	p := longWindowsStorePath(t, "store-世界-😀.json")
 	mustWriteWindowsStore(t, p, "old")
-	f := openWindowsReader(t, p, openShared)
+	f := openWindowsReader(t, p, openNoBlock)
 	mustWriteWindowsStore(t, p, "new")
 	assertWindowsSnapshots(t, f, p, "old", "new")
 }
@@ -146,7 +146,7 @@ func TestRenameReplaceJoinsBothCauses(t *testing.T) {
 func TestRenameReplaceUsesPosixFallbackOverSharedHandle(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "store.json")
 	mustWriteWindowsStore(t, dest, "old")
-	held := openWindowsReader(t, dest, openShared)
+	held := openWindowsReader(t, dest, openNoBlock)
 	premise := mustTempRenameSrc(t, "new")
 	if err := os.Rename(premise, dest); err == nil {
 		t.Skip("premise failed: os.Rename replaced a held destination, env does not enforce share semantics")
@@ -270,9 +270,9 @@ func assertWindowsReaderContents(t *testing.T, f *os.File, want string) {
 
 func assertWindowsStoreContents(t *testing.T, path, want string) {
 	t.Helper()
-	got, err := readFileShared(path)
+	got, err := readControlFile(path)
 	if err != nil {
-		t.Fatalf("readFileShared %q: %v", path, err)
+		t.Fatalf("readControlFile %q: %v", path, err)
 	}
 	if string(got) != want {
 		t.Fatalf("content = %q, want %q", got, want)

@@ -11,12 +11,12 @@ import (
 func requireSessionTime(t *testing.T, owner string, idx sessionIndex, want time.Time) {
 	t.Helper()
 	for _, strict := range []bool{false, true} {
-		got, err := sessionLastUsed(owner, idx, strict)
+		got, err := sessionLastUsed(owner, idx, strict, nil)
 		if err != nil || !got.Equal(want) {
 			t.Fatalf("last used (strict=%v) = %s, %v; want %s", strict, got, err, want)
 		}
 	}
-	if got := lastUsed(owner, idx); !got.Equal(want) {
+	if got := lastUsed(owner, idx, nil); !got.Equal(want) {
 		t.Fatalf("display last used = %s, want %s", got, want)
 	}
 }
@@ -48,7 +48,7 @@ func TestSharedSessionSafetyReplacedIndexedFile(t *testing.T) {
 		target := filepath.Join(t.TempDir(), "foreign.jsonl")
 		writeFile(t, target, "{}\n", 0o600)
 		mustSymlink(t, target, p)
-		if _, err := sessionLastUsed(owner, idx, true); err == nil {
+		if _, err := sessionLastUsed(owner, idx, true, nil); err == nil {
 			t.Fatal("indexed transcript replaced by a symlink must stop removal checks")
 		}
 	})

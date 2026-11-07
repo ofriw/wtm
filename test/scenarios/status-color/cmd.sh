@@ -2,7 +2,8 @@
 # Color is a TTY feature and the harness is non-TTY, so --color forces it.
 # Assert the palette is present, then prove every plain path emits no escapes.
 colored=$(wtm status --color=always)
-grep -q $'\x1b\[1m' <<<"$colored" || { echo 'header is not bold' >&2; exit 1; }
+# Every table header is a cyan title (bold + ANSI cyan).
+grep -q $'\x1b\[1;36m' <<<"$colored" || { echo 'header is not a cyan title' >&2; exit 1; }
 grep -q $'\x1b\[33m' <<<"$colored" || { echo 'no yellow for UNUSED' >&2; exit 1; }
 # The grouped INTEGRATIONS cell colors each token: both are present here, so
 # green must appear even though STATUS is UNUSED (yellow).

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -25,6 +26,33 @@ func deleteResultOf(t *testing.T, g *globals, args ...string) gcResult {
 		t.Fatalf("delete JSON %q: %v", out, err)
 	}
 	return res
+}
+
+// TestFinishLocalDeleteHonorsInterrupt pins the abort contract: interrupts
+// return unchanged, keep the branch, and never warn about a deletion failure.
+func TestFinishLocalDeleteHonorsInterrupt(t *testing.T) {
+	for _, interrupt := range []error{errInterrupted, context.Canceled} {
+		t.Run(interrupt.Error(), func(t *testing.T) {
+			sandbox(t)
+			repo := initRepo(t, "main")
+			gitTestCommit(t, repo)
+			gitTestBranch(t, repo, "feat")
+			var err error
+			errOut := captureStderr(t, func() {
+				res := emptyGCResult(false, false)
+				err = finishLocalDelete(repo, "feat", &res, interrupt)
+			})
+			if !errors.Is(err, interrupt) {
+				t.Fatalf("finishLocalDelete = %v, want the interrupt unchanged", err)
+			}
+			if strings.Contains(errOut, "deletion failure") {
+				t.Fatalf("stderr %q must not claim a deletion failure", errOut)
+			}
+			if !refExists(repo, "refs/heads/feat") {
+				t.Fatal("interrupt must preserve the local branch")
+			}
+		})
+	}
 }
 
 // TestDeleteActiveWorktree pins the unconditional contract: an ACTIVE worktree

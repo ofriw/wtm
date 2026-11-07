@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -96,12 +97,33 @@ func TestSharedSessionSafetyMissingIndexedFile(t *testing.T) {
 		if err := os.Remove(p); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := sessionLastUsed(owner, idx, true); err == nil {
+		if _, err := sessionLastUsed(owner, idx, true, nil); err == nil {
 			t.Fatal("missing indexed session accepted by removal check")
 		}
-		warning := captureStderr(t, func() { lastUsed(owner, idx) })
+		warning := captureStderr(t, func() { lastUsed(owner, idx, nil) })
 		if !strings.Contains(warning, p) {
 			t.Fatalf("display did not disclose missing activity: %q", warning)
+		}
+		// Under the renderer the loss must ride the progress handle: a raw stderr
+		// write would be erased by the next frame.
+		events := make(chan progressEvent, 4)
+		display := &progress{ctx: context.Background(), events: events}
+		if stderr := captureStderr(t, func() { lastUsed(owner, idx, display) }); stderr != "" {
+			t.Fatalf("warning bypassed the progress handle: %q", stderr)
+		}
+		close(events)
+		notices := 0
+		for ev := range events {
+			if ev.kind != evNotice {
+				continue
+			}
+			notices++
+			if !strings.Contains(ev.text, p) {
+				t.Fatalf("notice lost the missing path: %q", ev.text)
+			}
+		}
+		if notices != 1 {
+			t.Fatalf("notices = %d, want 1 routed warning", notices)
 		}
 	})
 }
@@ -151,7 +173,7 @@ func TestSharedSessionSafetyRootMustBeDirectory(t *testing.T) {
 
 func TestSharedSessionSafetyEvidenceAge(t *testing.T) {
 	known := time.Unix(2_000_000, 0)
-	for _, age := range []time.Time{time.Time{}, known.Add(time.Second), known, known.Add(-time.Second)} {
+	for _, age := range []time.Time{{}, known.Add(time.Second), known, known.Add(-time.Second)} {
 		want := age.IsZero() || age.After(known)
 		if got := (unverifiedSession{ModTime: age}).blocksRemoval(known); got != want {
 			t.Fatalf("activity at %s blocks %s = %v, want %v", age, known, got, want)

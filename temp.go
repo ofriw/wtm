@@ -120,16 +120,17 @@ func compactWindow(d time.Duration) string {
 	}
 }
 
-// readTempStoreUnlocked reads the registry via a shared handle that lets a
-// concurrent mutation atomically replace the file (open_windows.go). It is
-// called by both unlocked readers and mutations holding the registry lock.
-// Missing files are empty stores; malformed files remain explicit errors.
+// readTempStoreUnlocked reads the registry through readControlFile, whose
+// handle shares delete so a concurrent mutation can atomically replace the
+// file (fs.go). It is called by both unlocked readers and mutations holding
+// the registry lock. Missing files are empty stores; malformed files remain
+// explicit errors.
 func readTempStoreUnlocked() (tempStore, error) {
 	p, err := tempPath()
 	if err != nil {
 		return nil, err
 	}
-	data, err := readFileShared(p)
+	data, err := readControlFile(p)
 	if os.IsNotExist(err) {
 		return tempStore{}, nil
 	}
@@ -241,7 +242,7 @@ func verifyTempIdentity(path string, rec tempRecord) error {
 	if err != nil {
 		return err
 	}
-	data, err := readFileShared(p)
+	data, err := readControlFile(p)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("%w: missing identity for %s", errTempMetadataChanged, path)

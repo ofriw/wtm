@@ -18,4 +18,5 @@ var piAgent = agent{
 	configDirRel:  []string{".pi", "agent"},
 	sessionSubdir: "sessions",
 	sessionOwner:  piSessionOwner,
+	parseUsage:    piUsageEvents,
 }
