@@ -23,7 +23,6 @@ mk_pi_usage_session "$SBX/wt" pi-usage "$OLD_STAMP" \
   '{"type":"message","timestamp":"2020-01-01T01:40:00Z","message":{"role":"toolResult","toolName":"spawn","details":{"mode":"spawn","results":[{"usage":{"model":"legacy-child","cost":0.30}}]}}}'
 
 wtm config set unusedTTL 36500d
-# .git mtime is the AGE baseline and the session file is activity; backdate the
-# worktree metadata so the fixed 2020 transcript decides LAST USED, while the
-# session events decide ACTIVE and COST.
+# WTM_CREATED_AT (or the .git birth time) sets AGE. The backdated .git mtime
+# sets LAST USED, while the session events decide ACTIVE and COST.
 backdate "$SBX/repo/.git" "$SBX/wt/.git"

@@ -18,7 +18,6 @@ mk_claude_usage_session "$SBX/wt" claude-mixed "$OLD_STAMP" \
   '{"type":"assistant","timestamp":"2020-01-01T01:00:00Z","requestId":"r2","message":{"id":"m2","model":"claude-sonnet-4-6","usage":{"input_tokens":0,"output_tokens":20000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"service_tier":"standard"}}}'
 
 wtm config set unusedTTL 36500d
-# .git mtime is the AGE baseline and the session files are activity; backdate
-# the worktree metadata so the fixed 2020 transcript decides LAST USED, while
-# the session events decide ACTIVE and COST.
+# WTM_CREATED_AT (or the .git birth time) sets AGE. The backdated .git mtime
+# sets LAST USED, while the session events decide ACTIVE and COST.
 backdate "$SBX/repo/.git" "$SBX/wt/.git"

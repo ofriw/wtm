@@ -21,7 +21,6 @@ mk_pi_usage_session "$SBX/wt-sub" pi-sub "$OLD_STAMP" \
   '{"type":"message","timestamp":"2020-01-01T00:45:00Z","message":{"role":"assistant","provider":"openai-codex","model":"gpt-5","usage":{"cost":{"total":20.60}}}}'
 
 wtm config set unusedTTL 36500d
-# .git mtime is the AGE baseline and the session files are activity; backdate
-# the worktree metadata so the fixed 2020 transcripts decide LAST USED, while
-# the session events decide ACTIVE and COST.
+# WTM_CREATED_AT (or the .git birth time) sets AGE. The backdated .git mtime
+# sets LAST USED, while the session events decide ACTIVE and COST.
 backdate "$SBX/repo/.git" "$SBX/wt/.git" "$SBX/wt-sub/.git"
