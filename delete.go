@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -174,6 +175,10 @@ func deletePromptTitle(w worktree, remotes int) string {
 }
 
 func finishLocalDelete(root, branch string, res *gcResult, runErr error) error {
+	// An interrupt aborts: return it unchanged and keep the branch silently.
+	if errors.Is(runErr, errInterrupted) || errors.Is(runErr, context.Canceled) {
+		return runErr
+	}
 	if runErr != nil {
 		// Actionable retry hint; the "kept local branch X" prefix is pinned.
 		warnf("kept local branch %s due to deletion failure; fix the cause and retry `delete %s --yes`", branch, branch)

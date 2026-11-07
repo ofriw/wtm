@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -462,6 +463,9 @@ func loadFromCachePath(path, url string, p *progress) (catalog, error) {
 		p.detail(string(catalogCache))
 		return c, nil
 	}
+	if err := p.abort(); err != nil {
+		return nil, err
+	}
 	c, fetchErr := tryFetch(path, url, p)
 	if fetchErr == nil {
 		return c, nil
@@ -694,7 +698,7 @@ func readFreshCache(path string) (catalog, bool) {
 }
 
 func fetchAndCache(path, url string, p *progress) (catalog, error) {
-	raw, err := fetchRates(url)
+	raw, err := fetchRates(p.context(), url)
 	if err != nil {
 		return nil, err
 	}
@@ -770,9 +774,15 @@ func cacheAgeLabel(path string) string {
 	return humanDuration(age)
 }
 
-func fetchRates(url string) ([]byte, error) {
+// fetchRates retrieves the catalog under the run context, so an interrupted
+// status does not wait out the HTTP timeout.
+func fetchRates(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
 	client := &http.Client{Timeout: ratesFetchTimeout}
-	resp, err := client.Get(url)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

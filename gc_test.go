@@ -57,6 +57,25 @@ func TestFailAbortedExitZero(t *testing.T) {
 	}
 }
 
+// TestGCCleanupStopsBeforeRemovalWhenInterrupted pins the destructive-loop
+// boundary: an already-cancelled run must return the cancellation before
+// touching any worktree, so Ctrl-C cannot delete invisibly.
+func TestGCCleanupStopsBeforeRemovalWhenInterrupted(t *testing.T) {
+	path := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := gcCleanup(filepath.Dir(path), []worktree{{Path: path, Branch: "w"}}, remotePlan{keep: true}, false, nil, gcMode{}, tempNow, &progress{ctx: ctx})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("gcCleanup = %v, want context.Canceled", err)
+	}
+	if len(res.Removed) != 0 {
+		t.Fatalf("interrupted gc reported removals: %v", res.Removed)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("interrupted gc touched the worktree: %v", statErr)
+	}
+}
+
 // isUsage reports whether err is the exit-code-2 usage contract.
 func isUsage(err error) bool {
 	var ue usageError

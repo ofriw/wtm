@@ -447,6 +447,9 @@ func indexSessionsStrict(p *progress) (sessionIndex, []unverifiedSession, error)
 
 func (s *sessionScan) scan(ags []agent) error {
 	for _, a := range ags {
+		if err := s.pol.p.abort(); err != nil {
+			return err
+		}
 		if err := s.walk(a); err != nil {
 			return err
 		}
@@ -470,7 +473,13 @@ func (s *sessionScan) walk(a agent) error {
 		return s.pol.sessionErr(fmt.Errorf("resolve sessions %s: %w", base, err))
 	}
 	s.pol.p.detail(a.name)
-	cands, unverified, walkErrs := collectSessions(a, base, target)
+	if err := s.pol.p.abort(); err != nil {
+		return err
+	}
+	cands, unverified, walkErrs := collectSessions(a, base, target, s.pol.p)
+	if err := s.pol.p.abort(); err != nil {
+		return err
+	}
 	for _, walkErr := range walkErrs {
 		if perr := s.pol.sessionErr(walkErr); perr != nil {
 			return perr
@@ -503,13 +512,16 @@ type unverifiedFile struct {
 // Walk and classification errors are returned, not applied: the caller owns the
 // error policy, so a lenient run reports and continues while a strict run
 // aborts. Order is WalkDir's, which keeps the index deterministic.
-func collectSessions(a agent, base, target string) ([]sessionCandidate, []unverifiedFile, []error) {
+func collectSessions(a agent, base, target string, prog *progress) ([]sessionCandidate, []unverifiedFile, []error) {
 	var (
 		cands      []sessionCandidate
 		unverified []unverifiedFile
 		errs       []error
 	)
 	_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+		if aerr := prog.abort(); aerr != nil {
+			return aerr
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("walk sessions %s: %w", p, err))
 			return nil
@@ -550,6 +562,9 @@ func (s *sessionScan) resolve(a agent, cands []sessionCandidate) error {
 	var processed atomic.Int64
 	reads := mapParallel(len(cands), scanWorkers, func(i int) ownerRead {
 		c := cands[i]
+		if err := s.pol.p.abort(); err != nil {
+			return ownerRead{candidate: c, err: err}
+		}
 		cwd, err := a.readSessionOwner(c.path)
 		n := processed.Add(1)
 		if n%sessionProgressEvery == 0 {
@@ -561,6 +576,9 @@ func (s *sessionScan) resolve(a agent, cands []sessionCandidate) error {
 		return ownerRead{candidate: c, cwd: canonical(cwd)}
 	})
 	for _, r := range reads {
+		if err := s.pol.p.abort(); err != nil {
+			return err
+		}
 		if r.cwd == "" {
 			if err := s.unknown(r.candidate.path, r.err); err != nil {
 				return err

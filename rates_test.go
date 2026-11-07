@@ -900,7 +900,7 @@ func TestClearAttemptMarkersRemovesBoth(t *testing.T) {
 // is refused with the size sentinel and never returned for parsing.
 func TestFetchRatesRejectsOversizedBody(t *testing.T) {
 	url, _ := serveRatesCounting(t, http.StatusOK, strings.Repeat("x", ratesMaxBytes+1))
-	data, err := fetchRates(url)
+	data, err := fetchRates(context.Background(), url)
 	if data != nil || !errors.Is(err, errRateCatalogTooLarge) {
 		t.Fatalf("fetchRates = %d bytes, %v; want nil, errRateCatalogTooLarge", len(data), err)
 	}
@@ -910,7 +910,7 @@ func TestFetchRatesRejectsOversizedBody(t *testing.T) {
 // a body larger than the limit, never exactly the limit.
 func TestFetchRatesAcceptsExactSizeLimit(t *testing.T) {
 	url, _ := serveRatesCounting(t, http.StatusOK, strings.Repeat("x", ratesMaxBytes))
-	data, err := fetchRates(url)
+	data, err := fetchRates(context.Background(), url)
 	if err != nil || len(data) != ratesMaxBytes {
 		t.Fatalf("fetchRates = %d bytes, %v; want the exact cap accepted", len(data), err)
 	}

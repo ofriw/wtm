@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	bubblesprogress "charm.land/bubbles/v2/progress"
@@ -62,6 +66,24 @@ type progressEvent struct {
 	err   error
 }
 
+// errInterrupted is the honest exit for a run stopped by SIGINT/SIGTERM. The
+// work did not fail; the user aborted it, so the message names the abort and
+// main maps it to a non-zero exit.
+var errInterrupted = errors.New("interrupted")
+
+// interruptGrace bounds the teardown join for work that ignores cancellation.
+var interruptGrace = 2 * time.Second
+
+// childCtx is the run's kill scope for git/cp (see childCommand): one renderer.
+var childCtx atomic.Pointer[context.Context]
+
+func childCommand(name string, args ...string) *exec.Cmd {
+	if c := childCtx.Load(); c != nil {
+		return exec.CommandContext(*c, name, args...)
+	}
+	return exec.Command(name, args...)
+}
+
 // progress is the worker's nil-safe handle. Every method no-ops on a nil
 // receiver, so call sites stay unconditional whether the renderer is running.
 type progress struct {
@@ -86,6 +108,24 @@ func (p *progress) send(ev progressEvent) {
 	case p.events <- ev:
 	case <-p.ctx.Done():
 	}
+}
+
+// abort reports a cancelled run at a safe loop boundary. Callers return it so
+// an interrupted command stops instead of finishing invisibly; a nil handle or
+// uncancelled run is live.
+func (p *progress) abort() error {
+	if p == nil || p.ctx == nil {
+		return nil
+	}
+	return p.ctx.Err()
+}
+
+// context returns the run context for cancellable I/O such as the rate fetch.
+func (p *progress) context() context.Context {
+	if p == nil || p.ctx == nil {
+		return context.Background()
+	}
+	return p.ctx
 }
 
 // phase starts a new step: it replaces the label, the counter and the bar.
@@ -278,6 +318,10 @@ func runPlainProgress(out io.Writer, work func(*progress) error) error {
 // time; notices still print because a disclosure must not depend on speed.
 func runProgressProgram(out io.Writer, opts progressOptions, work func(*progress) error) error {
 	ctx, cancel := context.WithCancel(context.Background())
+	if !childCtx.CompareAndSwap(nil, &ctx) {
+		panic("progress: nested renderer")
+	}
+	defer childCtx.Store(nil)
 	defer cancel()
 	workErr, events := feedProgress(ctx, work)
 	if opts.delay > 0 {
@@ -288,16 +332,56 @@ func runProgressProgram(out io.Writer, opts progressOptions, work func(*progress
 		case <-time.After(opts.delay):
 		}
 	}
+	signals := watchInterrupts()
+	defer signal.Stop(signals)
 	prog := tea.NewProgram(newProgressModel(events, progressWidth(out), opts), teaOptions(out, ctx)...)
 	_, runErr := prog.Run()
+	// Read the recorded signal before cancelling: SIGTERM makes Bubble Tea's
+	// Run return nil, so only the record proves the run was interrupted.
+	interrupted := interruptedBySignal(signals) || errors.Is(runErr, tea.ErrInterrupted)
+	// Restore the default disposition first: a second Ctrl-C must terminate.
+	signal.Stop(signals)
 	cancel()
-	if err := <-workErr; err != nil {
+	var err error
+	select {
+	case err = <-workErr:
+	case <-time.After(interruptGrace):
+		warnf("work did not stop within %s of the interrupt; exiting anyway", interruptGrace)
+		return errInterrupted
+	}
+	// A cancelled work result is the second proof: SIGTERM may be delivered to
+	// Bubble Tea before this listener even when it shut down cleanly.
+	interrupted = interrupted || errors.Is(err, context.Canceled)
+	if interrupted {
+		return errInterrupted
+	}
+	if err != nil {
 		if runErr != nil {
 			return fmt.Errorf("%w; renderer: %w", err, runErr)
 		}
 		return err
 	}
 	return runErr
+}
+
+// watchInterrupts records SIGINT/SIGTERM. Bubble Tea keeps its own handler so
+// it can restore the cursor; signal.Notify delivers to every listener, so wtm
+// still learns that the run was interrupted.
+func watchInterrupts() chan os.Signal {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	return sig
+}
+
+// interruptedBySignal consumes a signal recorded for this run. The buffered
+// channel makes the read non-blocking, so a normal exit costs nothing.
+func interruptedBySignal(sig <-chan os.Signal) bool {
+	select {
+	case <-sig:
+		return true
+	default:
+		return false
+	}
 }
 
 // drainSilentRun ends a run that finished inside the silence window. Frames are
@@ -311,15 +395,17 @@ func drainSilentRun(out io.Writer, events <-chan progressEvent) {
 	}
 }
 
-// teaOptions is the renderer's terminal contract: the given output only, no
+// teaOptions is the renderer's terminal contract: the given output only and no
 // input (a second stdin reader would race the huh forms that run next on the
-// tty), and no signal handler (the parent process owns signals).
+// tty). Bubble Tea keeps its signal handler: it quits the renderer through its
+// normal shutdown and restores the cursor. runProgressProgram records the same
+// signal and cancels the work context once Run returns, so an interrupt cannot
+// leave a destructive loop running invisibly.
 func teaOptions(out io.Writer, ctx context.Context) []tea.ProgramOption {
 	return []tea.ProgramOption{
 		tea.WithOutput(out),
 		tea.WithInput(nil),
 		tea.WithContext(ctx),
-		tea.WithoutSignalHandler(),
 	}
 }
 

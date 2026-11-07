@@ -5,9 +5,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -17,11 +21,19 @@ import (
 // explicitly requested progress stays isolated from stdout, so the frames are
 // pollable and every line can be width-checked.
 
-// runStatusTTY runs `wtm status` behind ptys and returns its streams, the raw
-// (unstripped) stderr, and its exit code. text() erases escape sequences, so
-// escape-level assertions must read rawErr. env passes the timing seams that
-// keep the renderer deterministic on a loaded runner.
-func runStatusTTY(t *testing.T, repo string, cols int, env, args []string) (stdout, stderr, rawErr string, rc int) {
+// statusTTY is a live `wtm status` behind ptys. The interrupt test needs the
+// child while it runs, so starting and collecting are separate steps.
+type statusTTY struct {
+	cmd    *exec.Cmd
+	out    *ttyPoll
+	errS   *ttyPoll
+	wg     sync.WaitGroup
+	waitCh <-chan error
+}
+
+// startStatusTTY launches `wtm status` behind ptys. env passes the timing seams
+// that keep the renderer deterministic on a loaded runner.
+func startStatusTTY(t *testing.T, repo string, cols int, env, args []string) *statusTTY {
 	t.Helper()
 
 	masterIn, slaveIn := openTTY(t, cols)
@@ -37,16 +49,29 @@ func runStatusTTY(t *testing.T, repo string, cols int, env, args []string) (stdo
 	_ = slaveIn.Close()
 	_ = slaveErr.Close()
 
-	outStream, errStream := &ttyPoll{}, &ttyPoll{}
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go drainPTY(masterIn, outStream.append, &wg)
-	go drainPTY(masterErr, errStream.append, &wg)
+	s := &statusTTY{cmd: cmd, out: &ttyPoll{}, errS: &ttyPoll{}}
+	s.wg.Add(2)
+	go drainPTY(masterIn, s.out.append, &s.wg)
+	go drainPTY(masterErr, s.errS.append, &s.wg)
+	s.waitCh, _ = waitGCTTY(cmd)
+	return s
+}
 
-	waitCh, _ := waitGCTTY(cmd)
-	waitErr := awaitStatus(t, cmd, waitCh, outStream, errStream)
-	wg.Wait()
-	return crToLF(outStream.text()), crToLF(errStream.text()), errStream.raw(), exitCode(t, "wtm status", waitErr)
+// collect waits for the child to exit and returns its streams, the raw
+// (unstripped) stderr, and its exit code. text() erases escape sequences, so
+// escape-level assertions must read rawErr.
+func (s *statusTTY) collect(t *testing.T) (stdout, stderr, rawErr string, rc int) {
+	t.Helper()
+	waitErr := awaitStatus(t, s.cmd, s.waitCh, s.out, s.errS)
+	s.wg.Wait()
+	return crToLF(s.out.text()), crToLF(s.errS.text()), s.errS.raw(), exitCode(t, "wtm status", waitErr)
+}
+
+// runStatusTTY runs `wtm status` behind ptys and returns its streams, the raw
+// (unstripped) stderr, and its exit code.
+func runStatusTTY(t *testing.T, repo string, cols int, env, args []string) (stdout, stderr, rawErr string, rc int) {
+	t.Helper()
+	return startStatusTTY(t, repo, cols, env, args).collect(t)
 }
 
 // awaitStatus bounds a non-interactive child with a watchdog so a hang is a
@@ -97,6 +122,122 @@ func TestStatusProgressTTY(t *testing.T) {
 			}
 			assertNoTerminalQueries(t, rawErr)
 		})
+	}
+}
+
+// TestStatusProgressInterruptRestoresCursor pins the signal contract: Bubble
+// Tea owns the terminal shutdown (cursor restore), while wtm records the signal,
+// cancels the work and exits non-zero with an honest `interrupted` message. A
+// bare Bubble Tea exit would either print `program was killed` (SIGINT) or exit
+// 0 and print the table as if nothing was aborted (SIGTERM).
+func TestStatusProgressInterruptRestoresCursor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sig  os.Signal
+	}{
+		{"SIGINT", os.Interrupt},
+		{"SIGTERM", syscall.SIGTERM},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := interruptFixture(t)
+			proxy, release := stallCatalogFetch(t)
+
+			s := startStatusTTY(t, repo, 160, []string{"HTTPS_PROXY=" + proxy, "NO_PROXY="}, []string{"--progress", "always"})
+			if err := s.errS.waitContains("loading rate catalog", 15*time.Second, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := s.cmd.Process.Signal(tc.sig); err != nil {
+				t.Fatalf("signal child: %v", err)
+			}
+			// The renderer shows the cursor only after it handles the signal. Wait for
+			// that before unsticking the fetch, so the interrupt lands while the worker
+			// is still stalled and the exit code can only come from the interruption.
+			waitCursorRestored(t, s.errS)
+			release()
+			waitErr := awaitStatus(t, s.cmd, s.waitCh, s.out, s.errS)
+			s.wg.Wait()
+
+			rawErr := s.errS.raw()
+			if rc := exitCode(t, "wtm status", waitErr); rc == 0 {
+				t.Fatalf("interrupted status exited 0; raw stderr:\n%q", rawErr)
+			}
+			if !strings.Contains(rawErr, "\x1b[?25h") {
+				t.Fatalf("interrupted status did not restore the cursor; raw stderr:\n%q", rawErr)
+			}
+			if !strings.Contains(rawErr, "wtm: interrupted") {
+				t.Fatalf("interrupted status did not disclose the abort; raw stderr:\n%q", rawErr)
+			}
+			if strings.Contains(rawErr, "program was killed") {
+				t.Fatalf("interrupted status claimed a kill; raw stderr:\n%q", rawErr)
+			}
+			if out := strings.TrimSpace(crToLF(s.out.text())); out != "" {
+				t.Fatalf("interrupted status printed its table: %q", out)
+			}
+		})
+	}
+}
+
+// interruptFixture seeds a Claude worktree so status reaches the price catalog,
+// which the test stalls on the network.
+func interruptFixture(t *testing.T) string {
+	t.Helper()
+	sandbox(t)
+	writeClaudeAccount(t, "stripe_subscription", "2025-01-01T00:00:00Z")
+	repo := initRepo(t, "main")
+	writeFile(t, filepath.Join(repo, "README.md"), "hello\n", 0o644)
+	gitCommit(t, repo, "seed", "README.md")
+	wt1 := filepath.Join(filepath.Dir(repo), "wt1")
+	gitWorktreeAdd(t, repo, wt1, "wt1", "main")
+	mkClaudeSession(t, wt1, "s-wt1", gcTUISeedTime())
+	return repo
+}
+
+// stallCatalogFetch is the HTTPS proxy the child's catalog fetch dials: it
+// accepts the CONNECT and never answers, so the fetch stays pending. release
+// closes the held connections so the worker can finish after the signal. A
+// FIFO cannot hold the worker any more: the catalog read refuses it at open.
+func stallCatalogFetch(t *testing.T) (proxy string, release func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+		}
+	}()
+	release = sync.OnceFunc(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
+	t.Cleanup(release)
+	return "http://" + ln.Addr().String(), release
+}
+
+// waitCursorRestored blocks until the renderer writes the cursor-show sequence,
+// the point where the interrupt has quit it.
+func waitCursorRestored(t *testing.T, errS *ttyPoll) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(errS.raw(), "\x1b[?25h") {
+		if time.Now().After(deadline) {
+			t.Fatalf("interrupted status never restored the cursor; raw stderr:\n%q", errS.raw())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

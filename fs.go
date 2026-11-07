@@ -100,7 +100,7 @@ func clonePlatform(src, dst string) error {
 	default:
 		return fmt.Errorf("no reflink support on %s", runtime.GOOS)
 	}
-	return exec.Command("cp", args...).Run()
+	return childCommand("cp", args...).Run()
 }
 
 // copyTree mirrors a tree. Live daemon sidecars never cross over: a copied

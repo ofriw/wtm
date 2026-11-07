@@ -92,7 +92,7 @@ func parseWorktrees(porcelain string) []gworktree {
 
 // git runs a git command in dir and returns trimmed stdout.
 func git(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmd := childCommand("git", args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -139,7 +139,7 @@ func gitPrivateDir(dir string) (string, error) {
 
 // gitCurrentBranch returns an empty branch for valid detached HEADs only.
 func gitCurrentBranch(dir string) (string, error) {
-	cmd := exec.Command("git", "symbolic-ref", "--quiet", "--short", "HEAD")
+	cmd := childCommand("git", "symbolic-ref", "--quiet", "--short", "HEAD")
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -211,7 +211,7 @@ func refExists(dir, ref string) bool {
 // isIgnored reports whether rel is ignored in the dir worktree; a non-zero
 // check-ignore exit (not ignored, or not a repo) is simply false.
 func isIgnored(dir, rel string) bool {
-	cmd := exec.Command("git", "check-ignore", "-q", "--", rel)
+	cmd := childCommand("git", "check-ignore", "-q", "--", rel)
 	cmd.Dir = dir
 	return cmd.Run() == nil
 }

@@ -393,7 +393,9 @@ func gcSelection(wts []worktree, o gcOptions, ttl time.Duration, now time.Time, 
 		return gcByPath(wts, o.paths, ttl, now)
 	}
 	candidates := unusedCandidates(wts, now, ttl)
-	markDirty(candidates, p)
+	if err := markDirty(candidates, p); err != nil {
+		return nil, err
+	}
 	return candidates, nil
 }
 
@@ -412,13 +414,17 @@ func unusedCandidates(wts []worktree, now time.Time, ttl time.Duration) []worktr
 // markDirty computes UNCOMMITTED for each candidate under the phase; the picker
 // column and the forced-removal warning are its only consumers, so it is never
 // computed for every worktree in discover.
-func markDirty(candidates []worktree, p *progress) {
+func markDirty(candidates []worktree, p *progress) error {
 	p.phase("checking candidates", len(candidates))
 	for i := range candidates {
+		if err := p.abort(); err != nil {
+			return err
+		}
 		candidates[i].Dirty = worktreeDirty(candidates[i].Path)
 		p.advance(1)
 		p.detail(displayPath(candidates[i].Path))
 	}
+	return nil
 }
 
 func findWorktreeByPath(wts []worktree, want, raw string, now time.Time, ttl time.Duration) (*worktree, error) {
@@ -691,7 +697,13 @@ type gcMode struct {
 // activity under its registry lock; cached evidence never authorizes removal.
 func gcCleanup(root string, selected []worktree, plan remotePlan, keepSessions bool, idx sessionIndex, mode gcMode, now time.Time, p *progress) (gcResult, error) {
 	res := emptyGCResult(keepSessions, plan.keptRemote())
+	if err := p.abort(); err != nil {
+		return res, err
+	}
 	removeSelected(root, selected, plan, keepSessions, mode, now, &res, idx, p)
+	if err := p.abort(); err != nil {
+		return res, err
+	}
 	if len(res.Failed) > 0 {
 		return res, fmt.Errorf("%d cleanup failure(s)", len(res.Failed))
 	}
@@ -704,10 +716,19 @@ func removeSelected(root string, selected []worktree, plan remotePlan, keepSessi
 	p.phase("removing worktrees", len(selected))
 	var removed []worktree
 	for _, w := range selected {
+		if p.abort() != nil {
+			break
+		}
 		if removeOneWorktree(root, w, mode.idleOnly, now, res, p) {
 			removed = append(removed, w)
 		}
 		p.advance(1)
+	}
+	// An interrupt stops the destructive follow-ups (remote purge, branch
+	// cleanup) at this boundary; the partial report discloses what already
+	// happened.
+	if p.abort() != nil {
+		return
 	}
 	// Resolve survivors before any remote delete: even a later ACTIVE skip
 	// must protect its upstream from an earlier selected checkout.
@@ -731,7 +752,13 @@ func protectRemovalSurvivors(root string, removed, survivors []worktree, plan *r
 func finishSelectedCleanup(root string, selected, removed []worktree, plan remotePlan, keepSessions bool, mode gcMode, res *gcResult, idx sessionIndex, p *progress) {
 	outcomes := map[string]error{}
 	for _, w := range removed {
+		if p.abort() != nil {
+			return
+		}
 		purgeWorktree(root, w, plan, keepSessions, res, idx, p, outcomes)
+	}
+	if p.abort() != nil {
+		return
 	}
 	// Prune precedes branch deletion; finishTempCleanup defines recovery policy.
 	pruneWorktrees(res, root, p)
@@ -740,6 +767,9 @@ func finishSelectedCleanup(root string, selected, removed []worktree, plan remot
 	}
 	removedSet := pathSet(res.Removed)
 	for _, w := range selected {
+		if p.abort() != nil {
+			return
+		}
 		if w.Temp && (removedSet[w.Path] || worktreeCleanupFailed(w.Path, res)) {
 			finishTempCleanup(root, w, res, p)
 		}

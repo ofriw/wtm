@@ -24,7 +24,9 @@ func TestScanWorktreesWarningOrder(t *testing.T) {
 	for run := range runs {
 		events := make(chan progressEvent, 4*worktrees+8)
 		p := &progress{ctx: context.Background(), events: events}
-		scanWorktrees(in, p)
+		if _, err := scanWorktrees(in, p); err != nil {
+			t.Fatal(err)
+		}
 		close(events)
 		var notices []string
 		for ev := range events {

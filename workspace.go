@@ -191,7 +191,10 @@ func discoverWithSessions(root string, p *progress, sessions sessionDiscovery) (
 	if err != nil {
 		return nil, nil, err
 	}
-	wts := scanWorktrees(in, p)
+	wts, err := scanWorktrees(in, p)
+	if err != nil {
+		return nil, nil, err
+	}
 	guardPermanentActivity(wts, in.unknown, nowFunc(), p)
 	sortWorktrees(wts)
 	return wts, in.idx, nil
@@ -238,6 +241,9 @@ func discoverInputs(root string, p *progress, sessions sessionDiscovery) (discov
 	go func() { defer wg.Done(); in.ups, upsWarn = discoverUpstreams(root) }()
 	go func() { defer wg.Done(); in.temps, tempWarn = readTempStoreLenient() }()
 	wg.Wait()
+	if err := p.abort(); err != nil {
+		return discoveryInputs{}, err
+	}
 	if rawErr != nil {
 		return discoveryInputs{}, rawErr
 	}
@@ -279,6 +285,7 @@ func readTempStoreLenient() (tempStore, string) {
 type inventoryResult struct {
 	w        worktree
 	warnings []string
+	err      error
 }
 
 // scanWorktrees builds the inventory concurrently: each worktree reads its own
@@ -286,9 +293,12 @@ type inventoryResult struct {
 // independent. The label follows the worktree a worker picked up, which is the
 // live "what is being processed" answer; results stay in git's order, and so do
 // the warnings they carry.
-func scanWorktrees(in discoveryInputs, p *progress) []worktree {
+func scanWorktrees(in discoveryInputs, p *progress) ([]worktree, error) {
 	p.phase("scanning worktrees", len(in.raw))
 	results := mapParallel(len(in.raw), scanWorkers, func(i int) inventoryResult {
+		if err := p.abort(); err != nil {
+			return inventoryResult{err: err}
+		}
 		g := in.raw[i]
 		p.detail(displayPath(g.Path))
 		var warnings []string
@@ -298,12 +308,15 @@ func scanWorktrees(in discoveryInputs, p *progress) []worktree {
 	})
 	wts := make([]worktree, len(results))
 	for i, r := range results {
+		if r.err != nil {
+			return nil, r.err
+		}
 		wts[i] = r.w
 		for _, text := range r.warnings {
 			emitProgress(p, text)
 		}
 	}
-	return wts
+	return wts, nil
 }
 
 // sortWorktrees orders main first, then most recently used, then path — a
