@@ -719,8 +719,10 @@ func ratesCachePath() (string, error) {
 }
 
 // parseCatalogFile reads through readFileLimited: the cap stops a corrupt or
-// hostile file from exhausting memory, and openShared keeps the Windows
-// atomic-replace behavior (open_windows.go, rename_windows.go).
+// hostile file from exhausting memory, and the guarded open refuses a FIFO,
+// device or directory before reading, so a hostile cache path cannot hang
+// status. openNoBlock still shares delete, so the Windows atomic replace
+// (open_windows.go, rename_windows.go) keeps working.
 func parseCatalogFile(path string) (catalog, error) {
 	data, err := readFileLimited(path, ratesMaxBytes)
 	if errors.Is(err, errFileTooLarge) {

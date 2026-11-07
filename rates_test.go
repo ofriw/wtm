@@ -559,7 +559,7 @@ func assertNoRatesTempLeak(t *testing.T, path string) {
 func TestRatesRefreshReplacesHeldSnapshot(t *testing.T) {
 	const stale = `{"m1":{"input_cost_per_token":0.000009}}`
 	path := pinStaleCatalog(t, stale)
-	held, err := openShared(path)
+	held, err := openNoBlock(path)
 	if err != nil {
 		t.Fatal(err)
 	}

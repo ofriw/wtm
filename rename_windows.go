@@ -41,7 +41,7 @@ func isOpenHandleReplaceErr(err error) bool {
 // posixRename renames by handle, so an open destination is replaced the way
 // POSIX rename(2) does. The source handle must carry DELETE access and share
 // delete (openForRename); the destination reader must hold FILE_SHARE_DELETE
-// (openShared) — the POSIX-semantics flag is what actually permits the replace,
+// (openNoBlock) — the POSIX-semantics flag is what actually permits the replace,
 // not the share alone.
 func posixRename(oldname, newname string) error {
 	src, err := openForRename(oldname)

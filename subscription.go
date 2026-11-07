@@ -156,7 +156,7 @@ const claudeAccountMaxBytes = 64 << 20
 // readClaudeAccount decodes only the top-level facts, streaming past the history
 // fields instead of buffering the whole file the way readJSON would.
 func readClaudeAccount(path string) (*claudeAccount, error) {
-	f, err := openShared(path)
+	f, err := openRegularFile(path)
 	if err != nil {
 		return nil, err
 	}
