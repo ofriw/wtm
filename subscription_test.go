@@ -1277,12 +1277,15 @@ func TestStatusWarnsOnRefusedProjectSettings(t *testing.T) {
 	if err := os.MkdirAll(settings, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// An unclean spelling must still match: status names the canonical path it
+	// read, so a raw compare must fail on every OS, not only Windows.
+	expected := settings + string(os.PathSeparator) + "."
 
 	_, stderr, rc := runWTM(t, repo, nil, "status")
 	if rc != 0 {
 		t.Fatalf("rc = %d, want 0\n%s", rc, stderr)
 	}
-	if !strings.Contains(stderr, settings) || !strings.Contains(stderr, "not a regular file") ||
+	if !mentionsPath(stderr, expected) || !strings.Contains(stderr, "not a regular file") ||
 		!strings.Contains(stderr, "claude costs use list price") {
 		t.Fatalf("status must disclose the refused settings path and reason; stderr:\n%s", stderr)
 	}
