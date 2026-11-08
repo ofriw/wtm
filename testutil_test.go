@@ -111,12 +111,17 @@ func assertWorktreeNotListed(t *testing.T, repo, wt string) {
 	}
 }
 
-// assertErrorNamesPath pins that err names path. Both sides compare canonically:
-// a raw t.TempDir path can be a Windows 8.3 alias (RUNNER~1), while production
-// errors embed the canonical store key, so a raw compare fails only on Windows.
+// mentionsPath reports whether text names path. Both sides compare canonically:
+// a raw t.TempDir path can be a Windows 8.3 alias (RUNNER~1) or a macOS /var
+// symlink, while production embeds the canonical path it read.
+func mentionsPath(text, path string) bool {
+	return strings.Contains(text, canonical(path))
+}
+
+// assertErrorNamesPath pins that err names path.
 func assertErrorNamesPath(t *testing.T, what string, err error, path string) {
 	t.Helper()
-	if err == nil || !strings.Contains(err.Error(), canonical(path)) {
+	if err == nil || !mentionsPath(err.Error(), path) {
 		t.Fatalf("%s (want %s): %v", what, path, err)
 	}
 }
