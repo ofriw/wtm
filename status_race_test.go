@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,17 @@ import (
 // the documented JSON plus the absence of a detector report. A race in a worker
 // fails here whichever language implements wtm.
 
+// skipOrFailRace keeps the local skip but forbids it in a job that must verify
+// the detector. CI sets WTM_REQUIRE_RACE so a missing cgo toolchain or -short
+// flag fails visibly instead of losing coverage.
+func skipOrFailRace(t *testing.T, reason string) {
+	t.Helper()
+	if os.Getenv("WTM_REQUIRE_RACE") != "" {
+		t.Fatalf("%s; WTM_REQUIRE_RACE forbids a silent skip", reason)
+	}
+	t.Skip(reason)
+}
+
 // buildRaceWTM builds the CLI with the race detector. A race in the child is
 // invisible to the test process's own -race instrumentation, so the child must
 // carry the detector too.
@@ -24,7 +36,7 @@ func buildRaceWTM(t *testing.T) string {
 	t.Helper()
 	out, err := exec.Command("go", "env", "CGO_ENABLED").Output()
 	if err != nil || strings.TrimSpace(string(out)) != "1" {
-		t.Skip("race-instrumented build needs cgo")
+		skipOrFailRace(t, "race-instrumented build needs cgo")
 	}
 	bin := filepath.Join(t.TempDir(), exeName("wtm-race"))
 	if out, err := exec.Command("go", "build", "-race", "-o", bin, ".").CombinedOutput(); err != nil {
@@ -66,7 +78,7 @@ type jsonWT struct {
 // here instead of crashing an operator's terminal.
 func TestStatusSharedProofRaceFree(t *testing.T) {
 	if testing.Short() {
-		t.Skip("race build is slow")
+		skipOrFailRace(t, "race build is slow and -short was requested")
 	}
 	bin := buildRaceWTM(t) // must precede sandbox: a sandboxed HOME relocates GOMODCACHE
 	sb := sandbox(t)

@@ -68,6 +68,10 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: go test -race
+        # The shared-proof race test skips without cgo or under -short. CI has
+        # both prerequisites, so a skip here is a coverage loss, not a pass.
+        env:
+          WTM_REQUIRE_RACE: "1"
         run: go test -race -count=1 ./...
 
   # Tier 2: container golden filesystem diff, authoritative for integration.
