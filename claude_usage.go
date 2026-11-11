@@ -235,18 +235,42 @@ func claudeStopKind(stop string) activityKind {
 	}
 }
 
-// claudeUserKind distinguishes a human prompt (a string or a content block
-// without tool_result) from a tool result. The content is raw so a large tool
-// result is never decoded into blocks.
+// claudeUserKind distinguishes a human prompt from a tool result by block type.
+// A text value that happens to spell tool_result must not turn a human prompt
+// into work, so the raw bytes are scanned structurally: the decoder reads only
+// each block's type and skips content-heavy fields without a second copy.
 func claudeUserKind(content json.RawMessage) activityKind {
 	trimmed := bytes.TrimSpace(content)
 	if len(trimmed) == 0 || trimmed[0] != '[' {
 		return activityHuman
 	}
-	if bytes.Contains(trimmed, []byte(`"tool_result"`)) {
+	if claudeContentHasToolResult(trimmed) {
 		return activityWork
 	}
 	return activityHuman
+}
+
+// claudeContentHasToolResult reports whether a content block array carries a
+// tool_result block. Malformed JSON stays human: activity never prices, and a
+// prompt should close the previous turn rather than keep it open.
+func claudeContentHasToolResult(content []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(content))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('[') {
+		return false
+	}
+	for dec.More() {
+		var block struct {
+			Type string `json:"type"`
+		}
+		if err := dec.Decode(&block); err != nil {
+			return false
+		}
+		if block.Type == "tool_result" {
+			return true
+		}
+	}
+	return false
 }
 
 // claudeTurnKey is the billed-turn identity. Both ids absent is an empty key,
