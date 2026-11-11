@@ -116,17 +116,22 @@ func TestWriteFileAtomicConcurrentWriters(t *testing.T) {
 	if err := writeFileAtomic(path, []byte(payloads[0]), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	exerciseAtomicReadWrite(t, path, payloads)
+	exerciseAtomicReadWrite(t, path, payloads, func(path string, i int) error {
+		return writeFileAtomic(path, []byte(payloads[i]), 0o600)
+	})
 	assertAtomicDirectory(t, dir, filepath.Base(path), false)
 }
 
-func exerciseAtomicReadWrite(t *testing.T, path string, payloads []string) {
+// exerciseAtomicReadWrite races one reader against every writer. payloads holds
+// each writer's acceptable output; write emits writer i's payload. The writer is
+// a parameter so a boundary (e.g. writeJSON) can pin its own atomicity.
+func exerciseAtomicReadWrite(t *testing.T, path string, payloads []string, write func(path string, i int) error) {
 	t.Helper()
 	stop, ready := make(chan struct{}), make(chan struct{})
 	reads := make(chan error, 1)
 	go checkAtomicReads(path, payloads, stop, ready, reads)
 	<-ready
-	runAtomicWriters(t, path, payloads)
+	runAtomicWriters(t, path, len(payloads), write)
 	close(stop)
 	if err := <-reads; err != nil {
 		t.Fatal(err)
@@ -169,15 +174,15 @@ func checkAtomicReads(path string, payloads []string, stop, ready chan struct{},
 	result <- err
 }
 
-func runAtomicWriters(t *testing.T, path string, payloads []string) {
+func runAtomicWriters(t *testing.T, path string, writers int, write func(path string, i int) error) {
 	t.Helper()
 	var wg sync.WaitGroup
-	for _, payload := range payloads {
+	for writer := 0; writer < writers; writer++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 20; i++ {
-				if err := writeFileAtomic(path, []byte(payload), 0o600); err != nil {
+				if err := write(path, writer); err != nil {
 					t.Error(err)
 					return
 				}

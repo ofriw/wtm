@@ -315,13 +315,21 @@ func withFileLock(lockPath string, fn func() error) error {
 	return fn()
 }
 
-// writeJSON writes indented JSON with world-readable 0644.
+// writeJSON writes indented JSON atomically. The rename protects a concurrent
+// reader from a truncated body. An existing file keeps its permission bits so a
+// copied 0600 secret config stays private; a new file gets world-readable 0644.
 func writeJSON(path string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return writeFileAtomic(path, append(b, '\n'), mode)
 }
 
 // printJSON writes indented JSON to stdout (machine output contract).

@@ -316,6 +316,40 @@ func TestWriteJSONContract(t *testing.T) {
 	}
 }
 
+func TestWriteJSONPreservesExistingMode(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "secret.json")
+	writeFile(t, p, "{}\n", 0o600)
+	chmodTest(t, p, 0o600)
+	if err := writeJSON(p, map[string]any{"token": "x"}); err != nil {
+		t.Fatalf("writeJSON: %v", err)
+	}
+	fsAssertMode(t, p, 0o600)
+	assertAtomicDirectory(t, dir, filepath.Base(p), false)
+}
+
+func TestWriteJSONConcurrentReadersNeverTruncated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.json")
+	docs := make([]map[string]any, 8)
+	accepted := make([]string, len(docs))
+	for i := range docs {
+		docs[i] = map[string]any{"writer": i, "data": strings.Repeat(string(rune('a'+i)), 64*1024)}
+		b, err := json.MarshalIndent(docs[i], "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		accepted[i] = string(append(b, '\n')) // writeJSON's exact encoding
+	}
+	if err := writeJSON(path, docs[0]); err != nil {
+		t.Fatal(err)
+	}
+	exerciseAtomicReadWrite(t, path, accepted, func(path string, i int) error {
+		return writeJSON(path, docs[i])
+	})
+	assertAtomicDirectory(t, dir, filepath.Base(path), false)
+}
+
 func TestPrintJSON(t *testing.T) {
 	out := captureStdout(t, func() {
 		if err := printJSON(map[string]any{"a": 1}); err != nil {
