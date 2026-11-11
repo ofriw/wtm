@@ -113,9 +113,11 @@ func assertWorktreeNotListed(t *testing.T, repo, wt string) {
 
 // mentionsPath reports whether text names path. Both sides compare canonically:
 // a raw t.TempDir path can be a Windows 8.3 alias (RUNNER~1) or a macOS /var
-// symlink, while production embeds the canonical path it read.
+// symlink, while production embeds the canonical path it read. Both sides also
+// use one separator spelling: git emits forward slashes on Windows, while
+// t.TempDir paths use backslashes.
 func mentionsPath(text, path string) bool {
-	return strings.Contains(text, canonical(path))
+	return strings.Contains(filepath.ToSlash(text), filepath.ToSlash(canonical(path)))
 }
 
 // assertErrorNamesPath pins that err names path.

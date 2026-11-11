@@ -29,10 +29,55 @@ func TestUsageDocumentsWide(t *testing.T) {
 	}
 }
 
+// TestNativeAddHelpShowsSeedDefault pins the visible seed rule: subcommand
+// flags must be printed by -h, not only the global usage summary.
+func TestNativeAddHelpShowsSeedDefault(t *testing.T) {
+	out, errOut, rc := runWTM(t, t.TempDir(), nil, "add", "-h")
+	if rc != 0 {
+		t.Fatalf("add -h rc = %d, stderr = %s", rc, errOut)
+	}
+	if !strings.Contains(out+errOut, "default-branch worktree") {
+		t.Fatalf("add -h must document the default-branch source:\n%s%s", out, errOut)
+	}
+}
+
+// TestNativeHelpPrintsGlobalsOnce pins the -h contract: the subcommand list
+// carries only local flags because the usage block is the globals' single home.
+func TestNativeHelpPrintsGlobalsOnce(t *testing.T) {
+	locals := map[string][]string{
+		"add":     {"-from", "-no-index"},
+		"gc":      {"-all", "-keep-remote"},
+		"status":  {"-wide"},
+		"config":  {},
+		"promote": {},
+		"delete":  {"-keep-remote"},
+	}
+	for _, cmd := range []string{"add", "gc", "status", "config", "promote", "delete"} {
+		t.Run(cmd, func(t *testing.T) {
+			out, errOut, rc := runWTM(t, t.TempDir(), nil, cmd, "-h")
+			if rc != 0 {
+				t.Fatalf("%s -h rc = %d, stderr = %s", cmd, rc, errOut)
+			}
+			help := out + errOut
+			for _, name := range []string{"root", "json", "color", "progress", "yes"} {
+				if n := strings.Count(help, "\n  -"+name) + strings.Count(help, "\n  --"+name); n != 1 {
+					t.Fatalf("%s -h shows -%s %d times, want once:\n%s", cmd, name, n, help)
+				}
+			}
+			for _, flag := range locals[cmd] {
+				if !strings.Contains(help, "\n  "+flag) {
+					t.Fatalf("%s -h must show %s:\n%s", cmd, flag, help)
+				}
+			}
+		})
+	}
+}
+
 func TestNativeExitCodes(t *testing.T) {
 	sandbox(t)
 	outside := t.TempDir()
 	repo := nativeRepo(t)
+	gitTestBranch(t, repo, "feature/existing")
 
 	cases := []struct {
 		name string
@@ -47,6 +92,8 @@ func TestNativeExitCodes(t *testing.T) {
 		{"wide with json is a usage error", repo, []string{"status", "--wide", "--json"}, 2},
 		{"invalid color after subcommand", repo, []string{"status", "--color", "bogus"}, 2},
 		{"invalid progress after subcommand", repo, []string{"status", "--progress", "bogus"}, 2},
+		{"bad start-point create", repo, []string{"add", "feature/new", "no-such-ref", "--no-index"}, 2},
+		{"bad start-point attach", repo, []string{"add", "feature/existing", "no-such-ref", "--no-index"}, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

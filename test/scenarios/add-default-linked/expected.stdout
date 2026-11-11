@@ -1,0 +1,6 @@
+worktree: /SBX/repo-wt-child
+branch:   wt-child
+base:     refs/remotes/origin/main (remote)
+source:   /SBX/wt-main
+indexed:  false
+marker: {"from":"main-linked"}

@@ -4,6 +4,7 @@
   "base": "refs/heads/main",
   "source": "/SBX/repo",
   "indexed": false,
+  "attached": false,
   "temp": true,
   "ttl": "100ms",
   "expiresAt": "<expiresAt>"

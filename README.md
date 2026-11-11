@@ -14,7 +14,7 @@ A fresh `git worktree add` gives you checked-out files and nothing else — no a
 
 ## What it does
 
-- **`add`** — create a worktree that's ready to work in: agent harness wired up, ChunkHound index seeded and refreshed.
+- **`add`** — create a worktree that's ready to work in: agent harness wired up, ChunkHound index seeded and refreshed. If the branch already exists, `add` attaches to it instead of creating a new one.
 - **`status`** — see every worktree at a glance, and whether it's `ACTIVE` or `UNUSED`.
 - **`delete`** — reclaim a single worktree by branch, even if it's `ACTIVE`.
 - **`gc`** — reclaim the `UNUSED` ones, and nothing else, with every destructive step disclosed first.
@@ -57,6 +57,42 @@ pruned
 sessions purged: 1
 ```
 
+## Attaching an existing branch
+
+`wtm add <branch>` attaches when the branch already exists locally. The checkout lands on that
+branch, its configured upstream is preserved, and the same harness and index setup runs. A
+branch that is already checked out in another worktree fails and names that worktree. A supplied
+start-point must match the branch tip. `--temp` always requires a new branch.
+
+Matching keeps Git's stored spelling. `wtm add` tries the raw name first, exact then as a unique
+case-insensitive match. If neither matches, it tries the normalized name (lowercase, `_` and
+spaces become `-`), again exact then case-insensitive. A request that matches several branches
+only by case is refused as ambiguous; an exact spelling wins. Names that normalization would
+rewrite or reject, such as `Feature/under_score` or `Feature/C++`, attach as written.
+
+Use the branch name reported by `add`: `--json` sets `attached` to `true` or `false`, and human
+output appends `(existing)`.
+
+```console
+$ wtm add feature/under_score --no-index
+worktree: /Users/you/dev/app-feature-under-score
+branch:   Feature/under_score (existing)
+base:     refs/heads/Feature/under_score (local)
+source:   /Users/you/dev/app
+indexed:  false
+
+$ wtm add feature/under_score --no-index --json
+{
+  "path": "/Users/you/dev/app-feature-under-score",
+  "branch": "Feature/under_score",
+  "base": "refs/heads/Feature/under_score",
+  "source": "/Users/you/dev/app",
+  "indexed": false,
+  "attached": true,
+  "temp": false
+}
+```
+
 ## Temporary worktrees
 
 For short-lived tasks — PR reviews, repros, throwaway experiments — `wtm add <name> --temp`
@@ -94,6 +130,16 @@ Running `wtm status` below the table prints the current worktree's age, active t
 The JSON output adds `current`, `ageSeconds` (null when unknown), `cost` (null when unknown or absent), and — for worktrees with recorded usage — `activeSeconds` (the union of causal agent turns; idle between turns is excluded) and a `usage` map keyed by harness, each with `cost`, `activeSeconds`, and a per-`models` breakdown. `cost` is the billed amount; a `listCost` key appears beside it at the worktree, harness, model, and token-tier levels only when a proven subscription makes the billed and list values differ. When present, its value is `null` if the list is unknown. The key is omitted when no subscription is proven, when a proven price is equal, or when both sides are unknown. A model with recorded tokens adds a `tiers` map (`input`, `cacheRead`, `cacheWrite`, `output`), each tier carrying its `tokens` count, `cost`, and optional `listCost`, plus `cacheMissTokens` (uncached input plus cache write) and `cacheHitRate` (`cacheRead / in`, caps at 0.999, where `in` holds all prompt tokens with unclassified writes, omitted when no build is recorded). A worktree with recorded output adds `inputOutputRatio` — `total`, `cached`, and `uncached` input-to-output shares that all divide the same recorded output, so they add up before rounding (`total = cached + uncached`); the key is omitted when no output was recorded, because a ratio without a denominator is undefined. A partial total keeps its readable numbers and marks the loss: the worktree, each affected harness, and each affected model carry `partial:true`; when `inputOutputRatio` is present, it carries `partial:true` too. A partial harness or model can report `activeSeconds: 0`; `partial:true` marks that zero as a readable lower bound. A total with no readable events omits `activeSeconds` and `usage` and keeps `partial:true`. Worktrees with no usage omit `activeSeconds` and `usage`.
 
 **Breaking (earlier integrations change):** the `config`, `db`, `mcp`, and `mcpNative` boolean keys were removed when the integrations were unified — not by cost tracking. Update consumers to use the `integrations` string map instead (`wtm status --json | jq '.[].integrations'`). `mcp` keeps its old meaning — any recognized MCP config counts (`yes`); a harness's own config (`.pi/mcp.json`, `.claude/settings*.json`) also lights that harness's key. `chunk~` (and `partial` in `--wide`/JSON) is config-xor-database: exactly one side is present. `wtm` no longer reports which side — inspect the worktree to find out.
+
+**Changed:** `wtm add` now seeds a new branch with no `--from` and no start-point from a usable worktree that has the default branch checked out, even when that worktree is ahead of or behind the resolved default ref. The new branch still forks from the resolved default ref. If several usable worktrees check out the default branch, the primary worktree seeds first; otherwise the linked worktree with the lowest path wins. Equal committed trees produce no notice. If no usable default-branch worktree exists, the source falls back to the worktree at the resolved ref, then the main worktree, and warns only when the committed trees differ. `--from` remains silent.
+
+- Default-branch source with a different tree: `seeding from <path>: default branch <name> is checked out there, but the start-point is <ref>`.
+- Create fallback with a different tree: `no usable worktree for <ref>; seeding from <path>`. A create fallback with equal committed trees no longer warns.
+- Attach fallback: `branch <ref> is not checked out; seeding from <path>` (unchanged).
+- `--no-index` with a copied database appends: `; the copied ChunkHound index is stale: indexing was skipped`.
+- The old `the copied ChunkHound index cannot match and indexing will re-embed` suffix is removed. It appeared only when indexing ran over a copied database. `--no-index` did not emit it. Scripts that match it must change.
+
+**Changed:** `-h` on a subcommand lists only that subcommand's own flags. The global flags (`--root`, `--json`, `--color`, `--progress`, `--yes`) appear once, in the usage block.
 
 Copied worktree configs may hold API keys. `wtm` never commits them — add them to `.gitignore` if they do.
 
