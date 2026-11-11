@@ -2,9 +2,7 @@ package main
 
 import (
 	"math/rand"
-	"os"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 )
@@ -116,30 +114,6 @@ func TestMoneyMixedCausesAndUnknownPrecedence(t *testing.T) {
 	}
 	if !m.hasCause(causeCacheWrite) || !m.hasCause(causeSubscriptionOverage) {
 		t.Errorf("causes must survive the unknown taint: %+v", m)
-	}
-}
-
-// TestOverageCauseSingleWriter guards the invariant needsOverageLegend rests
-// on: the overage cause marks a proven subscription's allowance risk, so only
-// estimatedZero (usage.go) may set it. A stray writer would print the
-// allowance caveat to users with no behavioral test failing.
-func TestOverageCauseSingleWriter(t *testing.T) {
-	files, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, f := range files {
-		name := f.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || name == "usage.go" {
-			continue
-		}
-		src, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(src), "causeSubscriptionOverage") {
-			t.Errorf("%s writes causeSubscriptionOverage; only usage.go's estimatedZero may set it", name)
-		}
 	}
 }
 

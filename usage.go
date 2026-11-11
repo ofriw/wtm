@@ -23,7 +23,8 @@ type estimateCause uint8
 const (
 	// causeCacheWrite: a record omitted the 5m/1h cache-write split.
 	causeCacheWrite estimateCause = 1 << iota
-	// causeSubscriptionOverage: a covered $0 may still bill overage.
+	// causeSubscriptionOverage: a covered $0 may still bill overage. Only
+	// estimatedZero may set it; `make guard` fails the build on any other writer.
 	causeSubscriptionOverage
 )
 
