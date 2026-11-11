@@ -154,14 +154,14 @@ func TestLastUsed(t *testing.T) {
 	sandbox(t)
 	wt := t.TempDir()
 	idx := mustIndexSessions(t)
-	if got := lastUsed(wt, idx); !got.IsZero() {
+	if got := lastUsed(wt, idx, nil); !got.IsZero() {
 		t.Fatalf("lastUsed with no sessions = %v, want zero", got)
 	}
 	newest := time.Unix(2_000_000, 0)
 	mkSession(t, wt, "old", time.Unix(1_000_000, 0))
 	mkSession(t, wt, "new", newest)
 	idx = mustIndexSessions(t)
-	if got := lastUsed(wt, idx); !got.Equal(newest) {
+	if got := lastUsed(wt, idx, nil); !got.Equal(newest) {
 		t.Fatalf("lastUsed = %v, want %v", got, newest)
 	}
 }

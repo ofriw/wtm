@@ -1,10 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
-	"time"
 )
 
 // delete.go — branch-addressed reclamation. `delete <branch>` runs the same
@@ -39,7 +39,7 @@ func cmdDelete(g *globals, args []string) error {
 }
 
 func prepareDelete(g *globals, o deleteOptions) (workspace, worktree, remotePlan, error) {
-	ws, err := loadWorkspace(g, true, true)
+	ws, err := loadWorkspaceProgress(g, true)
 	if err != nil {
 		return workspace{}, worktree{}, remotePlan{}, err
 	}
@@ -51,7 +51,7 @@ func prepareDelete(g *globals, o deleteOptions) (workspace, worktree, remotePlan
 	if err != nil {
 		return workspace{}, worktree{}, remotePlan{}, err
 	}
-	now := time.Now()
+	now := nowFunc()
 	// Same ACTIVE disclosure as gc --path (findWorktreeByPath).
 	if !w.unused(now, ws.ttl) {
 		warnf("%s is ACTIVE (%s)", w.Path, w.status(now, ws.ttl))
@@ -158,6 +158,10 @@ func deletePromptTitle(w worktree, remotes int) string {
 }
 
 func finishLocalDelete(root, branch string, res *gcResult, runErr error) error {
+	// An interrupt aborts: return it unchanged and keep the branch silently.
+	if errors.Is(runErr, errInterrupted) || errors.Is(runErr, context.Canceled) {
+		return runErr
+	}
 	if runErr != nil {
 		// Actionable retry hint; the "kept local branch X" prefix is pinned.
 		warnf("kept local branch %s due to deletion failure; fix the cause and retry `delete %s --yes`", branch, branch)
@@ -178,9 +182,9 @@ func runDelete(g *globals, root string, w worktree, plan remotePlan, keepSession
 	// clear Dirty to keep removeOneWorktree from warning a second time.
 	w.Dirty = false
 	var res gcResult
-	runErr := withProgress(g, true, func(p *progress) error {
+	runErr := withProgress(g, progressOptions{}, func(p *progress) error {
 		var rerr error
-		res, rerr = gcCleanup(root, []worktree{w}, plan, keepSessions, idx, gcMode{}, time.Now(), p)
+		res, rerr = gcCleanup(root, []worktree{w}, plan, keepSessions, idx, gcMode{}, nowFunc(), p)
 		return rerr
 	})
 	if len(res.Removed) > 0 {
@@ -198,7 +202,7 @@ func deleteOrphanFallback(g *globals, o deleteOptions, cause error) error {
 	if cause == nil || !errors.Is(cause, errNoWorktreeForBranch) {
 		return cause
 	}
-	ws, err := loadWorkspace(g, true, true)
+	ws, err := loadWorkspaceProgress(g, true)
 	if err != nil {
 		return err
 	}
@@ -241,7 +245,7 @@ func runBranchOnlyDelete(g *globals, o deleteOptions, root string, wts []worktre
 // local branch, reusing the shared purge and branch finishers.
 func runOrphanDelete(g *globals, root string, w worktree, plan remotePlan, keepSessions bool) (gcResult, error) {
 	res := emptyGCResult(keepSessions, plan.keptRemote())
-	runErr := withProgress(g, true, func(p *progress) error {
+	runErr := withProgress(g, progressOptions{}, func(p *progress) error {
 		if !plan.keep && w.Upstream.onRemote() {
 			purgeRemoteWorktree(root, w, plan, &res, p, map[string]error{})
 		}

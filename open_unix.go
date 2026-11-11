@@ -2,10 +2,15 @@
 
 package main
 
-import "os"
+import (
+	"os"
+	"syscall"
+)
 
-// openShared opens path for reading. POSIX rename(2) and unlink preserve open
-// handles, so a reader can never block an atomic replace (open_windows.go).
-func openShared(path string) (*os.File, error) {
-	return os.Open(path)
+// openNoBlock opens path without waiting for a FIFO writer. A blocking open is
+// how status would hang on a hostile path; O_NONBLOCK lets the caller inspect
+// the handle and refuse it. Regular-file reads ignore the flag, and POSIX
+// rename(2)/unlink preserve the open handle, so an atomic replace never blocks.
+func openNoBlock(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 }

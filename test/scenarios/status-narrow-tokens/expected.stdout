@@ -1,0 +1,20 @@
+PATH       BRANCH  UPSTREAM   LAST USED    AGE     ACTIVE   COST  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d          -      -  ACTIVE  -     -
+/SBX/wt    wt      -         2020-01-01  6y 2d  1d 2h 30m  $5.20  ACTIVE  -     -
+
+current worktree  /SBX/wt
+age               6y 2d
+active time       1d 2h 30m
+cost              $5.20
+total in:out      98.2:1
+cached in:out     95.3:1
+uncached in:out   2.9:1
+
+MODEL                                     TIME   COST   ↑ in   ↓ out  ↩ hit  ↪ write  × miss  ● hit%
+deepseek/deepseek…-flash-vision-exp  1d 2h 30m  $5.15   3.9B   40.0M   3.8B     1.0M  109.0M   97.2%
+moonshotai/kimi-k3                          0s  $0.05  83.7M  667.1k  75.9M     3.9M    7.8M   90.7%
+
+tokens:
+  in   = uncached input + cache read + cache write (total input)
+  miss = uncached input + cache write
+  hit% = hit / in

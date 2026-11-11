@@ -87,24 +87,24 @@ func TestWriteFileAtomicOverwritesExisting(t *testing.T) {
 	fsAssertMode(t, path, 0o600)
 }
 
-// TestReadFileShared pins the primitive contract every store reader relies on:
+// TestReadControlFileReturnsContents pins the primitive contract every store reader relies on:
 // it returns file contents and reports a missing file as os.ErrNotExist.
-func TestReadFileShared(t *testing.T) {
+func TestReadControlFileReturnsContents(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "store.json")
 	if err := os.WriteFile(path, []byte(`{"v":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := readFileShared(path)
+	got, err := readControlFile(path)
 	if err != nil {
-		t.Fatalf("readFileShared: %v", err)
+		t.Fatalf("readControlFile: %v", err)
 	}
 	if string(got) != `{"v":1}` {
 		t.Fatalf("content = %q, want %q", got, `{"v":1}`)
 	}
 
-	if _, err := readFileShared(filepath.Join(dir, "missing.json")); !os.IsNotExist(err) {
+	if _, err := readControlFile(filepath.Join(dir, "missing.json")); !os.IsNotExist(err) {
 		t.Fatalf("missing file err = %v, want os.IsNotExist", err)
 	}
 }
@@ -116,17 +116,22 @@ func TestWriteFileAtomicConcurrentWriters(t *testing.T) {
 	if err := writeFileAtomic(path, []byte(payloads[0]), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	exerciseAtomicReadWrite(t, path, payloads)
+	exerciseAtomicReadWrite(t, path, payloads, func(path string, i int) error {
+		return writeFileAtomic(path, []byte(payloads[i]), 0o600)
+	})
 	assertAtomicDirectory(t, dir, filepath.Base(path), false)
 }
 
-func exerciseAtomicReadWrite(t *testing.T, path string, payloads []string) {
+// exerciseAtomicReadWrite races one reader against every writer. payloads holds
+// each writer's acceptable output; write emits writer i's payload. The writer is
+// a parameter so a boundary (e.g. writeJSON) can pin its own atomicity.
+func exerciseAtomicReadWrite(t *testing.T, path string, payloads []string, write func(path string, i int) error) {
 	t.Helper()
 	stop, ready := make(chan struct{}), make(chan struct{})
 	reads := make(chan error, 1)
 	go checkAtomicReads(path, payloads, stop, ready, reads)
 	<-ready
-	runAtomicWriters(t, path, payloads)
+	runAtomicWriters(t, path, len(payloads), write)
 	close(stop)
 	if err := <-reads; err != nil {
 		t.Fatal(err)
@@ -142,7 +147,7 @@ func atomicTestPayloads() []string {
 }
 
 func checkAtomicPayload(path string, payloads []string) error {
-	data, err := readFileShared(path)
+	data, err := readControlFile(path)
 	if err != nil {
 		return err
 	}
@@ -169,15 +174,15 @@ func checkAtomicReads(path string, payloads []string, stop, ready chan struct{},
 	result <- err
 }
 
-func runAtomicWriters(t *testing.T, path string, payloads []string) {
+func runAtomicWriters(t *testing.T, path string, writers int, write func(path string, i int) error) {
 	t.Helper()
 	var wg sync.WaitGroup
-	for _, payload := range payloads {
+	for writer := 0; writer < writers; writer++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 20; i++ {
-				if err := writeFileAtomic(path, []byte(payload), 0o600); err != nil {
+				if err := write(path, writer); err != nil {
 					t.Error(err)
 					return
 				}
@@ -279,4 +284,33 @@ func runLockCallbacks(t *testing.T, path string, count int, callback func() erro
 		}()
 	}
 	wg.Wait()
+}
+
+// TestReadControlFileMissing pins the harmless mapping: a missing control file
+// stays ENOENT so settingsMetered can treat it as no override.
+func TestReadControlFileMissing(t *testing.T) {
+	_, err := readControlFile(filepath.Join(t.TempDir(), "absent.json"))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing read = %v, want ENOENT", err)
+	}
+}
+
+// TestReadControlFileRefusesDirectory pins the type guard: opening a directory
+// as JSON is a refusal, not an empty body.
+func TestReadControlFileRefusesDirectory(t *testing.T) {
+	_, err := readControlFile(t.TempDir())
+	if !errors.Is(err, errNotRegularFile) {
+		t.Fatalf("directory read = %v, want errNotRegularFile", err)
+	}
+}
+
+// TestReadControlFileCapsRegularFile pins the size cap: a large control file is
+// refused before unbounded memory growth.
+func TestReadControlFileCapsRegularFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	writeFile(t, path, strings.Repeat("a", maxControlFileBytes+1), 0o600)
+	_, err := readControlFile(path)
+	if !errors.Is(err, errFileTooLarge) {
+		t.Fatalf("oversized read = %v, want errFileTooLarge", err)
+	}
 }

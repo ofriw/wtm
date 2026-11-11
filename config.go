@@ -79,15 +79,15 @@ func decodeSettings(data []byte, p string) (settings, error) {
 	return s, nil
 }
 
-// loadSettings reads settings.json. The shared read handle lets a concurrent
-// `config set` atomically replace the file (open_windows.go); POSIX rename
-// already preserves open handles.
+// loadSettings reads settings.json. The guarded read (readControlFile) lets a
+// concurrent `config set` atomically replace the file; its handle shares delete
+// on Windows (open_windows.go), and POSIX rename preserves open handles.
 func loadSettings() (settings, string, error) {
 	p, err := settingsPath()
 	if err != nil {
 		return settings{}, "", err
 	}
-	data, err := readFileShared(p)
+	data, err := readControlFile(p)
 	if os.IsNotExist(err) {
 		return defaultSettings(), p, nil
 	}
@@ -122,8 +122,8 @@ func cmdConfigSet(val string) error {
 
 // writeSettings serializes the whole read-merge-write under the settings lock so
 // concurrent writers cannot lose an update (read-then-replace). Reader safety is
-// separate: reads share the handle for delete (openShared), so they never block
-// the rename.
+// separate: reads go through readControlFile (openNoBlock), whose handle shares
+// delete, so they never block the rename.
 func writeSettings(p, val string) error {
 	lock, err := settingsLockPath()
 	if err != nil {
@@ -160,7 +160,7 @@ func writeSettingsLocked(p, val string) error {
 
 func readSettingsMapUnlocked(p string) (map[string]json.RawMessage, error) {
 	m := map[string]json.RawMessage{}
-	if data, err := readFileShared(p); err == nil {
+	if data, err := readControlFile(p); err == nil {
 		if err := json.Unmarshal(data, &m); err != nil {
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}

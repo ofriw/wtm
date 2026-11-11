@@ -1282,6 +1282,30 @@ func TestAddTempWritesRecord(t *testing.T) {
 	}
 }
 
+// TestAddTempUsesClockSeam pins the WTM_NOW seam at the temp-record origin: the
+// recorded creation time and the reported expiry both follow the pinned clock,
+// not the wall clock. A scenario that adds a temp checkout and then reads its
+// countdown stays deterministic only while this holds.
+func TestAddTempUsesClockSeam(t *testing.T) {
+	sandbox(t)
+	pinned := time.Date(2030, 5, 4, 3, 2, 1, 0, time.UTC)
+	t.Setenv("WTM_NOW", pinned.Format(time.RFC3339))
+	repo := addTestRepo(t)
+	target := addTarget(repo, "tmp/wt-seam")
+	res := addResultOf(t, &globals{root: repo}, "wt-seam", "--temp", "--ttl", "30m", "--no-index")
+	rec, ok := mustReadTempStore(t)[target]
+	if !ok {
+		t.Fatalf("no temp record for %s", target)
+	}
+	if !rec.CreatedAt.Equal(pinned) {
+		t.Fatalf("createdAt = %s, want pinned %s (clock seam bypassed)", rec.CreatedAt, pinned)
+	}
+	want := pinned.Add(30 * time.Minute).Format(time.RFC3339Nano)
+	if res.ExpiresAt == nil || *res.ExpiresAt != want {
+		t.Fatalf("expiresAt = %v, want %s", res.ExpiresAt, want)
+	}
+}
+
 // TestAddTempFailedSeedLeavesNoRecord pins the write-last ordering: a seed that
 // fails must leave a durable (permanent) checkout, never a tracked temp.
 func TestAddTempFailedSeedLeavesNoRecord(t *testing.T) {

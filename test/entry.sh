@@ -17,6 +17,17 @@ out="$HARNESS/tmp/out/$scenario"
 export HOME="$SBX/home"
 export PI_CODING_AGENT_DIR="$SBX/home/pi-agent"
 export CLAUDE_CONFIG_DIR="$SBX/home/claude"
+# A committed catalog fixture keeps every scenario offline and deterministic:
+# a Claude cost is priced from the fixture, never the network. A scenario may
+# point WTM_RATES at a missing path to exercise the unknown-cost path.
+export WTM_RATES="${WTM_RATES:-$HARNESS/fixtures/rates.json}"
+# Pin the clock so every clock read is byte-stable in goldens: status ages,
+# worktreeLastUsed and the gc TTL decision all draw from WTM_NOW. Scenarios seed
+# .git mtimes relative to this date, not to the wall clock.
+export WTM_NOW="${WTM_NOW:-2026-01-01T00:00:00Z}"
+# Fixtures cannot seed a filesystem birth time, so pin AGE from the same
+# origin. Test seam only: production never sets WTM_CREATED_AT.
+export WTM_CREATED_AT="${WTM_CREATED_AT:-2020-01-01T00:00:00Z}"
 export PATH="/stub-bin:/usr/local/bin:/usr/bin:/bin"
 export TZ=UTC LC_ALL=C
 # Goldens opt into a width themselves (COLUMNS=80 wtm status); everything else

@@ -1,0 +1,11 @@
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -      -  ACTIVE  -     -
+/SBX/wt    wt      -         2020-01-02  6y 2d  1h 40m  $5.15  ACTIVE  -     -
+
+current worktree  /SBX/wt
+age               6y 2d
+active time       1h 40m
+cost              $5.15
+
+MODEL           TIME   COST  ↑ in  ↓ out  ↩ hit  ↪ write  × miss  ● hit%
+deepseek-flash    0s  $5.15     -      -      -        -       -       -

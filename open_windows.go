@@ -10,20 +10,25 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// openShared opens path for reading with FILE_SHARE_DELETE. Go's os.Open grants
-// only FILE_SHARE_READ|FILE_SHARE_WRITE, so an ordinary reader handle makes
-// MoveFileEx (os.Rename) fail with ERROR_ACCESS_DENIED. Share delete is
-// necessary but not sufficient: the writer must also rename with POSIX
-// semantics (rename_windows.go), or MoveFileEx still refuses an open
-// destination.
-func openShared(path string) (*os.File, error) {
+// openNoBlock opens path for the handle-based type check and always shares
+// delete. Go's os.Open grants only FILE_SHARE_READ|FILE_SHARE_WRITE, so an
+// ordinary reader handle makes MoveFileEx (os.Rename) fail with
+// ERROR_ACCESS_DENIED. Share delete is necessary but not sufficient: the writer
+// must also rename with POSIX semantics (rename_windows.go).
+// BACKUP_SEMANTICS is needed so a directory handle opens and the caller's check
+// refuses it instead of open failing with a different error.
+func openNoBlock(path string) (*os.File, error) {
+	return openReadHandle(path, windows.FILE_FLAG_BACKUP_SEMANTICS)
+}
+
+func openReadHandle(path string, flags uint32) (*os.File, error) {
 	name, err := windowsPath(path)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	h, err := windows.CreateFile(name, windows.GENERIC_READ,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|flags, 0)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
