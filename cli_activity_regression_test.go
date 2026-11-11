@@ -42,6 +42,40 @@ func findActivityRow(t *testing.T, rows []activityStatusRow, path string) activi
 	return activityStatusRow{}
 }
 
+// TestPiActivityKeepsSpacedMessageKey pins the encoder boundary: the same user
+// record encoded with and without a space before the colon must both open a
+// turn. Each worktree is separate, so one miss cannot hide behind the other.
+func TestPiActivityKeepsSpacedMessageKey(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	stamp := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	type fixture struct {
+		name string
+		key  string
+		wt   string
+	}
+	fixtures := []fixture{
+		{name: "compact", key: `"message":`},
+		{name: "spaced", key: `"message" :`},
+	}
+	for i := range fixtures {
+		f := &fixtures[i]
+		f.wt = filepath.Join(t.TempDir(), f.name)
+		gitWorktreeAdd(t, repo, f.wt, "feat-"+f.name, "main")
+		path := mkSession(t, f.wt, f.name, stamp)
+		body := fmt.Sprintf("{\"id\":%q,\"cwd\":%q}\n", f.name, f.wt) +
+			fmt.Sprintf(`{"type":"message","timestamp":"2026-01-01T00:00:00Z",%s{"role":"user","content":[{"type":"text","text":"hi"}]}}`+"\n"+
+				`{"type":"message","timestamp":"2026-01-01T00:01:00Z","message":{"role":"assistant","model":"m","stopReason":"stop","usage":{"cost":{"total":1}}}}`+"\n", f.key)
+		writeFile(t, path, body, 0o644)
+	}
+	for _, f := range fixtures {
+		row := statusActivityRow(t, f.wt)
+		if row.ActiveSeconds == nil || *row.ActiveSeconds != 60 {
+			t.Errorf("%s activeSeconds = %v, want 60", f.name, row.ActiveSeconds)
+		}
+	}
+}
+
 // TestClaudeHumanTextToolResultEndsTurn pins the block-type boundary: a human
 // prompt whose text is exactly tool_result must close the open turn, so the
 // two-hour idle gap never counts as work.

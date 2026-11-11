@@ -117,3 +117,34 @@ func TestBuildUsageActiveUsesCausalTurns(t *testing.T) {
 		t.Fatalf("active = %v, want 70s", got)
 	}
 }
+
+// TestPiActivityAcceptsSpacedMessageKey pins the encoder-independence of the
+// cheap prefilter: the colon is not part of the key, so "message" : must still
+// reach the activity decoder. Under-matching drops billable time silently.
+func TestPiActivityAcceptsSpacedMessageKey(t *testing.T) {
+	lines := []string{
+		`{"type":"message","timestamp":"2026-01-01T00:00:00Z","message" : {"role":"user","content":[{"type":"text","text":"hi"}]}}`,
+		`{"type":"message","timestamp":"2026-01-01T00:01:00Z","message":{"role":"assistant","model":"m","stopReason":"stop","usage":{"cost":{"total":1}}}}`,
+	}
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := unionDuration(sessionBlocks(parsed.activity)); got != time.Minute {
+		t.Fatalf("active = %v, want 1m", got)
+	}
+}
+
+// TestPiActivityIgnoresMessageTextOutsideTheKey pins the other side of the
+// prefilter: a non-message record whose value happens to spell message must not
+// create a turn. The decoder's top-level type check owns that decision.
+func TestPiActivityIgnoresMessageTextOutsideTheKey(t *testing.T) {
+	line := `{"type":"session","timestamp":"2026-01-01T00:00:00Z","note":"message"}`
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(line + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.activity) != 0 {
+		t.Fatalf("activity = %v, want none", parsed.activity)
+	}
+}

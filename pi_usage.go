@@ -721,7 +721,11 @@ var (
 	piDetailsKey     = []byte("\"details\"")
 	piToolCallKey    = []byte("\"toolCall\"")
 	piIsErrorKey     = []byte("\"isError\"")
-	piMessageKey     = []byte("\"message\":")
+	// Match the key, not the colon: valid JSON may encode "message" : with
+	// whitespace. Over-matching costs one decode; consumePiActivity then rejects
+	// a record whose top-level type is not message, so a text value cannot add
+	// activity. Under-matching silently loses billable time.
+	piMessageKey = []byte("\"message\"")
 )
 
 func piInteresting(line []byte) bool {
