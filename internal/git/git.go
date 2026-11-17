@@ -1,0 +1,432 @@
+package git
+
+import (
+	"bytes"
+	"fmt"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"wtm/internal/fs"
+)
+
+// git.go — the only file that shells out to git.
+
+// Pinned parser sample (git 2.50 `worktree list --porcelain`): records are
+// separated by blank lines, fields by a single space. The main worktree is
+// listed first (worktree-list docs), linked Worktrees follow path-sorted.
+//
+//	worktree /repo/main
+//	HEAD 0123456789012345678901234567890123456789
+//	branch refs/heads/main
+//
+//	worktree /repo/detached
+//	HEAD 0123456789012345678901234567890123456789
+//	detached
+//
+//	worktree /repo/locked
+//	HEAD 0123456789012345678901234567890123456789
+//	branch refs/heads/locked
+//	locked user reason
+type GWorktree struct {
+	Path     string
+	HEAD     string // resolved commit; keys start-point matching in add.go
+	Branch   string // "" when detached or bare
+	Bare     bool
+	Locked   bool
+	Prunable bool
+	Main     bool
+}
+
+func ApplyPorcelainField(cur *GWorktree, Key, val string) {
+	if cur == nil {
+		return
+	}
+	switch Key {
+	case "HEAD":
+		cur.HEAD = val
+	case "branch":
+		cur.Branch = strings.TrimPrefix(val, "refs/heads/")
+	case "bare":
+		cur.Bare = true
+	case "locked":
+		cur.Locked = true
+	case "prunable":
+		cur.Prunable = true
+	}
+}
+
+func ParsePorcelainLine(line string, cur **GWorktree, out *[]GWorktree) {
+	line = strings.TrimRight(line, "\r")
+	if line == "" {
+		if *cur != nil {
+			*out = append(*out, **cur)
+			*cur = nil
+		}
+		return
+	}
+	Key, val, _ := strings.Cut(line, " ")
+	if Key == "worktree" {
+		if *cur != nil {
+			*out = append(*out, **cur)
+		}
+		*cur = &GWorktree{Path: val}
+		return
+	}
+	ApplyPorcelainField(*cur, Key, val)
+}
+
+// ParseWorktrees is pure so the porcelain format lives here once.
+func ParseWorktrees(porcelain string) []GWorktree {
+	var out []GWorktree
+	var cur *GWorktree
+	for _, line := range strings.Split(porcelain, "\n") {
+		ParsePorcelainLine(line, &cur, &out)
+	}
+	if cur != nil {
+		out = append(out, *cur)
+	}
+	if len(out) > 0 {
+		out[0].Main = true
+	}
+	return out
+}
+
+// git runs a git command in dir and returns trimmed stdout.
+func Git(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// Worktrees lists all Worktrees of the repo containing dir, main first.
+func Worktrees(dir string) ([]GWorktree, error) {
+	out, err := Git(dir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	if wts := ParseWorktrees(out); len(wts) > 0 {
+		return wts, nil
+	}
+	return nil, fmt.Errorf("no git worktrees found in %s", dir)
+}
+
+// RepoRoot returns the main worktree of the repo containing dir.
+func RepoRoot(dir string) (string, error) {
+	wts, err := Worktrees(dir)
+	if err != nil {
+		return "", err
+	}
+	return wts[0].Path, nil
+}
+
+// GitPrivateDir resolves the per-worktree private admin dir ($GIT_DIR) via
+// --absolute-git-dir: a linked worktree's own metadata dir holding its .git
+// backlink target (e.g. <main>/.git/Worktrees/<name>), not the shared repo dir.
+// Callers needing per-checkout state (not common objects) start here.
+func GitPrivateDir(dir string) (string, error) {
+	out, err := Git(dir, "rev-parse", "--absolute-git-dir")
+	return strings.TrimSpace(out), err
+}
+
+// GitCurrentBranch returns an empty branch for valid detached HEADs only.
+func GitCurrentBranch(dir string) (string, error) {
+	cmd := exec.Command("git", "symbolic-ref", "--quiet", "--short", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		// Exit 1 means non-symbolic; verify HEAD to reject broken checkouts.
+		_, err = Git(dir, "rev-parse", "--verify", "HEAD")
+		return "", err
+	}
+	return "", fmt.Errorf("git symbolic-ref --quiet --short HEAD: %s: %w", strings.TrimSpace(string(out)), err)
+}
+
+// GitTopLevel returns the root of the worktree containing dir (main or linked).
+func GitTopLevel(dir string) (string, error) {
+	return Git(dir, "rev-parse", "--show-toplevel")
+}
+
+// WorktreeAdd checks out branch at path. A new branch starts at baseRef with
+// --no-track, so a bare `git push` can never target the base branch. An attached
+// branch already exists: no -b and no --no-track, because git forbids --no-track
+// without -b and the branch must keep its configured Upstream.
+func WorktreeAdd(repoDir, path, branch, baseRef string, attach bool) error {
+	if !attach {
+		_, err := Git(repoDir, "worktree", "add", "--no-track", "-b", branch, path, baseRef)
+		return err
+	}
+	// The short name lets git's branch dwim check out the branch itself, never a
+	// detached HEAD or a same-named tag; existence is verified through refs first.
+	_, err := Git(repoDir, "worktree", "add", path, branch)
+	return err
+}
+
+// LocalBranches lists every local branch in one ref scan. The set keeps git's
+// stored spelling, which case-insensitive filesystems would hide. Scan full
+// %(refname): %(refname:short) degrades to heads/<name> when a tag shares the
+// branch name, which would hide the branch from attach.
+func LocalBranches(dir string) (map[string]bool, error) {
+	out, err := Git(dir, "for-each-ref", "--format=%(refname)", "refs/heads/")
+	if err != nil {
+		return nil, err
+	}
+	refs := make(map[string]bool)
+	for _, ref := range strings.Split(out, "\n") {
+		if name, ok := strings.CutPrefix(ref, "refs/heads/"); ok && name != "" {
+			refs[name] = true
+		}
+	}
+	return refs, nil
+}
+
+// WorktreeDirty reports whether git would refuse `worktree remove` for
+// uncommitted changes. It mirrors git's check_clean_worktree predicate
+// (builtin/worktree.c): non-empty `status --porcelain --ignore-submodules=none`.
+// --no-optional-locks prevents index refresh from becoming false activity;
+// scanIndexTime uses the private index mtime to protect staged changes.
+// Best-effort: a failed status read reports clean, like IsIgnored.
+func WorktreeDirty(dir string) bool {
+	out, err := Git(dir, "--no-optional-locks", "status", "--porcelain", "--ignore-submodules=none")
+	return err == nil && out != ""
+}
+
+// WorktreeRemove always forces: the caller already obtained explicit consent
+// (an interactive pick, or --all/--path), and git otherwise refuses dirty trees.
+func WorktreeRemove(repoDir, path string) error {
+	_, err := Git(repoDir, "worktree", "remove", "--force", path)
+	return err
+}
+
+// WorktreeLinkMissing reports the state git refuses to remove: the worktree
+// directory survives but its .git backlink is gone (out-of-band delete residue).
+func WorktreeLinkMissing(path string) bool {
+	return fs.Exists(path) && !fs.Exists(filepath.Join(path, ".git"))
+}
+
+// WorktreeRepair re-creates missing/corrupt .git backlinks for the repo's
+// linked Worktrees — the git-sanctioned way to make a broken worktree removable.
+func WorktreeRepair(repoDir string) error {
+	_, err := Git(repoDir, "worktree", "repair")
+	return err
+}
+
+func WorktreePrune(repoDir string) error {
+	_, err := Git(repoDir, "worktree", "prune")
+	return err
+}
+
+// WorktreeRemoveRecovering removes a worktree, repairing a missing .git backlink
+// first: git refuses `worktree remove` when the dir survives without it.
+func WorktreeRemoveRecovering(root, path string) error {
+	err := WorktreeRemove(root, path)
+	if err == nil || !WorktreeLinkMissing(path) {
+		return err
+	}
+	if rerr := WorktreeRepair(root); rerr != nil {
+		return err // keep the original removal error
+	}
+	return WorktreeRemove(root, path)
+}
+
+// RefExists reports whether ref resolves in dir.
+func RefExists(dir, ref string) bool {
+	_, err := Git(dir, "rev-parse", "-q", "--verify", ref)
+	return err == nil
+}
+
+// IsIgnored reports whether rel is ignored in the dir worktree; a non-zero
+// check-ignore exit (not ignored, or not a repo) is simply false.
+func IsIgnored(dir, rel string) bool {
+	cmd := exec.Command("git", "check-ignore", "-q", "--", rel)
+	cmd.Dir = dir
+	return cmd.Run() == nil
+}
+
+// RemoteDefaultRef returns the remote HEAD symref target, e.g.
+// refs/remotes/origin/main; origin is preferred when several exist. Only local
+// refs are inspected — `git remote show` would hit the network.
+func RemoteDefaultRef(dir string) string {
+	// Full %(refname): %(refname:short) shortens refs/remotes/<r>/HEAD to the
+	// bare remote name (git ref_rev_parse_rules ends with "refs/remotes/%.*s/HEAD"),
+	// which would hide which remote a HEAD belongs to and break the origin check.
+	out, err := Git(dir, "for-each-ref", "--format=%(refname) %(symref)", "refs/remotes/*/HEAD")
+	if err != nil || out == "" {
+		return ""
+	}
+	best := ""
+	for _, line := range strings.Split(out, "\n") {
+		ref, sym, ok := strings.Cut(line, " ")
+		if !ok || sym == "" {
+			continue
+		}
+		if ref == "refs/remotes/origin/HEAD" {
+			return sym
+		}
+		if best == "" {
+			best = sym
+		}
+	}
+	return best
+}
+
+func DefaultLocalCandidate(dir string) string {
+	for _, c := range []string{"main", "master", "develop", "trunk"} {
+		if RefExists(dir, "refs/heads/"+c) {
+			return c
+		}
+	}
+	if cfg, err := Git(dir, "config", "--get", "init.DefaultBranch"); err == nil && cfg != "" {
+		return cfg
+	}
+	if wts, err := Worktrees(dir); err == nil {
+		for _, w := range wts {
+			if w.Main && w.Branch != "" {
+				return w.Branch
+			}
+		}
+	}
+	return "main"
+}
+
+// DefaultBranch resolves the repo default branch name and the remote it came
+// from (if any), using local data only:
+//  1. refs/remotes/<remote>/HEAD symref
+//  2. local main, master, develop, trunk — conservative order
+//  3. git config init.DefaultBranch
+//  4. the main worktree's checked-out branch
+//  5. "main"
+func DefaultBranch(dir string) (name, remote string) {
+	if sym := RemoteDefaultRef(dir); sym != "" {
+		if rest := strings.TrimPrefix(sym, "refs/remotes/"); rest != sym {
+			if r, b, ok := strings.Cut(rest, "/"); ok && b != "" {
+				return b, r
+			}
+		}
+	}
+	return DefaultLocalCandidate(dir), ""
+}
+
+// BaseRefForDefault resolves the start-point for a new branch from an already
+// resolved default: the remote-tracking default when it exists (kept fresh for
+// clones), else the local branch.
+func BaseRefForDefault(dir, name, remote string) string {
+	remotes := []string{"origin"}
+	if remote != "" && remote != "origin" {
+		remotes = append([]string{remote}, remotes...)
+	}
+	for _, r := range remotes {
+		if ref := "refs/remotes/" + r + "/" + name; RefExists(dir, ref) {
+			return ref
+		}
+	}
+	if ref := "refs/heads/" + name; RefExists(dir, ref) {
+		return ref
+	}
+	return name
+}
+
+// Upstream is a local branch's configured git Upstream (tracking branch).
+// Short is the display form (origin/feat); Remote/Ref are the push-delete
+// target, so a differently-named Upstream is deleted exactly, not guessed.
+type Upstream struct {
+	Short  string // origin/feat
+	Remote string // origin
+	Ref    string // refs/heads/feat
+}
+
+// Present reports whether an Upstream is configured; the zero value is "none".
+// A local-branch Upstream (branch.X.remote=".") also counts as Present: status
+// shows the configured truth, while gc deletes only what OnRemote() allows.
+func (u Upstream) Present() bool { return u.Remote != "" && u.Ref != "" }
+
+// OnRemote reports whether the Upstream branch lives on a git remote, i.e. is
+// safe to delete with push --delete. Remote "." is git's marker for an Upstream
+// that is another LOCAL branch, which a push-delete would destroy as a local
+// branch — gc must skip it, not "clean it up".
+func (u Upstream) OnRemote() bool { return u.Present() && u.Remote != "." }
+
+// Key identifies the push-delete target for dedup; tab cannot appear in a ref.
+func (u Upstream) Key() string { return u.Remote + "\t" + u.Ref }
+
+// BranchUpstreams maps each local branch to its configured Upstream in one
+// offline call. Tab separates fields because a refname can hold neither tab nor
+// newline; the %(upstream:*) atoms expand empty for a branch without one.
+func BranchUpstreams(dir string) (map[string]Upstream, error) {
+	out, err := Git(dir, "for-each-ref",
+		"--format=%(refname:short)%09%(upstream:short)%09%(upstream:remotename)%09%(upstream:remoteref)",
+		"refs/heads/")
+	if err != nil {
+		return nil, err
+	}
+	ups := map[string]Upstream{}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) != 4 || f[0] == "" || f[2] == "" {
+			continue
+		}
+		ups[f[0]] = Upstream{Short: f[1], Remote: f[2], Ref: f[3]}
+	}
+	return ups, nil
+}
+
+// RemoteRefExists reports whether ref exists on remote, via ls-remote so no
+// fetch is needed. A failed query is an error, never a silent "absent":
+// treating an unreachable remote as already-deleted would hide the outage and
+// leave the branch behind.
+func RemoteRefExists(dir, remote, ref string) (bool, error) {
+	out, err := Git(dir, "ls-remote", "--heads", remote, ref)
+	if err != nil {
+		return false, err
+	}
+	return out != "", nil
+}
+
+// RemoteDefaultBranchRef returns the branch a remote's HEAD points at, as a
+// local ref name (refs/heads/main); "" when the remote has no recorded HEAD.
+// Local refs only: `git remote show` would hit the network.
+func RemoteDefaultBranchRef(dir, remote string) string {
+	out, err := Git(dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD")
+	if err != nil {
+		return ""
+	}
+	branch := strings.TrimPrefix(out, "refs/remotes/"+remote+"/")
+	if branch == out || branch == "" {
+		return ""
+	}
+	return "refs/heads/" + branch
+}
+
+// DeleteRemoteBranch deletes ref on the branch's remote. git drops the
+// matching local remote-tracking ref as part of the same push, so no separate
+// prune is needed (pinned by test/scenarios/gc-remote/expected.manifest, where
+// refs/remotes/origin/wt1 is gone while gc-remote-keep's manifest keeps it).
+// Ref stays canonical (refs/heads/...) at the call sites; only the push trims
+// to the branch name `git push --delete` expects.
+func DeleteRemoteBranch(dir, remote, ref string) error {
+	_, err := Git(dir, "push", remote, "--delete", strings.TrimPrefix(ref, "refs/heads/"))
+	return err
+}
+
+// BranchDelete force-deletes a local branch. `delete <branch>` and gc's temp
+// purge both name the branch as their target, so -D is intended: the user (or a
+// collected temp) chose to drop it even if it is unmerged. The worktree that
+// checked it out must already be removed. -- stops a branch name from being
+// read as a git option.
+func BranchDelete(dir, branch string) error {
+	_, err := Git(dir, "branch", "-D", "--", branch)
+	return err
+}
