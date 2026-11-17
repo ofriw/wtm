@@ -95,6 +95,14 @@ func buildWTMOnce() {
 	}
 }
 
+// CleanupWTM removes the built wtm binary temp dir for this process, if a
+// build ran. Every consumer TestMain must call it after m.Run().
+func CleanupWTM() {
+	if wtmBuildDir != "" {
+		_ = os.RemoveAll(wtmBuildDir)
+	}
+}
+
 // MustGit runs git through the production wrapper and fails the test on error.
 func MustGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()

@@ -16,8 +16,6 @@ import (
 func TestMain(m *testing.M) {
 	buildWTMOnce()
 	code := m.Run()
-	if wtmBuildDir != "" {
-		_ = os.RemoveAll(wtmBuildDir)
-	}
+	CleanupWTM()
 	os.Exit(code)
 }
