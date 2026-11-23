@@ -1226,8 +1226,17 @@ func readFreshCache(path string, warn warnSink, now time.Time) (catalog, bool, b
 	if err != nil {
 		// A missing cache is the normal cold start, not corruption. Every other
 		// stat failure (permissions, I/O, a link loop) means the path cannot be
-		// read or written.
+		// read or written. Windows reports a file where a directory is needed as
+		// ERROR_PATH_NOT_FOUND (ENOENT), so a missing path is a cold start only
+		// when its parent really is a directory; otherwise the path is unusable.
 		if errors.Is(err, os.ErrNotExist) {
+			// A parent that exists but is not a directory blocks both read and
+			// write, so the path is unusable. A missing parent is a normal cold
+			// start: the cache dir is created on write.
+			if d, derr := os.Stat(filepath.Dir(path)); derr == nil && !d.IsDir() {
+				doWarnSink(warn, fmt.Errorf("%s: %w; refetching and skipping the rate cache write", path, err))
+				return nil, false, true
+			}
 			return nil, false, false
 		}
 		doWarnSink(warn, fmt.Errorf("%s: %w; refetching and skipping the rate cache write", path, err))
