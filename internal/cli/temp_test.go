@@ -46,7 +46,7 @@ func seedTempRecord(t *testing.T, path, branch, ttl string, createdAt time.Time)
 	t.Helper()
 	rec := tempRecord{CreatedAt: createdAt, TTL: ttl, Branch: branch}
 	var err error
-	if _, gitErr := git.GitPrivateDir(path); gitErr == nil {
+	if _, gitErr := git.PrivateDir(path); gitErr == nil {
 		_, err = temp.AddTempRecord(CanonicalPath(path), rec)
 	} else {
 		rec.Identity = fixtureTempIdentity

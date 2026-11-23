@@ -177,11 +177,11 @@ func resolveAddSource(root string, wts []gworktree, base, from, target, defaultN
 // base^{tree} with the source HEAD^{tree}; live and ignored files are out of
 // scope because git cannot carry them between git.Worktrees.
 func seedNotice(root, src, base, branch string) (string, bool) {
-	want, err := git.Git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", base+"^{tree}")
+	want, err := git.Run(root, "rev-parse", "--verify", "--quiet", "--end-of-options", base+"^{tree}")
 	if err != nil {
 		return "", false
 	}
-	if got, err := git.Git(src, "rev-parse", "--verify", "--quiet", "HEAD^{tree}"); err != nil || got == want {
+	if got, err := git.Run(src, "rev-parse", "--verify", "--quiet", "HEAD^{tree}"); err != nil || got == want {
 		return "", false
 	}
 	if branch == "" {
@@ -235,8 +235,8 @@ func warnSeedSource(source seedSource, base string, attach, noIndex, hadIndex bo
 // both require a commit match, so a diverged branch of the same name never
 // masquerades as the start-point. The checkout being created and unusable
 // entries are excluded by seedable.
-func worktreeAt(root string, wts []gworktree, base, target string) (string, bool) {
-	commit, err := git.Git(root, "rev-parse", "--verify", "--quiet", base+"^{commit}")
+func worktreeAt(root string, wts []git.GWorktree, base, target string) (string, bool) {
+	commit, err := git.Run(root, "rev-parse", "--verify", "--quiet", base+"^{commit}")
 	if err != nil {
 		return "", false
 	}
@@ -264,7 +264,7 @@ func worktreeAt(root string, wts []gworktree, base, target string) (string, bool
 // baseBranchName maps a start-point ref to its short branch name: refs/heads/x
 // and refs/remotes/<remote>/x both yield x; a tag or raw commit yields "".
 func baseBranchName(root, base string) string {
-	ref, err := git.Git(root, "rev-parse", "--symbolic-full-name", base)
+	ref, err := git.Run(root, "rev-parse", "--symbolic-full-name", base)
 	if err != nil {
 		return ""
 	}
@@ -283,13 +283,13 @@ func baseBranchName(root, base string) string {
 // user is in when it belongs to the target repo, else the parent of the repo's
 // main worktree. Never the cwd itself — a worktree created under the cwd nests
 // inside another and breaks IDE watchers and test runners.
-func locationBase(root string, wts []gworktree) string {
+func locationBase(root string, wts []git.GWorktree) string {
 	fallback := filepath.Dir(fs.Canonical(root))
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fallback
 	}
-	top, err := git.GitTopLevel(cwd)
+	top, err := git.TopLevel(cwd)
 	if err != nil {
 		return fallback
 	}
@@ -334,7 +334,7 @@ func rollbackAdd(root, path, branch string, attached bool, seedErr error) error 
 	}
 	// --ignored keeps the check honest: a copied MCP config is ignored, yet is
 	// exactly the seeded state a user must be able to inspect.
-	changes, checkErr := git.Git(path, "status", "--porcelain", "--untracked-files=all", "--ignored")
+	changes, checkErr := git.Run(path, "status", "--porcelain", "--untracked-files=all", "--ignored")
 	if checkErr != nil || changes != "" {
 		return fmt.Errorf("%w; partial worktree kept at %s (branch %s); inspect it before removing", seedErr, path, branch)
 	}
@@ -342,14 +342,14 @@ func rollbackAdd(root, path, branch string, attached bool, seedErr error) error 
 		return fmt.Errorf("%w; partial worktree kept at %s (branch %s): %v", seedErr, path, branch, cleanup)
 	}
 	if !attached {
-		if _, cleanup := git.Git(root, "branch", "-d", branch); cleanup != nil {
+		if _, cleanup := git.Run(root, "branch", "-d", branch); cleanup != nil {
 			return fmt.Errorf("%w; worktree removed but branch %s remains: %v", seedErr, branch, cleanup)
 		}
 	}
 	return seedErr
 }
 
-func reportAddResult(g *globals, res addResult, ttl time.Duration) error {
+func reportAddResult(g *core.Globals, res addResult, ttl time.Duration) error {
 	if g.JSON {
 		return fs.PrintJSON(res)
 	}
@@ -454,7 +454,7 @@ func resolveAddBase(p *addParams, start string) (string, error) {
 // commit. An unresolvable value is a usage error, so create and attach share one
 // exit contract.
 func resolveStartPoint(root, start string) (string, error) {
-	commit, err := git.Git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", start+"^{commit}")
+	commit, err := git.Run(root, "rev-parse", "--verify", "--quiet", "--end-of-options", start+"^{commit}")
 	if err != nil {
 		return "", core.Usagef("add: start-point %q is not a commit", start)
 	}
@@ -465,7 +465,7 @@ func resolveStartPoint(root, start string) (string, error) {
 // branch tip: attachment never rewinds. An unresolvable ref is a usage error;
 // a valid ref that conflicts with repository state is an operational error.
 func verifyAttachStart(root, branch, start string) error {
-	tip, err := git.Git(root, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch+"^{commit}")
+	tip, err := git.Run(root, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch+"^{commit}")
 	if err != nil {
 		return fmt.Errorf("add: cannot resolve branch %q: %w", branch, err)
 	}

@@ -14,7 +14,7 @@ import (
 
 // Pinned parser sample (git 2.50 `worktree list --porcelain`): records are
 // separated by blank lines, fields by a single space. The main worktree is
-// listed first (worktree-list docs), linked Worktrees follow path-sorted.
+// listed first (worktree-list docs), linked worktrees follow path-sorted.
 //
 //	worktree /repo/main
 //	HEAD 0123456789012345678901234567890123456789
@@ -38,11 +38,11 @@ type GWorktree struct {
 	Main     bool
 }
 
-func ApplyPorcelainField(cur *GWorktree, Key, val string) {
+func ApplyPorcelainField(cur *GWorktree, key, val string) {
 	if cur == nil {
 		return
 	}
-	switch Key {
+	switch key {
 	case "HEAD":
 		cur.HEAD = val
 	case "branch":
@@ -65,15 +65,15 @@ func ParsePorcelainLine(line string, cur **GWorktree, out *[]GWorktree) {
 		}
 		return
 	}
-	Key, val, _ := strings.Cut(line, " ")
-	if Key == "worktree" {
+	key, val, _ := strings.Cut(line, " ")
+	if key == "worktree" {
 		if *cur != nil {
 			*out = append(*out, **cur)
 		}
 		*cur = &GWorktree{Path: val}
 		return
 	}
-	ApplyPorcelainField(*cur, Key, val)
+	ApplyPorcelainField(*cur, key, val)
 }
 
 // ParseWorktrees is pure so the porcelain format lives here once.
@@ -92,8 +92,8 @@ func ParseWorktrees(porcelain string) []GWorktree {
 	return out
 }
 
-// git runs a git command in dir and returns trimmed stdout.
-func Git(dir string, args ...string) (string, error) {
+// Run executes a git command in dir and returns trimmed stdout.
+func Run(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
@@ -109,9 +109,9 @@ func Git(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// Worktrees lists all Worktrees of the repo containing dir, main first.
+// Worktrees lists all worktrees of the repo containing dir, main first.
 func Worktrees(dir string) ([]GWorktree, error) {
-	out, err := Git(dir, "worktree", "list", "--porcelain")
+	out, err := Run(dir, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, err
 	}
@@ -130,17 +130,17 @@ func RepoRoot(dir string) (string, error) {
 	return wts[0].Path, nil
 }
 
-// GitPrivateDir resolves the per-worktree private admin dir ($GIT_DIR) via
+// PrivateDir resolves the per-worktree private admin dir ($GIT_DIR) via
 // --absolute-git-dir: a linked worktree's own metadata dir holding its .git
-// backlink target (e.g. <main>/.git/Worktrees/<name>), not the shared repo dir.
+// backlink target (e.g. <main>/.git/worktrees/<name>), not the shared repo dir.
 // Callers needing per-checkout state (not common objects) start here.
-func GitPrivateDir(dir string) (string, error) {
-	out, err := Git(dir, "rev-parse", "--absolute-git-dir")
+func PrivateDir(dir string) (string, error) {
+	out, err := Run(dir, "rev-parse", "--absolute-git-dir")
 	return strings.TrimSpace(out), err
 }
 
-// GitCurrentBranch returns an empty branch for valid detached HEADs only.
-func GitCurrentBranch(dir string) (string, error) {
+// CurrentBranch returns an empty branch for valid detached HEADs only.
+func CurrentBranch(dir string) (string, error) {
 	cmd := exec.Command("git", "symbolic-ref", "--quiet", "--short", "HEAD")
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -149,15 +149,15 @@ func GitCurrentBranch(dir string) (string, error) {
 	}
 	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
 		// Exit 1 means non-symbolic; verify HEAD to reject broken checkouts.
-		_, err = Git(dir, "rev-parse", "--verify", "HEAD")
+		_, err = Run(dir, "rev-parse", "--verify", "HEAD")
 		return "", err
 	}
 	return "", fmt.Errorf("git symbolic-ref --quiet --short HEAD: %s: %w", strings.TrimSpace(string(out)), err)
 }
 
-// GitTopLevel returns the root of the worktree containing dir (main or linked).
-func GitTopLevel(dir string) (string, error) {
-	return Git(dir, "rev-parse", "--show-toplevel")
+// TopLevel returns the root of the worktree containing dir (main or linked).
+func TopLevel(dir string) (string, error) {
+	return Run(dir, "rev-parse", "--show-toplevel")
 }
 
 // WorktreeAdd checks out branch at path. A new branch starts at baseRef with
@@ -166,12 +166,12 @@ func GitTopLevel(dir string) (string, error) {
 // without -b and the branch must keep its configured Upstream.
 func WorktreeAdd(repoDir, path, branch, baseRef string, attach bool) error {
 	if !attach {
-		_, err := Git(repoDir, "worktree", "add", "--no-track", "-b", branch, path, baseRef)
+		_, err := Run(repoDir, "worktree", "add", "--no-track", "-b", branch, path, baseRef)
 		return err
 	}
 	// The short name lets git's branch dwim check out the branch itself, never a
 	// detached HEAD or a same-named tag; existence is verified through refs first.
-	_, err := Git(repoDir, "worktree", "add", path, branch)
+	_, err := Run(repoDir, "worktree", "add", path, branch)
 	return err
 }
 
@@ -180,7 +180,7 @@ func WorktreeAdd(repoDir, path, branch, baseRef string, attach bool) error {
 // %(refname): %(refname:short) degrades to heads/<name> when a tag shares the
 // branch name, which would hide the branch from attach.
 func LocalBranches(dir string) (map[string]bool, error) {
-	out, err := Git(dir, "for-each-ref", "--format=%(refname)", "refs/heads/")
+	out, err := Run(dir, "for-each-ref", "--format=%(refname)", "refs/heads/")
 	if err != nil {
 		return nil, err
 	}
@@ -200,14 +200,14 @@ func LocalBranches(dir string) (map[string]bool, error) {
 // scanIndexTime uses the private index mtime to protect staged changes.
 // Best-effort: a failed status read reports clean, like IsIgnored.
 func WorktreeDirty(dir string) bool {
-	out, err := Git(dir, "--no-optional-locks", "status", "--porcelain", "--ignore-submodules=none")
+	out, err := Run(dir, "--no-optional-locks", "status", "--porcelain", "--ignore-submodules=none")
 	return err == nil && out != ""
 }
 
 // WorktreeRemove always forces: the caller already obtained explicit consent
 // (an interactive pick, or --all/--path), and git otherwise refuses dirty trees.
 func WorktreeRemove(repoDir, path string) error {
-	_, err := Git(repoDir, "worktree", "remove", "--force", path)
+	_, err := Run(repoDir, "worktree", "remove", "--force", path)
 	return err
 }
 
@@ -218,14 +218,14 @@ func WorktreeLinkMissing(path string) bool {
 }
 
 // WorktreeRepair re-creates missing/corrupt .git backlinks for the repo's
-// linked Worktrees — the git-sanctioned way to make a broken worktree removable.
+// linked worktrees — the git-sanctioned way to make a broken worktree removable.
 func WorktreeRepair(repoDir string) error {
-	_, err := Git(repoDir, "worktree", "repair")
+	_, err := Run(repoDir, "worktree", "repair")
 	return err
 }
 
 func WorktreePrune(repoDir string) error {
-	_, err := Git(repoDir, "worktree", "prune")
+	_, err := Run(repoDir, "worktree", "prune")
 	return err
 }
 
@@ -244,7 +244,7 @@ func WorktreeRemoveRecovering(root, path string) error {
 
 // RefExists reports whether ref resolves in dir.
 func RefExists(dir, ref string) bool {
-	_, err := Git(dir, "rev-parse", "-q", "--verify", ref)
+	_, err := Run(dir, "rev-parse", "-q", "--verify", ref)
 	return err == nil
 }
 
@@ -263,7 +263,7 @@ func RemoteDefaultRef(dir string) string {
 	// Full %(refname): %(refname:short) shortens refs/remotes/<r>/HEAD to the
 	// bare remote name (git ref_rev_parse_rules ends with "refs/remotes/%.*s/HEAD"),
 	// which would hide which remote a HEAD belongs to and break the origin check.
-	out, err := Git(dir, "for-each-ref", "--format=%(refname) %(symref)", "refs/remotes/*/HEAD")
+	out, err := Run(dir, "for-each-ref", "--format=%(refname) %(symref)", "refs/remotes/*/HEAD")
 	if err != nil || out == "" {
 		return ""
 	}
@@ -289,7 +289,7 @@ func DefaultLocalCandidate(dir string) string {
 			return c
 		}
 	}
-	if cfg, err := Git(dir, "config", "--get", "init.DefaultBranch"); err == nil && cfg != "" {
+	if cfg, err := Run(dir, "config", "--get", "init.defaultBranch"); err == nil && cfg != "" {
 		return cfg
 	}
 	if wts, err := Worktrees(dir); err == nil {
@@ -306,7 +306,7 @@ func DefaultLocalCandidate(dir string) string {
 // from (if any), using local data only:
 //  1. refs/remotes/<remote>/HEAD symref
 //  2. local main, master, develop, trunk — conservative order
-//  3. git config init.DefaultBranch
+//  3. git config init.defaultBranch
 //  4. the main worktree's checked-out branch
 //  5. "main"
 func DefaultBranch(dir string) (name, remote string) {
@@ -366,7 +366,7 @@ func (u Upstream) Key() string { return u.Remote + "\t" + u.Ref }
 // offline call. Tab separates fields because a refname can hold neither tab nor
 // newline; the %(upstream:*) atoms expand empty for a branch without one.
 func BranchUpstreams(dir string) (map[string]Upstream, error) {
-	out, err := Git(dir, "for-each-ref",
+	out, err := Run(dir, "for-each-ref",
 		"--format=%(refname:short)%09%(upstream:short)%09%(upstream:remotename)%09%(upstream:remoteref)",
 		"refs/heads/")
 	if err != nil {
@@ -388,7 +388,7 @@ func BranchUpstreams(dir string) (map[string]Upstream, error) {
 // treating an unreachable remote as already-deleted would hide the outage and
 // leave the branch behind.
 func RemoteRefExists(dir, remote, ref string) (bool, error) {
-	out, err := Git(dir, "ls-remote", "--heads", remote, ref)
+	out, err := Run(dir, "ls-remote", "--heads", remote, ref)
 	if err != nil {
 		return false, err
 	}
@@ -399,7 +399,7 @@ func RemoteRefExists(dir, remote, ref string) (bool, error) {
 // local ref name (refs/heads/main); "" when the remote has no recorded HEAD.
 // Local refs only: `git remote show` would hit the network.
 func RemoteDefaultBranchRef(dir, remote string) string {
-	out, err := Git(dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD")
+	out, err := Run(dir, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD")
 	if err != nil {
 		return ""
 	}
@@ -417,7 +417,7 @@ func RemoteDefaultBranchRef(dir, remote string) string {
 // Ref stays canonical (refs/heads/...) at the call sites; only the push trims
 // to the branch name `git push --delete` expects.
 func DeleteRemoteBranch(dir, remote, ref string) error {
-	_, err := Git(dir, "push", remote, "--delete", strings.TrimPrefix(ref, "refs/heads/"))
+	_, err := Run(dir, "push", remote, "--delete", strings.TrimPrefix(ref, "refs/heads/"))
 	return err
 }
 
@@ -427,6 +427,6 @@ func DeleteRemoteBranch(dir, remote, ref string) error {
 // checked it out must already be removed. -- stops a branch name from being
 // read as a git option.
 func BranchDelete(dir, branch string) error {
-	_, err := Git(dir, "branch", "-D", "--", branch)
+	_, err := Run(dir, "branch", "-D", "--", branch)
 	return err
 }

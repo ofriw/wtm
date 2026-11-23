@@ -35,7 +35,7 @@ func assertPermanentTempAdd(t *testing.T, repo string, res addResult) {
 	if _, err := os.Stat(filepath.Join(res.Path, ".git")); err != nil {
 		t.Fatalf("checkout did not survive: %v", err)
 	}
-	if branch, err := git.GitCurrentBranch(res.Path); err != nil || branch != res.Branch {
+	if branch, err := git.CurrentBranch(res.Path); err != nil || branch != res.Branch {
 		t.Fatalf("branch did not survive: branch=%q err=%v", branch, err)
 	}
 }

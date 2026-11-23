@@ -501,11 +501,11 @@ func TestAddNoTrack(t *testing.T) {
 	Sandbox(t)
 	repo := addTestRepo(t)
 	target := addTarget(repo, "wt-notrack")
-	res := addResultOf(t, &globals{Root: repo}, "wt-notrack", "--no-index")
-	if _, err := git.Git(target, "rev-parse", "--abbrev-ref", "@{upstream}"); err == nil {
+	res := addResultOf(t, &core.Globals{Root: repo}, "wt-notrack", "--no-index")
+	if _, err := git.Run(target, "rev-parse", "--abbrev-ref", "@{upstream}"); err == nil {
 		t.Fatal("--no-track must leave no upstream")
 	}
-	if _, err := git.Git(target, "config", "--get", "branch."+res.Branch+".remote"); err == nil {
+	if _, err := git.Run(target, "config", "--get", "branch."+res.Branch+".remote"); err == nil {
 		t.Fatal("--no-track must leave no branch remote config")
 	}
 }
@@ -603,10 +603,10 @@ func TestAddAttachesExistingBranch(t *testing.T) {
 	}
 	// Attachment must write no branch config: the upstream survives because
 	// worktree add runs without -b/--track.
-	if got, err := git.Git(repo, "config", "--get", "branch.feature/attach.remote"); err != nil || got != "origin" {
+	if got, err := git.Run(repo, "config", "--get", "branch.feature/attach.remote"); err != nil || got != "origin" {
 		t.Fatalf("upstream remote = (%q,%v), want origin", got, err)
 	}
-	if got, err := git.Git(repo, "config", "--get", "branch.feature/attach.merge"); err != nil || got != "refs/heads/feature/attach" {
+	if got, err := git.Run(repo, "config", "--get", "branch.feature/attach.merge"); err != nil || got != "refs/heads/feature/attach" {
 		t.Fatalf("upstream merge = (%q,%v), want refs/heads/feature/attach", got, err)
 	}
 }

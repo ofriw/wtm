@@ -234,7 +234,7 @@ func newTempIdentity() (string, error) {
 }
 
 func TempIdentityPath(path string) (string, error) {
-	dir, err := git.GitPrivateDir(path)
+	dir, err := git.PrivateDir(path)
 	if err != nil {
 		return "", err
 	}
@@ -242,7 +242,7 @@ func TempIdentityPath(path string) (string, error) {
 }
 
 func installTempIdentity(path string, rec Record) error {
-	branch, err := git.GitCurrentBranch(path)
+	branch, err := git.CurrentBranch(path)
 	if err != nil {
 		return err
 	}
@@ -282,7 +282,7 @@ func VerifyTempIdentity(path string, rec Record) error {
 }
 
 func verifyTempBranch(path, expected string) error {
-	branch, err := git.GitCurrentBranch(path)
+	branch, err := git.CurrentBranch(path)
 	if err != nil {
 		return err
 	}

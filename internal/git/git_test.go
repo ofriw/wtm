@@ -10,7 +10,7 @@ import (
 )
 
 // git_test.go — Tier-1 contracts for git.go. Every fixture drives the real git
-// binary through the production Git() wrapper; no mocks or stubs.
+// binary through the production Run() wrapper; no mocks or stubs.
 
 // gitTestBranch points a local branch ref at HEAD.
 func gitTestBranch(t *testing.T, repo, branch string) {
@@ -167,10 +167,10 @@ type defaultBranchCase struct {
 func defaultBranchCases() []defaultBranchCase {
 	return []defaultBranchCase{
 		{"origin HEAD symref", func(t *testing.T, r string) { gitTestRemoteHead(t, r, "origin", "trunk") }, "trunk", "origin"},
-		{"non-origin remote", func(t *testing.T, r string) { gitTestRemoteHead(t, r, "Upstream", "release") }, "release", "Upstream"},
+		{"non-origin remote", func(t *testing.T, r string) { gitTestRemoteHead(t, r, "upstream", "release") }, "release", "upstream"},
 		{"origin preferred over other remotes", func(t *testing.T, r string) {
 			gitTestRemoteHead(t, r, "origin", "main")
-			gitTestRemoteHead(t, r, "Upstream", "release")
+			gitTestRemoteHead(t, r, "upstream", "release")
 		}, "main", "origin"},
 		{"origin preferred over earlier-sorting remote", func(t *testing.T, r string) {
 			gitTestRemoteHead(t, r, "fork-5", "release")
@@ -187,8 +187,8 @@ func defaultBranchCases() []defaultBranchCase {
 			gitTestBranch(t, r, "trunk")
 		}, "develop", ""},
 		{"local trunk", func(t *testing.T, r string) { gitTestBranch(t, r, "trunk") }, "trunk", ""},
-		{"init.DefaultBranch config", func(t *testing.T, r string) {
-			MustGit(t, r, "config", "init.DefaultBranch", "custom")
+		{"init.defaultBranch config", func(t *testing.T, r string) {
+			MustGit(t, r, "config", "init.defaultBranch", "custom")
 		}, "custom", ""},
 		{"main worktree branch fallback", nil, "work", ""},
 		{"no candidate falls back to main", func(t *testing.T, r string) {
@@ -221,10 +221,10 @@ func TestRemoteDefaultRef(t *testing.T) {
 	}{
 		{"no remote HEAD", nil, ""},
 		{"origin HEAD", func(t *testing.T, r string) { gitTestRemoteHead(t, r, "origin", "main") }, "refs/remotes/origin/main"},
-		{"non-origin HEAD", func(t *testing.T, r string) { gitTestRemoteHead(t, r, "Upstream", "release") }, "refs/remotes/Upstream/release"},
+		{"non-origin HEAD", func(t *testing.T, r string) { gitTestRemoteHead(t, r, "upstream", "release") }, "refs/remotes/upstream/release"},
 		{"origin HEAD wins over later remotes", func(t *testing.T, r string) {
 			gitTestRemoteHead(t, r, "origin", "main")
-			gitTestRemoteHead(t, r, "Upstream", "release")
+			gitTestRemoteHead(t, r, "upstream", "release")
 		}, "refs/remotes/origin/main"},
 		{"origin HEAD wins over earlier-sorting remotes", func(t *testing.T, r string) {
 			gitTestRemoteHead(t, r, "fork-5", "develop")
@@ -263,7 +263,7 @@ func TestBaseRefForDefault(t *testing.T) {
 			gitTestRemoteHead(t, r, "origin", "trunk")
 		}, "refs/remotes/origin/trunk"},
 		{"local branch without remote", func(t *testing.T, r string) { gitTestBranch(t, r, "main") }, "refs/heads/main"},
-		{"non-origin remote-tracking", func(t *testing.T, r string) { gitTestRemoteHead(t, r, "Upstream", "trunk") }, "refs/remotes/Upstream/trunk"},
+		{"non-origin remote-tracking", func(t *testing.T, r string) { gitTestRemoteHead(t, r, "upstream", "trunk") }, "refs/remotes/upstream/trunk"},
 		{"literal name when nothing resolves", func(t *testing.T, r string) {
 			MustGit(t, r, "checkout", "-q", "--detach")
 		}, "main"},
@@ -349,8 +349,8 @@ func TestWorktreeAddThenRemove(t *testing.T) {
 	if !RefExists(repo, "refs/heads/feature") {
 		t.Fatal("feature branch was not created")
 	}
-	if _, err := Git(wt, "rev-parse", "--abbrev-ref", "@{upstream}"); err == nil {
-		t.Fatal("--no-track must leave no Upstream")
+	if _, err := Run(wt, "rev-parse", "--abbrev-ref", "@{upstream}"); err == nil {
+		t.Fatal("--no-track must leave no upstream")
 	}
 	if err := WorktreeRemove(repo, wt); err != nil {
 		t.Fatalf("WorktreeRemove: %v", err)
@@ -399,18 +399,18 @@ func TestGitErrorIsExplicit(t *testing.T) {
 	repo := InitRepo(t, "main")
 	GitTestCommit(t, repo)
 
-	out, err := Git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := Run(repo, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil || out != "main" {
 		t.Fatalf("git rev-parse = (%q,%v), want (main,nil)", out, err)
 	}
-	_, err = Git(repo, "rev-parse", "--verify", "refs/heads/missing")
+	_, err = Run(repo, "rev-parse", "--verify", "refs/heads/missing")
 	if err == nil {
 		t.Fatal("expected error for missing ref")
 	}
 	if !strings.Contains(err.Error(), "git rev-parse") {
 		t.Fatalf("error must name the command: %v", err)
 	}
-	_, err = Git(repo, "definitely-not-a-subcommand")
+	_, err = Run(repo, "definitely-not-a-subcommand")
 	if err == nil || !strings.Contains(err.Error(), "definitely-not-a-subcommand") {
 		t.Fatalf("error must quote the failing invocation: %v", err)
 	}
@@ -433,7 +433,7 @@ func gitTestUpstreamFixture(t *testing.T) (repo, origin string) {
 // from workDir so a local bare origin needs no network.
 func remoteHasBranch(t *testing.T, workDir, remote, branch string) bool {
 	t.Helper()
-	out, err := Git(workDir, "ls-remote", "--heads", remote, "refs/heads/"+branch)
+	out, err := Run(workDir, "ls-remote", "--heads", remote, "refs/heads/"+branch)
 	if err != nil {
 		t.Fatalf("ls-remote: %v", err)
 	}

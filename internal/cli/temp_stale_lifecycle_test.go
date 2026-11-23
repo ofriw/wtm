@@ -132,7 +132,7 @@ func TestStaleTempGitFailurePreservesCheckout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, ".git", "config"), []byte("[invalid"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if branch, err := git.GitCurrentBranch(path); err == nil {
+	if branch, err := git.CurrentBranch(path); err == nil {
 		t.Fatalf("Git failure classified as branch %q", branch)
 	}
 	if promoted, err := temp.PromoteTempRecord(path); promoted || err == nil {

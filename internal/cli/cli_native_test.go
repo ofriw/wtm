@@ -200,7 +200,7 @@ func TestNativeGC(t *testing.T) {
 
 	target := filepath.Join(filepath.Dir(repo), "wt-gc")
 	GitWorktreeAdd(t, repo, target, "wt-gc", "main")
-	if _, err := git.Git(target, "log", "-1", "--format=%ct"); err != nil {
+	if _, err := git.Run(target, "log", "-1", "--format=%ct"); err != nil {
 		t.Fatalf("worktree not usable: %v", err)
 	}
 	out, errOut, rc := RunWTM(t, repo, nil, "gc", "--path", target, "--yes")

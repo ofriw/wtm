@@ -340,7 +340,7 @@ func scanGitModTimes(path string, newest *time.Time, strict bool) error {
 }
 
 func scanCommitTime(path string, newest *time.Time) error {
-	out, err := git.Git(path, "log", "-1", "--format=%ct")
+	out, err := git.Run(path, "log", "-1", "--format=%ct")
 	if err != nil {
 		return err
 	}
@@ -357,11 +357,11 @@ func scanCommitTime(path string, newest *time.Time) error {
 // changedActivityFiles includes staged files but not staged deletions: their
 // activity survives in the private index, while missing unstaged files fail closed.
 func changedActivityFiles(path string) (string, error) {
-	out, err := git.Git(path, "--no-optional-locks", "ls-files", "-m", "-o", "--exclude-standard", "-z")
+	out, err := git.Run(path, "--no-optional-locks", "ls-files", "-m", "-o", "--exclude-standard", "-z")
 	if err != nil {
 		return "", err
 	}
-	staged, err := git.Git(path, "--no-optional-locks", "diff", "--cached", "--name-only", "--diff-filter=d", "-z")
+	staged, err := git.Run(path, "--no-optional-locks", "diff", "--cached", "--name-only", "--diff-filter=d", "-z")
 	return out + "\x00" + staged, err
 }
 
@@ -428,7 +428,7 @@ func collectActivity(path string, idx SessionIndex, now time.Time, strict bool) 
 // The private index records staging, including deletion with no remaining
 // file. Read-only Git queries must not refresh it and restart the idle window.
 func scanIndexTime(path string, newest *time.Time) error {
-	dir, err := git.GitPrivateDir(path)
+	dir, err := git.PrivateDir(path)
 	if err != nil {
 		return err
 	}
