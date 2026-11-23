@@ -6,6 +6,7 @@ import (
 	"testing"
 	"wtm/internal/fs"
 	"wtm/internal/git"
+	"wtm/internal/harness"
 	"wtm/internal/temp"
 	. "wtm/internal/testutil"
 )
@@ -19,7 +20,7 @@ func TestRemoveTempWorktreeRejectsChangedRecord(t *testing.T) {
 	_, path, w := identityCheckout(t)
 	seedTempRecord(t, path, w.Branch, "1h", TempNow)
 	want := mustReadTempStore(t)
-	if removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, freshActivity); removed || err == nil {
+	if removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity); removed || err == nil {
 		t.Fatalf("stale removal = %v, %v", removed, err)
 	}
 	assertTempStore(t, want)
@@ -32,7 +33,7 @@ func TestRemoveTempWorktreeFailurePreservesRecord(t *testing.T) {
 	repo, path, w := identityCheckout(t)
 	MustGit(t, repo, "worktree", "lock", path)
 	want := mustReadTempStore(t)
-	if removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, freshActivity); removed || err == nil {
+	if removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity); removed || err == nil {
 		t.Fatalf("locked removal = %v, %v", removed, err)
 	}
 	assertTempStore(t, want)
@@ -44,7 +45,7 @@ func TestRemoveTempWorktreeFailurePreservesRecord(t *testing.T) {
 func TestRemoveTempWorktreeRegistryWriteFailure(t *testing.T) {
 	_, path, w := identityCheckout(t)
 	restrictRegistryWrites(t)
-	removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, freshActivity)
+	removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
 	if !removed || err == nil {
 		t.Fatalf("write-failed removal = %v, %v", removed, err)
 	}
@@ -78,11 +79,11 @@ func runTempContenders(t *testing.T, fns ...func()) {
 func TestTempPromotionRemovalOrders(t *testing.T) {
 	for _, first := range []string{"promotion", "removal"} {
 		t.Run(first+"-first", func(t *testing.T) {
-			_, path, w := identityCheckout(t)
+			repo, path, w := identityCheckout(t)
 			if first == "promotion" {
 				assertTempPromotion(t, path, true)
 				assertTempRemoval(t, w, false)
-				assertPermanentAfterReconcile(t, path, w.Branch)
+				assertPermanentAfterReconcile(t, repo, path)
 				if _, err := git.RepoRoot(path); err != nil {
 					t.Fatalf("promoted checkout was removed: %v", err)
 				}
@@ -125,7 +126,7 @@ func assertTempPromotion(t *testing.T, path string, want bool) {
 func assertTempRemoval(t *testing.T, w worktree, want bool) {
 	t.Helper()
 	before := mustReadTempStore(t)
-	removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, freshActivity)
+	removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
 	if removed != want || (want && err != nil) {
 		t.Fatalf("removal = %v, %v; want %v", removed, err, want)
 	}
@@ -172,7 +173,7 @@ func TestTempRemovalConcurrentPromotion(t *testing.T) {
 	promotion := make(chan tempRemovalOutcome, 1)
 	runTempContenders(t,
 		func() {
-			ok, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, freshActivity)
+			ok, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
 			removal <- tempRemovalOutcome{ok, err}
 		},
 		func() { ok, err := temp.PromoteTempRecord(w.Path); promotion <- tempRemovalOutcome{ok, err} },
@@ -198,7 +199,7 @@ func TestTempRemovalConcurrentRegistration(t *testing.T) {
 	registration := make(chan error, 1)
 	runTempContenders(t,
 		func() {
-			ok, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, freshActivity)
+			ok, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
 			removal <- tempRemovalOutcome{ok, err}
 		},
 		func() {
@@ -329,7 +330,7 @@ func TestReconcileDuringRemove(t *testing.T) {
 	holder.expect(t, "locked")
 	removeDone := make(chan tempRemovalOutcome, 1)
 	startContender(func() {
-		removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, freshActivity)
+		removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
 		removeDone <- tempRemovalOutcome{removed, err}
 	})
 	assertTempProcessContention(t, w.Path)

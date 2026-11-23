@@ -28,20 +28,6 @@ type SessionRef struct {
 	Owner      func(*bufio.Reader) (string, error)
 }
 
-// UnverifiedSession is unattributable activity. A zero age can hide any use;
-// directory symlinks have zero age because appends do not change directory mtimes.
-type UnverifiedSession struct {
-	Path    string
-	ModTime time.Time
-}
-
-// BlockRemoval reports whether this unverified session must block removal: a
-// zero age can hide any use, and a session newer than known activity could be
-// its hidden recent use.
-func (u UnverifiedSession) BlockRemoval(knownNewest time.Time) bool {
-	return u.ModTime.IsZero() || u.ModTime.After(knownNewest)
-}
-
 // SessionErrPolicy decides what an unreadable session does. Reclamation fails
 // closed: an incomplete index can misclassify a worktree UNUSED and GC it.
 // Read-only discovery warns and reports what it knows.
@@ -58,25 +44,6 @@ func (pol SessionErrPolicy) SessionErr(err error) error {
 	}
 	ui.WarnProgress(pol.P, "%v", err)
 	return nil
-}
-
-// ErrTempUnverified blocks removal when an unverified session is newer than
-// known activity — only such a file could be the candidate's hidden recent use.
-var ErrTempUnverified = fmt.Errorf("unverified agent session is newer than known activity")
-
-// SplitUnverifiedSessions separates unverified sessions: one newer than known
-// activity could be the candidate's hidden recent use and blocks removal;
-// older ones cannot change the verdict and are returned for the caller to
-// disclose. The store owner owns the terminal, so no warnings here.
-func SplitUnverifiedSessions(unverified []UnverifiedSession, knownNewest time.Time) ([]string, error) {
-	var stale []string
-	for _, u := range unverified {
-		if u.BlockRemoval(knownNewest) {
-			return nil, fmt.Errorf("%w: %s", ErrTempUnverified, u.Path)
-		}
-		stale = append(stale, u.Path)
-	}
-	return stale, nil
 }
 
 // LastUsed is the newest mtime among the worktree's session files (looked up

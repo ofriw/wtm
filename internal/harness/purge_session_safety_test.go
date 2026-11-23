@@ -108,7 +108,7 @@ func TestPurgeRejectsRedirectedAncestors(t *testing.T) {
 
 func TestPurgeSupportsIndexedRootSymlink(t *testing.T) {
 	forSessionAgents(t, func(t *testing.T, a agent) {
-		root := filepath.Join(a.ConfigDir(), a.SessionSubdir())
+		root := filepath.Join(a.ConfigDir(), a.sessionSubdir)
 		if err := os.RemoveAll(root); err != nil {
 			t.Fatal(err)
 		}
@@ -138,7 +138,7 @@ func requireRootPolicy(t *testing.T, root string) {
 
 func TestSessionRootFailurePolicy(t *testing.T) {
 	forSessionAgents(t, func(t *testing.T, a agent) {
-		root := filepath.Join(a.ConfigDir(), a.SessionSubdir())
+		root := filepath.Join(a.ConfigDir(), a.sessionSubdir)
 		if err := os.RemoveAll(root); err != nil {
 			t.Fatal(err)
 		}

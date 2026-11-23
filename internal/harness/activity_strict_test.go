@@ -49,14 +49,10 @@ func corruptSession(t *testing.T, wtPath, dirName string, mtime time.Time) strin
 	return p
 }
 
-// freshProbe is the cli wiring: harness activity plus core's unverified split.
-func freshProbe(path string, now time.Time) (time.Time, []string, error) {
-	last, unverified, err := FreshWorktreeActivity(path, now)
-	if err != nil {
-		return time.Time{}, nil, err
-	}
-	stale, err := core.SplitUnverifiedSessions(unverified, last)
-	return last, stale, err
+// freshProbe is the cli wiring: a raw passthrough to the harness probe.
+// Classification of unverified sessions happens inside temp.VerifyTempIdle.
+func freshProbe(path string, now time.Time) (time.Time, []temp.UnverifiedSession, error) {
+	return FreshWorktreeActivity(path, now)
 }
 
 // requireActivityError runs the idle probe and pins fail-closed behavior: a
@@ -78,7 +74,7 @@ func requireActivityError(t *testing.T, repo string, store temp.Store, now time.
 // classifies specially, so gc reports it as a tooling error.
 func requireProbeError(t *testing.T, repo string, store temp.Store, now time.Time) {
 	t.Helper()
-	if err := requireActivityError(t, repo, store, now); errors.Is(err, temp.ErrTempActive) || errors.Is(err, core.ErrTempUnverified) {
+	if err := requireActivityError(t, repo, store, now); errors.Is(err, temp.ErrTempActive) || errors.Is(err, temp.ErrTempUnverified) {
 		t.Fatalf("activity error = %v; want an ordinary probe failure", err)
 	}
 }
@@ -87,7 +83,7 @@ func requireProbeError(t *testing.T, repo string, store temp.Store, now time.Tim
 // unattributable session instead of treating it as a tooling failure.
 func requireUnverifiedSessionError(t *testing.T, repo string, store temp.Store, now time.Time) {
 	t.Helper()
-	if err := requireActivityError(t, repo, store, now); !errors.Is(err, core.ErrTempUnverified) {
+	if err := requireActivityError(t, repo, store, now); !errors.Is(err, temp.ErrTempUnverified) {
 		t.Fatalf("activity error = %v; want unverified-session block", err)
 	}
 }
@@ -232,4 +228,15 @@ func TestStrictActivityRejectsFreshUnrelatedCorruptSession(t *testing.T) {
 	repo, store := idleActivityFixture(t)
 	corruptSession(t, filepath.Join(t.TempDir(), "other"), "other", TempNow)
 	requireUnverifiedSessionError(t, repo, store, TempNow)
+}
+
+// A checkout that is still active must report ACTIVE even when it hosts a
+// newer unverified session: the idle verdict comes first, so a session can
+// only be the candidate's hidden recent use once it is already idle-expired.
+func TestStrictActivityReportsActiveBeforeUnverified(t *testing.T) {
+	repo, store := strictActivityFixture(t)
+	corruptSession(t, repo, "future", time.Now().Add(time.Hour))
+	if _, err := temp.VerifyTempIdle(store, repo, TempNow, freshProbe); !errors.Is(err, temp.ErrTempActive) {
+		t.Fatalf("idle verification = %v; want ACTIVE before unverified classification", err)
+	}
 }

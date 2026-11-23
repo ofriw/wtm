@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 	"wtm/internal/core"
+	"wtm/internal/temp"
 	. "wtm/internal/testutil"
 )
 
@@ -23,7 +24,7 @@ func forSessionAgents(t *testing.T, check func(*testing.T, agent)) {
 
 func safetySession(t *testing.T, a agent, name, content string, age time.Time) string {
 	t.Helper()
-	p := filepath.Join(a.ConfigDir(), a.SessionSubdir(), "safety", name+".jsonl")
+	p := filepath.Join(a.ConfigDir(), a.sessionSubdir, "safety", name+".jsonl")
 	WriteFile(t, p, content, 0o600)
 	if err := os.Chtimes(p, age, age); err != nil {
 		t.Fatal(err)
@@ -67,7 +68,7 @@ func TestSharedSessionSafetyFileSymlinkAge(t *testing.T) {
 		if err := os.Chtimes(target, age, age); err != nil {
 			t.Fatal(err)
 		}
-		link := filepath.Join(a.ConfigDir(), a.SessionSubdir(), "linked.jsonl")
+		link := filepath.Join(a.ConfigDir(), a.sessionSubdir, "linked.jsonl")
 		MustSymlink(t, target, link)
 		requireSessionEvidence(t, link, age)
 	})
@@ -75,7 +76,7 @@ func TestSharedSessionSafetyFileSymlinkAge(t *testing.T) {
 
 func TestSharedSessionSafetyDirectoryAndDanglingLinks(t *testing.T) {
 	forSessionAgents(t, func(t *testing.T, a agent) {
-		root := filepath.Join(a.ConfigDir(), a.SessionSubdir())
+		root := filepath.Join(a.ConfigDir(), a.sessionSubdir)
 		for _, target := range []string{t.TempDir(), filepath.Join(t.TempDir(), "missing")} {
 			link := filepath.Join(root, fmt.Sprintf("link-%d", len(target)))
 			MustSymlink(t, target, link)
@@ -140,7 +141,7 @@ func TestSharedSessionSafetyUnreadableFileEvidence(t *testing.T) {
 
 func TestSharedSessionSafetyRootMustBeDirectory(t *testing.T) {
 	forSessionAgents(t, func(t *testing.T, a agent) {
-		root := filepath.Join(a.ConfigDir(), a.SessionSubdir())
+		root := filepath.Join(a.ConfigDir(), a.sessionSubdir)
 		if err := os.RemoveAll(root); err != nil {
 			t.Fatal(err)
 		}
@@ -155,7 +156,7 @@ func TestSharedSessionSafetyEvidenceAge(t *testing.T) {
 	known := time.Unix(2_000_000, 0)
 	for _, age := range []time.Time{time.Time{}, known.Add(time.Second), known, known.Add(-time.Second)} {
 		want := age.IsZero() || age.After(known)
-		if got := (core.UnverifiedSession{ModTime: age}).BlockRemoval(known); got != want {
+		if got := (temp.UnverifiedSession{ModTime: age}).BlockRemoval(known); got != want {
 			t.Fatalf("activity at %s blocks %s = %v, want %v", age, known, got, want)
 		}
 	}

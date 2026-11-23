@@ -58,7 +58,7 @@ func TestSharedSessionSafetyReplacedIndexedFile(t *testing.T) {
 
 func TestSharedSessionSafetySymlinkedRoot(t *testing.T) {
 	forSessionAgents(t, func(t *testing.T, a agent) {
-		root := filepath.Join(a.ConfigDir(), a.SessionSubdir())
+		root := filepath.Join(a.ConfigDir(), a.sessionSubdir)
 		if err := os.RemoveAll(root); err != nil {
 			t.Fatal(err)
 		}

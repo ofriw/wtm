@@ -8,6 +8,7 @@ import (
 	"testing"
 	"wtm/internal/fs"
 	"wtm/internal/git"
+	"wtm/internal/harness"
 	"wtm/internal/temp"
 	. "wtm/internal/testutil"
 )
@@ -58,7 +59,7 @@ func assertTempCleanupSucceeded(t *testing.T, repo string, w worktree, res gcRes
 
 func TestGCTempPruneFailureRetainsRecoveryBranch(t *testing.T) {
 	repo, _, w := identityCheckout(t)
-	removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, freshActivity)
+	removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
 	if err != nil || !removed {
 		t.Fatalf("remove checkout: removed=%v, error=%v", removed, err)
 	}

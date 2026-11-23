@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"wtm/internal/core"
 	"wtm/internal/git"
@@ -172,15 +171,4 @@ func withProgress(g *globals, enabled bool, work func(*progress) error) error {
 // lets a piped output reach the renderer at all.
 func withProgressTo(out io.Writer, g *globals, enabled bool, work func(*progress) error) error {
 	return ui.RunMaybeProgress(out, g.Progress, g.JSON, enabled, work)
-}
-
-// freshActivity is the temp-package activity hook: it refreshes the checkout's
-// activity via the harness and splits unverified sessions into the stale set.
-func freshActivity(path string, now time.Time) (time.Time, []string, error) {
-	last, unverified, err := harness.FreshWorktreeActivity(path, now)
-	if err != nil {
-		return time.Time{}, nil, err
-	}
-	stale, err := core.SplitUnverifiedSessions(unverified, last)
-	return last, stale, err
 }

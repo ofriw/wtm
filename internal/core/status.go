@@ -49,12 +49,12 @@ func (w Worktree) Unused(now time.Time, ttl time.Duration) bool {
 }
 
 // tempExpiresAt is the deadline a temp worktree is measured against.
-// temp.TempDeadline owns the formula. Zero for a permanent worktree.
+// temp.Deadline owns the formula. Zero for a permanent worktree.
 func (w Worktree) TempExpiresAt() time.Time {
 	if !w.Temp {
 		return time.Time{}
 	}
-	return temp.TempDeadline(w.TempCreated, w.LastUsed, w.TempTTL)
+	return temp.Deadline(w.TempCreated, w.LastUsed, w.TempTTL)
 }
 
 func (w Worktree) Status(now time.Time, ttl time.Duration) string {
@@ -100,13 +100,18 @@ type Workspace struct {
 
 // SessionDiscovery is an injected session-indexing function; cli wires it to
 // the harness.
-type SessionDiscovery func(*ui.Progress) (SessionIndex, []UnverifiedSession, error)
+type SessionDiscovery func(*ui.Progress) (SessionIndex, []temp.UnverifiedSession, error)
+
+// MCPFn inventories a worktree root's MCP configs; the harness provides the
+// real implementation, core only defines the seam (it must not import the
+// harness).
+type MCPFn func(root string, p *ui.Progress) map[string]bool
 
 // Hooks carries the harness-provided discovery functions core cannot call
 // directly (it must not import the harness).
 type Hooks struct {
 	Sessions SessionDiscovery
-	MCP      func(root string, p *ui.Progress) map[string]bool
+	MCP      MCPFn
 }
 
 // LoadWorkspace resolves the repo, TTL and inventory. discovery — the slow
@@ -216,7 +221,7 @@ func discoverUpstreams(root string, p *ui.Progress) map[string]git.Upstream {
 
 // discoverInputs reads each shared source once: worktrees, sessions, upstreams
 // and temp records. Reclamation retains unknown files for candidate-level checks.
-func discoverInputs(root string, p *ui.Progress, hooks Hooks) ([]git.GWorktree, SessionIndex, []UnverifiedSession, map[string]git.Upstream, temp.Store, error) {
+func discoverInputs(root string, p *ui.Progress, hooks Hooks) ([]git.GWorktree, SessionIndex, []temp.UnverifiedSession, map[string]git.Upstream, temp.Store, error) {
 	p.Phase("reading worktrees", 0)
 	raw, err := git.Worktrees(root)
 	if err != nil {
@@ -235,7 +240,7 @@ func discoverInputs(root string, p *ui.Progress, hooks Hooks) ([]git.GWorktree, 
 // When all unverified sessions have known ages, protection scopes to permanent
 // worktrees older than the newest unverified session. A single unknown-age session
 // preserves the original fail-closed contract.
-func guardPermanentActivity(wts []Worktree, unknown []UnverifiedSession, now time.Time, p *ui.Progress) {
+func guardPermanentActivity(wts []Worktree, unknown []temp.UnverifiedSession, now time.Time, p *ui.Progress) {
 	if len(unknown) == 0 {
 		return
 	}
@@ -262,9 +267,9 @@ func keepPermanentsActive(wts []Worktree, now time.Time, p *ui.Progress) {
 }
 
 // keepPermanentsOlderThan applies the same age gate as
-// UnverifiedSession.BlockRemoval: only a session newer than known activity can
-// hide recent use. The equality edge differs by intent — this guard protects on
-// == (fail closed for permanents), the temp path removes on strict >.
+// temp.UnverifiedSession.BlockRemoval: only a session newer than known activity
+// can hide recent use. The equality edge differs by intent — this guard
+// protects on == (fail closed for permanents), the temp path removes on strict >.
 func keepPermanentsOlderThan(wts []Worktree, newest, now time.Time, p *ui.Progress) {
 	for i := range wts {
 		if !wts[i].Temp && !wts[i].LastUsed.After(newest) {
@@ -274,7 +279,7 @@ func keepPermanentsOlderThan(wts []Worktree, newest, now time.Time, p *ui.Progre
 	}
 }
 
-func hasUnknownAgeSession(unknown []UnverifiedSession) bool {
+func hasUnknownAgeSession(unknown []temp.UnverifiedSession) bool {
 	for _, u := range unknown {
 		if u.ModTime.IsZero() {
 			return true
@@ -283,7 +288,7 @@ func hasUnknownAgeSession(unknown []UnverifiedSession) bool {
 	return false
 }
 
-func newestKnownSession(unknown []UnverifiedSession) time.Time {
+func newestKnownSession(unknown []temp.UnverifiedSession) time.Time {
 	var newest time.Time
 	for _, u := range unknown {
 		if u.ModTime.After(newest) {
@@ -307,7 +312,7 @@ func readTempStoreLenient(p *ui.Progress) temp.Store {
 
 // scanWorktrees builds the inventory and reports per-worktree progress; the
 // loop is split out so discover stays a readable sequence of phases.
-func scanWorktrees(raw []git.GWorktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp func(string, *ui.Progress) map[string]bool) []Worktree {
+func scanWorktrees(raw []git.GWorktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp MCPFn) []Worktree {
 	p.Phase("scanning worktrees", len(raw))
 	wts := make([]Worktree, 0, len(raw))
 	for _, g := range raw {

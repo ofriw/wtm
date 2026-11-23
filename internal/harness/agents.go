@@ -15,6 +15,7 @@ import (
 	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/git"
+	"wtm/internal/temp"
 	"wtm/internal/ui"
 )
 
@@ -80,9 +81,6 @@ func (a agent) ConfigDir() string {
 	}
 	return filepath.Join(append([]string{home}, a.configDirRel...)...)
 }
-
-// SessionSubdir is the subdirectory of ConfigDir that holds session files.
-func (a agent) SessionSubdir() string { return a.sessionSubdir }
 
 // mcpConfigFiles is the deduped union of every agent's MCP configs. Both
 // harnesses read the repo-root project file, so seeding must see it once.
@@ -328,7 +326,7 @@ func sessionRecord(r *bufio.Reader) ([]byte, error) {
 // checks collect evidence for per-candidate decisions; ordinary discovery warns.
 type sessionScan struct {
 	idx        core.SessionIndex
-	unverified []core.UnverifiedSession
+	unverified []temp.UnverifiedSession
 	pol        core.SessionErrPolicy
 	collect    bool
 }
@@ -344,7 +342,7 @@ func IndexSessions(ags []agent, pol core.SessionErrPolicy) (core.SessionIndex, e
 
 // IndexSessionsStrict refreshes both harnesses. Structural failures abort;
 // unknown owners remain evidence rather than being silently treated as absent.
-func IndexSessionsStrict(p *ui.Progress) (core.SessionIndex, []core.UnverifiedSession, error) {
+func IndexSessionsStrict(p *ui.Progress) (core.SessionIndex, []temp.UnverifiedSession, error) {
 	s := sessionScan{idx: core.SessionIndex{}, pol: core.SessionErrPolicy{FailClosed: true, P: p}, collect: true}
 	err := s.scan(agents())
 	return s.idx, s.unverified, err
@@ -352,7 +350,7 @@ func IndexSessionsStrict(p *ui.Progress) (core.SessionIndex, []core.UnverifiedSe
 
 // DiscoverySessions adapts the harness indexer to core's discovery hook type.
 func DiscoverySessions(failClosed bool) core.SessionDiscovery {
-	return func(p *ui.Progress) (core.SessionIndex, []core.UnverifiedSession, error) {
+	return func(p *ui.Progress) (core.SessionIndex, []temp.UnverifiedSession, error) {
 		idx, err := IndexSessions(agents(), core.SessionErrPolicy{FailClosed: failClosed, P: p})
 		return idx, nil, err
 	}
@@ -447,7 +445,7 @@ func (s *sessionScan) add(a agent, base, target, p string, d iofs.DirEntry) erro
 
 func (s *sessionScan) unknown(p string, err error) error {
 	if s.collect {
-		s.unverified = append(s.unverified, core.UnverifiedSession{Path: p, ModTime: statFollowMtime(p)})
+		s.unverified = append(s.unverified, temp.UnverifiedSession{Path: p, ModTime: statFollowMtime(p)})
 		return nil
 	}
 	if err != nil {

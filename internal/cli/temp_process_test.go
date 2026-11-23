@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	"wtm/internal/harness"
@@ -122,7 +123,7 @@ func testTempProcessUpdates(t *testing.T, operation string) {
 	mustProcessError(t, storeTempFixture(second, fixtureRecord("tmp/second")))
 	holder := startTempProcess(t, "hold-add", first)
 	contendTempProcesses(t, holder, operation, second)
-	want := tempStore{first: fixtureRecord("tmp/first")}
+	want := temp.Store{first: fixtureRecord("tmp/first")}
 	if operation == "add" {
 		want[second] = fixtureRecord("tmp/added")
 	}
@@ -132,7 +133,7 @@ func testTempProcessUpdates(t *testing.T, operation string) {
 func TestTempRegistryProcessReadsCompleteRecords(t *testing.T) {
 	sandboxTempProcesses(t)
 	path := filepath.Join(t.TempDir(), "retained")
-	want := tempStore{path: fixtureRecord("tmp/added")}
+	want := temp.Store{path: fixtureRecord("tmp/added")}
 	mustProcessError(t, storeTempFixture(path, want[path]))
 	data, err := json.Marshal(want)
 	mustProcessError(t, err)
@@ -159,7 +160,7 @@ func TestTempRegistryProcessLockContention(t *testing.T) {
 func TestTempRegistryKilledHolderReleasesLock(t *testing.T) {
 	sandboxTempProcesses(t)
 	path := filepath.Join(t.TempDir(), "retained")
-	want := tempStore{path: fixtureRecord("tmp/retained")}
+	want := temp.Store{path: fixtureRecord("tmp/retained")}
 	mustProcessError(t, storeTempFixture(path, want[path]))
 	holder := startTempProcess(t, "hold-lock", path)
 	holder.expect(t, "locked")
@@ -185,14 +186,14 @@ func killTempProcess(t *testing.T, process *tempTestProcess) {
 
 func tempLockFileInfo(t *testing.T) (string, os.FileInfo) {
 	t.Helper()
-	path, err := temp.TempLockPath()
+	path, err := temp.LockPath()
 	mustProcessError(t, err)
 	info, err := os.Stat(path)
 	mustProcessError(t, err)
 	return path, info
 }
 
-func assertPersistentTempLock(t *testing.T, path string, before os.FileInfo, want tempStore) {
+func assertPersistentTempLock(t *testing.T, path string, before os.FileInfo, want temp.Store) {
 	t.Helper()
 	assertTempLockFile(t, path, before)
 	assertTempStore(t, want)
@@ -252,7 +253,7 @@ func runTempRegistryProcess(role, path string) error {
 		if err != nil {
 			return err
 		}
-		return cmdGC(&globals{Root: root, Yes: true}, []string{"--path", path, "--yes"})
+		return cmdGC(&core.Globals{Root: root, Yes: true}, []string{"--path", path, "--yes"})
 	}
 	if role == "reconcile" {
 		fmt.Println("ready")
@@ -267,7 +268,7 @@ func tempProcessOperation(role, path string) error {
 	case "wait-lock":
 		return holdTempTransaction("hold-lock", path)
 	case "add-deadline":
-		return cmdAdd(&globals{Root: path, JSON: true}, []string{"deadline", "--no-index", "--ttl", "1.5s"})
+		return cmdAdd(&core.Globals{Root: path, JSON: true}, []string{"deadline", "--no-index", "--ttl", "1.5s"})
 	case "add":
 		return storeTempFixture(path, fixtureRecord("tmp/added"))
 	case "remove":
@@ -307,7 +308,7 @@ func checkTempProcessSnapshots() error {
 }
 
 func checkTempProcessLock() (err error) {
-	path, err := temp.TempLockPath()
+	path, err := temp.LockPath()
 	if err != nil {
 		return err
 	}
@@ -361,18 +362,21 @@ func holdSettingsLockProcess() error {
 }
 
 func holdTempTransaction(role, path string) error {
-	return temp.WithLockedTempStore(func(store tempStore, registry string) error {
+	lock, err := temp.LockPath()
+	if err != nil {
+		return err
+	}
+	return fs.WithFileLock(lock, func() error {
 		if role == "hold-add" {
-			store[path] = fixtureRecord("tmp/first")
+			if err := mutateTempStore(func(s temp.Store) bool {
+				s[path] = fixtureRecord("tmp/first")
+				return true
+			}); err != nil {
+				return err
+			}
 		}
 		fmt.Println("locked")
-		if err := waitTempProcessRelease(); err != nil {
-			return err
-		}
-		if role == "hold-add" {
-			return temp.WriteTempStore(registry, store)
-		}
-		return nil
+		return waitTempProcessRelease()
 	})
 }
 

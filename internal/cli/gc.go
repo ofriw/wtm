@@ -497,8 +497,8 @@ func removeOneWorktree(root string, w worktree, idleOnly bool, now time.Time, re
 
 // reportRemovalError classifies temp races as skips: promotion or identity
 // drift between discovery and locked verification is not a tooling failure.
-func reportRemovalError(w worktree, err error, res *gcResult, p *progress) {
-	if errors.Is(err, temp.ErrTempActive) || errors.Is(err, core.ErrTempUnverified) || errors.Is(err, temp.ErrTempPromoted) || errors.Is(err, temp.ErrTempMetadataChanged) {
+func reportRemovalError(w core.Worktree, err error, res *gcResult, p *ui.Progress) {
+	if errors.Is(err, temp.ErrTempActive) || errors.Is(err, temp.ErrTempUnverified) || errors.Is(err, temp.ErrTempPromoted) || errors.Is(err, temp.ErrTempMetadataChanged) {
 		ui.WarnProgress(p, "skipping %s: %s", w.Path, err)
 		res.Skipped = append(res.Skipped, w.Path)
 	} else if err != nil {
@@ -515,13 +515,13 @@ func removeVerifiedWorktree(root string, w worktree, idleOnly bool, now time.Tim
 				return false, nil, err
 			}
 		}
-		return temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, idleOnly, now, freshActivity)
+		return temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, idleOnly, now, harness.FreshWorktreeActivity)
 	}
 	removed, err = temp.RemovePermanentWorktree(root, w.Path)
 	return removed, nil, err
 }
 
-func purgeTempBranch(root string, w worktree, res *gcResult) {
+func purgeTempBranch(root string, w core.Worktree, res *gcResult) {
 	if !w.Temp {
 		return
 	}

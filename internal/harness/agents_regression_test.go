@@ -242,8 +242,8 @@ func TestClaudeTranscriptKeepsOldWorktreeActive(t *testing.T) {
 	t.Setenv("GIT_AUTHOR_DATE", old.Format(time.RFC3339))
 	t.Setenv("GIT_COMMITTER_DATE", old.Format(time.RFC3339))
 	repo := NativeRepo(t)
-	wt := filepath.Join(filepath.Dir(repo), "old-core.Worktree")
-	GitWorktreeAdd(t, repo, wt, "old-core.Worktree", "main")
+	wt := filepath.Join(filepath.Dir(repo), "old-core")
+	GitWorktreeAdd(t, repo, wt, "old-core", "main")
 	// Git activity now participates alongside sessions; isolate the transcript.
 	BackdateGitActivity(t, wt, old)
 	assertTranscriptActivity(t, repo, wt)
@@ -284,7 +284,7 @@ func unlistableSessionFixture(t *testing.T) (owner, owned, blocked string) {
 	Sandbox(t)
 	owner = t.TempDir()
 	owned = MkClaudeSession(t, owner, "visible", time.Now())
-	blocked = filepath.Join(ClaudeAgent.ConfigDir(), ClaudeAgent.SessionSubdir(), "blocked")
+	blocked = filepath.Join(ClaudeAgent.ConfigDir(), ClaudeAgent.sessionSubdir, "blocked")
 	WriteFile(t, filepath.Join(blocked, "inside.jsonl"), ClaudeTranscript(owner), 0o644)
 	if err := os.Chmod(blocked, 0); err != nil {
 		t.Fatal(err)
@@ -363,7 +363,7 @@ func TestIndexSessionsWithoutHome(t *testing.T) {
 func TestAgentDescriptorsComplete(t *testing.T) {
 	seen := map[string]bool{}
 	for _, a := range agents() {
-		if a.name == "" || a.statusToken == "" || a.configDirEnv == "" || a.SessionSubdir() == "" || a.sessionOwner == nil {
+		if a.name == "" || a.statusToken == "" || a.configDirEnv == "" || a.sessionSubdir == "" || a.sessionOwner == nil {
 			t.Errorf("agent %q has an empty required field: %+v", a.name, a)
 		}
 		if seen[a.name] {
@@ -418,7 +418,7 @@ func TestIndexUnreadableSessionRootIsFatal(t *testing.T) {
 	Sandbox(t)
 	owner := t.TempDir()
 	MkClaudeSession(t, owner, "visible", time.Now())
-	root := filepath.Join(ClaudeAgent.ConfigDir(), ClaudeAgent.SessionSubdir())
+	root := filepath.Join(ClaudeAgent.ConfigDir(), ClaudeAgent.sessionSubdir)
 	if err := os.Chmod(root, 0); err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 	"wtm/internal/fs"
 	"wtm/internal/git"
+	"wtm/internal/harness"
 	"wtm/internal/temp"
 	. "wtm/internal/testutil"
 )
@@ -73,7 +74,7 @@ func inspectIdleRepeatedly(t *testing.T, repo string, w worktree) {
 		if !discovered(t, repo, w.Path).Unused(TempNow, time.Hour) {
 			t.Fatal("status restarted idle window")
 		}
-		if _, err := temp.VerifyTempIdle(mustReadTempStore(t), w.Path, TempNow, freshActivity); err != nil {
+		if _, err := temp.VerifyTempIdle(mustReadTempStore(t), w.Path, TempNow, harness.FreshWorktreeActivity); err != nil {
 			t.Fatal(err)
 		}
 	}

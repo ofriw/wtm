@@ -247,7 +247,7 @@ func PrintStatusJSON(wts []Worktree, now time.Time, ttl time.Duration) error {
 			j.LastUsed = &s
 		}
 		if w.Temp {
-			s := temp.FormatTempDeadline(w.TempExpiresAt())
+			s := temp.FormatDeadline(w.TempExpiresAt())
 			j.ExpiresAt = &s
 		}
 		out = append(out, j)

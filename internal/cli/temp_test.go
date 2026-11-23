@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 	"wtm/internal/core"
@@ -25,16 +24,18 @@ var tempActivation = TempTestTime.Add(90 * time.Minute)
 
 const fixtureTempIdentity = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-// mutateTempStore applies fn under the exclusive lock and writes the whole map
-// back atomically; fn returning false skips the write, so a no-op reconcile
-// never rewrites the file.
+// mutateTempStore applies fn to the registry and writes the whole map back
+// atomically; fn returning false skips the write. Fixtures are seeded before
+// any subprocess starts, so a plain unlocked write is safe here.
 func mutateTempStore(fn func(tempStore) bool) error {
-	return temp.WithLockedTempStore(func(store tempStore, p string) error {
-		if !fn(store) {
-			return nil
-		}
-		return temp.WriteTempStore(p, store)
-	})
+	store, err := temp.ReadTempStoreUnlocked()
+	if err != nil {
+		return err
+	}
+	if !fn(store) {
+		return nil
+	}
+	return temp.WriteTempStoreUnlocked(store)
 }
 
 func storeTempFixture(path string, rec tempRecord) error {
@@ -77,14 +78,16 @@ func clearTempRecord(path string) error {
 	})
 }
 
-// verifyTempWorktree is the test view of the under-lock pre-removal snapshot.
+// verifyTempWorktree is the test view of the pre-removal snapshot.
 func verifyTempWorktree(w worktree) error {
 	if !w.Temp {
 		return nil
 	}
-	return temp.WithLockedTempStore(func(store tempStore, _ string) error {
-		return temp.VerifyTempSnapshot(store, w.Path, w.Branch, w.TempIdentity)
-	})
+	store, err := temp.ReadTempStoreUnlocked()
+	if err != nil {
+		return err
+	}
+	return temp.VerifyTempSnapshot(store, w.Path, w.Branch, w.TempIdentity)
 }
 
 func TestParseTTL(t *testing.T) {
@@ -181,19 +184,6 @@ func fixtureRecord(branch string) tempRecord {
 	return tempRecord{CreatedAt: TempTestTime, TTL: "1h", Branch: branch, Identity: fixtureTempIdentity}
 }
 
-func storeFixtureRecords(t *testing.T) tempStore {
-	t.Helper()
-	Sandbox(t)
-	base := t.TempDir()
-	want := tempStore{filepath.Join(base, "a"): fixtureRecord("tmp/a"), filepath.Join(base, "b"): fixtureRecord("tmp/b")}
-	for path, rec := range want {
-		if err := storeTempFixture(path, rec); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return want
-}
-
 func assertTempStore(t *testing.T, want tempStore) {
 	t.Helper()
 	got := mustReadTempStore(t)
@@ -205,55 +195,6 @@ func assertTempStore(t *testing.T, want tempStore) {
 			t.Fatalf("record %s: %+v, want %+v", path, got[path], rec)
 		}
 	}
-}
-
-func TestTempStoreRoundTrip(t *testing.T) {
-	want := storeFixtureRecords(t)
-	assertTempStore(t, want)
-	if err := clearTempRecord(filepath.Join(t.TempDir(), "absent")); err != nil {
-		t.Fatal(err)
-	}
-	for path := range want {
-		if err := clearTempRecord(path); err != nil {
-			t.Fatal(err)
-		}
-		delete(want, path)
-		break
-	}
-	assertTempStore(t, want)
-}
-
-// TestTempStoreConcurrentAdds proves the exclusive lock serializes the
-// read-modify-write: N goroutines adding distinct keys must all survive.
-func TestTempStoreConcurrentAdds(t *testing.T) {
-	Sandbox(t)
-	dir := t.TempDir()
-	const n = 12
-	errs := concurrentFixtureAdds(dir, n)
-	for err := range errs {
-		if err != nil {
-			t.Fatalf("concurrent temp.AddTempRecord: %v", err)
-		}
-	}
-	if store := mustReadTempStore(t); len(store) != n {
-		t.Fatalf("store has %d records, want %d (lost updates): %+v", len(store), n, store)
-	}
-}
-
-func concurrentFixtureAdds(dir string, n int) <-chan error {
-	var wg sync.WaitGroup
-	errs := make(chan error, n)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			name := fmt.Sprintf("wt-%d", i)
-			errs <- storeTempFixture(filepath.Join(dir, name), fixtureRecord("tmp/"+name))
-		}(i)
-	}
-	wg.Wait()
-	close(errs)
-	return errs
 }
 
 // TestDiscoveryLenientOnCorruptStore pins the read-only contract: a corrupt
@@ -336,30 +277,6 @@ func TestPromoteMissingCheckoutClearsStaleRecord(t *testing.T) {
 	}
 	if promoted, err := temp.PromoteTempRecord(w.Path); err != nil || promoted {
 		t.Fatalf("retry promote missing = %v, %v; want (false, nil)", promoted, err)
-	}
-}
-
-// Malformed records must not become proven absence during mutation.
-func TestDecodeTempStoreRejectsInvalidEntry(t *testing.T) {
-	Sandbox(t)
-	good := CanonicalPath(filepath.Join(t.TempDir(), "good"))
-	bad := CanonicalPath(filepath.Join(t.TempDir(), "bad"))
-	data, err := json.Marshal(tempStore{
-		good: {CreatedAt: TempTestTime, TTL: "1h", Branch: "tmp/good", Identity: fixtureTempIdentity},
-		bad:  {CreatedAt: TempTestTime, TTL: "bogus", Branch: "tmp/bad", Identity: fixtureTempIdentity},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := temp.DecodeTempStore(data, "/store/temp.json"); err == nil || !strings.Contains(err.Error(), bad) {
-		t.Fatalf("invalid record must fail strict decode: %v", err)
-	}
-}
-
-func TestDecodeTempStoreMalformedJSON(t *testing.T) {
-	Sandbox(t)
-	if _, err := temp.DecodeTempStore([]byte("{not json"), "/store/temp.json"); err == nil {
-		t.Fatal("malformed top-level JSON must be an error")
 	}
 }
 

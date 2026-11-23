@@ -41,13 +41,48 @@ type Record struct {
 type Store map[string]Record
 
 // ActivityFn refreshes a checkout's activity at now. It returns the newest
-// known activity time, plus any unverified sessions that predate it (stale),
-// or an error when activity cannot be refreshed.
-type ActivityFn func(path string, now time.Time) (last time.Time, stale []string, err error)
+// known activity time, plus the raw unverified sessions found, or an error
+// when activity cannot be refreshed. Classification of those sessions (stale
+// vs blocking) belongs to VerifyTempIdle, after the idle verdict.
+type ActivityFn func(path string, now time.Time) (last time.Time, unverified []UnverifiedSession, err error)
 
-func tempPath() (string, error) { return fs.WtmFilePath("temp.json") }
+func tempPath() (string, error) { return fs.WtmFilePath(fs.TempFileName) }
 
-func TempLockPath() (string, error) { return fs.WtmFilePath("temp.lock") }
+// LockPath resolves the temp registry's lock file path.
+func LockPath() (string, error) { return fs.WtmFilePath(fs.TempLockFileName) }
+
+// UnverifiedSession is unattributable activity. A zero age can hide any use;
+// directory symlinks have zero age because appends do not change directory mtimes.
+type UnverifiedSession struct {
+	Path    string
+	ModTime time.Time
+}
+
+// BlockRemoval reports whether this unverified session must block removal: a
+// zero age can hide any use, and a session newer than known activity could be
+// its hidden recent use.
+func (u UnverifiedSession) BlockRemoval(knownNewest time.Time) bool {
+	return u.ModTime.IsZero() || u.ModTime.After(knownNewest)
+}
+
+// ErrTempUnverified blocks removal when an unverified session is newer than
+// known activity — only such a file could be the candidate's hidden recent use.
+var ErrTempUnverified = fmt.Errorf("unverified agent session is newer than known activity")
+
+// splitUnverifiedSessions separates unverified sessions: one newer than known
+// activity could be the candidate's hidden recent use and blocks removal;
+// older ones cannot change the verdict and are returned for the caller to
+// disclose. The store owner owns the terminal, so no warnings here.
+func splitUnverifiedSessions(unverified []UnverifiedSession, knownNewest time.Time) ([]string, error) {
+	var stale []string
+	for _, u := range unverified {
+		if u.BlockRemoval(knownNewest) {
+			return nil, fmt.Errorf("%w: %s", ErrTempUnverified, u.Path)
+		}
+		stale = append(stale, u.Path)
+	}
+	return stale, nil
+}
 
 // DefaultTempTTL is the idle window a temp worktree gets when `add --temp`
 // carries no --ttl.
@@ -83,25 +118,25 @@ func parseTTLDays(s, days string) (time.Duration, error) {
 	return time.Duration(n) * 24 * time.Hour, nil
 }
 
-// TempDeadline is the deadline a temp worktree is measured against. Anchoring
+// Deadline is the deadline a temp worktree is measured against. Anchoring
 // on the newer of creation and last use makes any edit, commit or agent
 // session push the deadline forward.
-func TempDeadline(createdAt, lastUsed time.Time, ttl time.Duration) time.Time {
+func Deadline(createdAt, lastUsed time.Time, ttl time.Duration) time.Time {
 	if lastUsed.After(createdAt) {
 		createdAt = lastUsed
 	}
 	return createdAt.Add(ttl)
 }
 
-// FormatTempDeadline preserves supported fractional TTLs in all machine-readable
+// FormatDeadline preserves supported fractional TTLs in all machine-readable
 // deadlines.
-func FormatTempDeadline(deadline time.Time) string {
+func FormatDeadline(deadline time.Time) string {
 	return deadline.UTC().Format(time.RFC3339Nano)
 }
 
 // TempExpired reports whether a temp worktree has been idle longer than ttl.
 func TempExpired(createdAt, lastUsed time.Time, ttl time.Duration, now time.Time) bool {
-	return now.After(TempDeadline(createdAt, lastUsed, ttl))
+	return now.After(Deadline(createdAt, lastUsed, ttl))
 }
 
 // RemainingWindowLabel renders a temp deadline for display: "expired" once it
@@ -188,12 +223,12 @@ func validateTempRecord(rec Record) error {
 	return nil
 }
 
-func WithLockedTempStore(fn func(Store, string) error) error {
+func withLockedTempStore(fn func(Store, string) error) error {
 	p, err := tempPath()
 	if err != nil {
 		return err
 	}
-	lock, err := TempLockPath()
+	lock, err := LockPath()
 	if err != nil {
 		return err
 	}
@@ -206,7 +241,7 @@ func WithLockedTempStore(fn func(Store, string) error) error {
 	})
 }
 
-func WriteTempStore(path string, store Store) error {
+func writeTempStore(path string, store Store) error {
 	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
 		return err
@@ -214,10 +249,14 @@ func WriteTempStore(path string, store Store) error {
 	return fs.WriteFileAtomic(path, append(data, '\n'), 0o600)
 }
 
-// ValidTempIdentity reports whether identity has the temp-record fingerprint
-// shape; exported for tests pinning the identity contract.
-func ValidTempIdentity(identity string) bool {
-	return validTempIdentity(identity)
+// WriteTempStoreUnlocked persists the registry with the exact serialization
+// ReadTempStoreUnlocked reads; callers hold the exclusive registry lock.
+func WriteTempStoreUnlocked(store Store) error {
+	p, err := tempPath()
+	if err != nil {
+		return err
+	}
+	return writeTempStore(p, store)
 }
 
 func validTempIdentity(identity string) bool {
@@ -256,6 +295,8 @@ func installTempIdentity(path string, rec Record) error {
 	return fs.WriteFileAtomic(p, []byte(rec.Identity), 0o600)
 }
 
+// ErrTempMetadataChanged fails verification when the identity token is missing
+// or replaced, or the branch differs from the stored record.
 var ErrTempMetadataChanged = errors.New("temp metadata changed")
 
 // VerifyTempIdentity checks the checkout's stored identity token against the
@@ -304,28 +345,39 @@ func VerifyTempSnapshot(store Store, path, branch, identity string) error {
 }
 
 var (
-	ErrTempActive   = errors.New("temp worktree is now ACTIVE")
+	// ErrTempActive: the checkout has live activity, so it must not be removed.
+	ErrTempActive = errors.New("temp worktree is now ACTIVE")
+	// ErrTempPromoted: no temp record found; the checkout was promoted or removed.
 	ErrTempPromoted = errors.New("temp record was promoted or removed")
 )
 
 // Idle GC refreshes activity under the lock; explicit removals bypass idleness.
-// Unverified sessions block only when newer than the candidate's known newest
-// activity — only such a file could be its hidden recent use. Older ones warn.
+// The caller has already verified the record/snapshot before this runs, so
+// this step only probes live activity; a probe error is fatal (fail closed).
+// The idle verdict comes first: an ACTIVE checkout reports ErrTempActive even
+// when it hosts a newer unverified session (a session can only be that
+// checkout's hidden recent use once it is already idle-expired). Unverified
+// sessions then block only when newer than the candidate's known newest
+// activity or zero-age (such a file could be its hidden recent use); older
+// ones are returned stale for the caller to disclose.
 func VerifyTempIdle(store Store, path string, now time.Time, fresh ActivityFn) (stale []string, err error) {
+	if fresh == nil {
+		return nil, errors.New("temp: activity probe is required")
+	}
 	// The record exists: verifyTempRemoval checked the snapshot before this runs.
 	rec := store[path]
 	ttl, err := ParseTTL(rec.TTL)
 	if err != nil {
 		return nil, err
 	}
-	last, stale, err := fresh(path, now)
+	last, unverified, err := fresh(path, now)
 	if err != nil {
 		return nil, fmt.Errorf("refresh worktree activity: %w", err)
 	}
 	if !TempExpired(rec.CreatedAt, last, ttl, now) {
 		return nil, ErrTempActive
 	}
-	return stale, nil
+	return splitUnverifiedSessions(unverified, last)
 }
 
 // Registry permission cannot change between verification and checkout removal.
@@ -335,7 +387,7 @@ func VerifyTempIdle(store Store, path string, now time.Time, fresh ActivityFn) (
 // external state (Git activity, agent sessions) and removal runs a blocking
 // git command; callers should not expect the lock to be short-lived.
 func RemoveTempWorktreeIf(path, branch, identity string, idleOnly bool, now time.Time, fresh ActivityFn) (removed bool, stale []string, err error) {
-	err = WithLockedTempStore(func(store Store, registry string) error {
+	err = withLockedTempStore(func(store Store, registry string) error {
 		stale, err = verifyTempRemoval(store, path, branch, identity, idleOnly, now, fresh)
 		if err != nil {
 			return err
@@ -370,7 +422,7 @@ func persistTempRemoval(store Store, registry, path string) error {
 
 func deleteStoredTempRecord(store Store, registry, path string) error {
 	delete(store, path)
-	return WriteTempStore(registry, store)
+	return writeTempStore(registry, store)
 }
 
 func removeTempCheckout(path string) error {
@@ -400,12 +452,12 @@ func AddTempRecord(path string, rec Record) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	err = WithLockedTempStore(func(store Store, p string) error {
+	err = withLockedTempStore(func(store Store, p string) error {
 		if err := installTempIdentity(path, rec); err != nil {
 			return err
 		}
 		store[fs.Canonical(path)] = rec
-		return WriteTempStore(p, store)
+		return writeTempStore(p, store)
 	})
 	if err != nil {
 		return Record{}, err
@@ -417,7 +469,7 @@ func AddTempRecord(path string, rec Record) (Record, error) {
 // temp permission, but a newly registered checkout must never be removed.
 func RemovePermanentWorktree(root, path string) (bool, error) {
 	removed := false
-	err := WithLockedTempStore(func(store Store, registry string) error {
+	err := withLockedTempStore(func(store Store, registry string) error {
 		if err := clearStaleTempTarget(store, registry, fs.Canonical(path)); err != nil {
 			return err
 		}
@@ -453,7 +505,7 @@ func staleTempMetadata(err error) bool {
 // already permanent. Git failures alone never prove stale permission.
 func PromoteTempRecord(path string) (bool, error) {
 	promoted := false
-	err := WithLockedTempStore(func(store Store, p string) error {
+	err := withLockedTempStore(func(store Store, p string) error {
 		key := fs.Canonical(path)
 		rec, ok := store[key]
 		if !ok {
@@ -516,10 +568,10 @@ func removeTempIdentity(path string) error {
 // The global store must check identity, not a repository-local path list.
 // Reused paths and changed branches lose temp rules, never their checkout.
 func ReconcileTempStore() error {
-	return WithLockedTempStore(func(store Store, registry string) error {
+	return withLockedTempStore(func(store Store, registry string) error {
 		changed, err := reconcileTempRecords(store)
 		if changed {
-			err = errors.Join(err, WriteTempStore(registry, store))
+			err = errors.Join(err, writeTempStore(registry, store))
 		}
 		return err
 	})

@@ -563,7 +563,7 @@ func trackAddTemp(p addParams, res *addResult) {
 		ui.Warnf("%s is not tracked as temp and will persist: %v", p.path, err)
 		return
 	}
-	expires := temp.FormatTempDeadline(rec.CreatedAt.Add(p.ttl))
+	expires := temp.FormatDeadline(rec.CreatedAt.Add(p.ttl))
 	res.Temp, res.TTL, res.ExpiresAt = true, p.ttl.String(), &expires
 }
 
