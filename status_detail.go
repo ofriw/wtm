@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // status_detail.go — the status detail block: its schema, width fit, summary
@@ -74,7 +76,7 @@ func detailModelPartial(u *worktreeUsage, cols []worktreeColumn, rows [][]string
 	timeKept := columnKept(cols, rows, colTime.header, budget)
 	tokensKept := tokenGroupKept(cols)
 	for _, m := range u.mergedModels() {
-		if m.partial && ((timeKept && m.active() > 0) || (tokensKept && m.tokens.total() > 0)) {
+		if m.partial && ((timeKept && m.active() > 0) || (tokensKept && m.tokensKnown())) {
 			return true
 		}
 	}
@@ -161,11 +163,18 @@ func printDetailSummary(cur worktree, now time.Time, colorMode string, budget in
 	printKeyValues(dropElidedSummaryRows(detailSummaryRows(cur, now), budget), detailTitleRows, colorMode, budget)
 }
 
-// printDetailTable prints the fitted model rows and their legend.
+// printDetailTable prints the fitted model rows and their legend. An activity-
+// only worktree has no model rows: a header-only grid and the width warning for
+// token columns it cannot render would both disclose nothing real, so only the
+// applicable legend prints.
 func printDetailTable(cur worktree, now time.Time, colorMode string, budget int) {
 	f := fitDetailBlock(cur, now, budget)
+	if len(f.rows) == 0 {
+		printDetailLegend(f.reasons, f.list, f.partial, false, colorMode, budget)
+		return
+	}
 	if f.dropped {
-		warnf("terminal too narrow; hid %s; widen the terminal or use --json", strings.Join(tokenColumnNames(), ", "))
+		warnHiddenColumns(tokenColumnNames())
 	}
 	printTable(columnHeaders(f.cols), f.rows, colorMode, statusCell, columnRightAligns(f.cols), budget)
 	printDetailLegend(f.reasons, f.list, f.partial, tokenGroupKept(f.cols) && detailHasTokens(cur.Usage), colorMode, budget)
@@ -317,7 +326,7 @@ func dropElidedSummaryRows(rows [][]string, budget int) [][]string {
 	groups := summaryHiddenGroups(rows, budget)
 	var hidden []string
 	for _, group := range groups {
-		warnf("terminal too narrow; hid %s; widen the terminal or use --json", strings.Join(group, ", "))
+		warnHiddenColumns(group)
 		hidden = append(hidden, group...)
 	}
 	return slices.DeleteFunc(slices.Clone(rows), func(row []string) bool {
@@ -463,7 +472,7 @@ func detailHasTokens(u *worktreeUsage) bool {
 	}
 	for _, h := range u.harnesses {
 		for _, m := range h.models {
-			if m.tokens.total() > 0 {
+			if m.tokensKnown() {
 				return true
 			}
 		}
@@ -550,8 +559,13 @@ func detailRows(u *worktreeUsage, showList bool) [][]string {
 }
 
 // detailRow projects one model: name, time, billed cost, optional list price,
-// then one cell per token-group column.
+// then one cell per token-group column. The name is display text: ANSI
+// sequences and newlines are stripped so a corrupt transcript model label can
+// never inject styling or split the row; the JSON report keeps the raw model
+// identity (see status_json.go).
 func detailRow(name string, m *modelUsage, showList bool) []string {
+	name = ansi.Strip(name)
+	name = strings.Join(strings.Fields(name), " ")
 	row := []string{name, modelTimeCell(m), m.cost.billed.cell()}
 	if showList {
 		row = append(row, listCell(m.cost))
@@ -593,32 +607,45 @@ func partialTokenCell(value int64, present, partial bool) string {
 }
 
 // tokenCount renders one tier's count: the compact form when the tier recorded
-// tokens, "-" when it recorded none.
+// tokens, "-" when none, and "unknown" when the count was rejected.
 func tokenCount(m *modelUsage, t tier) string {
+	if m.tokens.corrupt.has(t) {
+		return "unknown"
+	}
 	n := m.tokens.tier(t)
 	return partialTokenCell(n, n > 0, m.partial)
 }
 
 // totalInputCell renders the model's total prompt tokens (uncached input, cache
 // reads and cache writes): the base every cache share is taken from. "-" when the
-// model recorded no prompt tokens.
+// model recorded no prompt tokens, "unknown" when a prompt class is corrupt.
 func totalInputCell(m *modelUsage) string {
+	if m.tokens.corruptPrompt() {
+		return "unknown"
+	}
 	context := m.tokens.context()
 	return partialTokenCell(context, context != 0, m.partial)
 }
 
 // missCount renders the miss subtotal: "-" when the model recorded no prompt
 // tokens, else the compact count. A zero beside a nonzero hit is an honest sign
-// that the build left the recorded window (see hitRateCell).
+// that the build left the recorded window (see hitRateCell); a corrupt prompt
+// class reads unknown rather than a zero placeholder.
 func missCount(m *modelUsage) string {
+	if m.tokens.corruptPrompt() {
+		return "unknown"
+	}
 	context := m.tokens.context()
 	return partialTokenCell(m.tokens.miss(), context != 0, m.partial)
 }
 
 // hitRateCell renders one model's cache-hit share: the percent, "unknown" when
-// hits have no recorded build (the ratio is undefined and would read a false
-// 100%), and "-" when the model recorded no prompt tokens at all.
+// hits have no recorded build or a prompt class is corrupt, and "-" when the
+// model recorded no prompt tokens at all.
 func hitRateCell(m *modelUsage) string {
+	if m.tokens.corruptPrompt() {
+		return "unknown"
+	}
 	rate, ok := m.tokens.hitRate()
 	if ok {
 		return partialValue(formatPercent(rate), m.partial)

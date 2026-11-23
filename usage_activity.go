@@ -35,37 +35,58 @@ const (
 	activityEnd
 )
 
-// activityEvent is one turn boundary or work marker. Model attribution is not
-// needed here: per-model TIME clips the usage events' spans to these turns.
+// activityEvent is one turn boundary or work marker. answer carries an
+// assistant record's model: only that explicit answer may own a turn's opening,
+// so a warmup or summary usage record (work without an answer) never can.
 type activityEvent struct {
-	at   time.Time
-	kind activityKind
+	at     time.Time
+	kind   activityKind
+	answer string
+}
+
+// turn is one causal turn and the model that answered it. answerAt is that
+// model's first assistant record, which bounds the turn's opening; a turn with
+// no assistant record leaves both empty and falls back to its usage events.
+type turn struct {
+	span
+	answer   string
+	answerAt time.Time
 }
 
 // sortActivity orders turn markers by time. Stable, so records at the same
-// instant keep file order.
+// instant keep file order: an answer that closes the previous turn at a shared
+// boundary stays with that turn.
 func sortActivity(events []activityEvent) {
 	sort.SliceStable(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
+}
+
+// answerMark is one assistant record inside the open turn, in file order.
+type answerMark struct {
+	model string
+	at    time.Time
 }
 
 // turnState tracks one session's open turn. A human prompt while a turn is open
 // closes the previous turn at its last work record, which keeps a missing
 // end_turn from counting the user's idle time.
 type turnState struct {
-	blocks []span
+	blocks []turn
 	open   bool
 	start  time.Time
 	last   time.Time
+	marks  []answerMark
 }
 
 func (s *turnState) closeAt(end time.Time) {
 	if end.After(s.start) {
-		s.blocks = append(s.blocks, span{start: s.start, end: end})
+		t := turn{span: span{start: s.start, end: end}}
+		t.answer, t.answerAt = turnAnswer(s.marks)
+		s.blocks = append(s.blocks, t)
 	}
-	s.open = false
+	s.open, s.marks = false, nil
 }
 
-func (s *turnState) openAt(at time.Time) { s.open, s.start, s.last = true, at, at }
+func (s *turnState) openAt(at time.Time) { s.open, s.start, s.last, s.marks = true, at, at, nil }
 
 func (s *turnState) apply(e activityEvent) {
 	switch e.kind {

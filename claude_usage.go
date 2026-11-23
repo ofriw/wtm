@@ -42,6 +42,7 @@ type claudeActivityRecord struct {
 }
 
 type claudeActivityMessage struct {
+	Model      string          `json:"model"`
 	StopReason string          `json:"stop_reason"`
 	Content    json.RawMessage `json:"content"`
 }
@@ -56,13 +57,51 @@ type claudeUsage struct {
 	ServerToolUse *claudeServerToolUse `json:"server_tool_use"`
 }
 
+// UnmarshalJSON reads each figure on its own. A typed decode of the whole block
+// fails on the first number this build cannot hold, and with it loses every
+// readable count of the turn (see rawFields).
+func (u *claudeUsage) UnmarshalJSON(b []byte) error {
+	f, err := rawObject(b)
+	if err != nil {
+		return err
+	}
+	u.InputTokens, u.OutputTokens = f.count("input_tokens"), f.count("output_tokens")
+	u.CacheRead, u.CacheCreation = f.count("cache_read_input_tokens"), f.count("cache_creation_input_tokens")
+	u.ServiceTier = f.text("service_tier")
+	if u.CacheDetail, err = decodeObject[claudeCacheCreation](f, "cache_creation"); err != nil {
+		return err
+	}
+	u.ServerToolUse, err = decodeObject[claudeServerToolUse](f, "server_tool_use")
+	return err
+}
+
 type claudeCacheCreation struct {
 	Ephemeral5m *int64 `json:"ephemeral_5m_input_tokens"`
 	Ephemeral1h *int64 `json:"ephemeral_1h_input_tokens"`
 }
 
+// UnmarshalJSON reads each lifetime figure on its own (see claudeUsage).
+func (c *claudeCacheCreation) UnmarshalJSON(b []byte) error {
+	f, err := rawObject(b)
+	if err != nil {
+		return err
+	}
+	c.Ephemeral5m, c.Ephemeral1h = f.count("ephemeral_5m_input_tokens"), f.count("ephemeral_1h_input_tokens")
+	return nil
+}
+
 type claudeServerToolUse struct {
 	WebSearchRequests *int64 `json:"web_search_requests"`
+}
+
+// UnmarshalJSON reads the search count on its own (see claudeUsage).
+func (s *claudeServerToolUse) UnmarshalJSON(b []byte) error {
+	f, err := rawObject(b)
+	if err != nil {
+		return err
+	}
+	s.WebSearchRequests = f.count("web_search_requests")
+	return nil
 }
 
 // claudeUsageEvents parses one Claude session into cost events and causal turn
@@ -113,7 +152,8 @@ func (p *sessionParse) consumeClaudeLine(line []byte, oversized bool, prefix []b
 }
 
 // consumeOversizedClaude counts a discarded record only when it could have
-// billed.
+// billed. A truncated prefix cannot prove usage absence, so an assistant prefix
+// stays billable.
 func (p *sessionParse) consumeOversizedClaude(prefix []byte) {
 	if oversizedClaudeBillable(prefix) {
 		p.dropped++
@@ -162,6 +202,19 @@ func sortUsageEvents(events []usageEvent) {
 	sort.Slice(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
 }
 
+// claudeSyntheticModel is the error record's pseudo-model. It bills nothing and
+// names no answering model, so it can never own a turn's opening.
+const claudeSyntheticModel = "<synthetic>"
+
+// claudeAnswer is the model an activity record proves; the synthetic error
+// record names none.
+func claudeAnswer(model string) string {
+	if model == claudeSyntheticModel {
+		return ""
+	}
+	return model
+}
+
 // claudeEvent turns one assistant record into a candidate event. Only an
 // assistant record carries billed usage, and the synthetic error model is
 // skipped. A record with no usable timestamp drops and increments dropped: it
@@ -170,10 +223,10 @@ func sortUsageEvents(events []usageEvent) {
 // repeats and cross-file repeats to one billed turn.
 func claudeEvent(rec *claudeUsageRecord, dropped *int) (usageEvent, bool) {
 	msg := rec.Message
-	if rec.Type != "assistant" || msg == nil || msg.Usage == nil || msg.Model == "<synthetic>" {
+	if rec.Type != "assistant" || msg == nil || msg.Usage == nil || msg.Model == claudeSyntheticModel {
 		return usageEvent{}, false
 	}
-	at, ok := parseRFC3339(rec.Timestamp)
+	at, ok := transcriptTimestamp(rec.Timestamp)
 	if !ok {
 		*dropped++
 		return usageEvent{}, false
@@ -193,18 +246,18 @@ func claudeActivityFromUsage(rec *claudeUsageRecord) (activityEvent, bool) {
 	if rec.Type != "assistant" || msg == nil {
 		return activityEvent{}, false
 	}
-	at, ok := parseRFC3339(rec.Timestamp)
+	at, ok := transcriptTimestamp(rec.Timestamp)
 	if !ok {
 		return activityEvent{}, false
 	}
-	return activityEvent{at: at, kind: claudeStopKind(msg.StopReason)}, true
+	return activityEvent{at: at, kind: claudeStopKind(msg.StopReason), answer: claudeAnswer(msg.Model)}, true
 }
 
 // claudeActivityFromRecord derives the turn boundary from a record that carries
 // no billable usage: an assistant record (streaming fragment or empty turn) and
 // a user record (human prompt or tool result).
 func claudeActivityFromRecord(rec *claudeActivityRecord) (activityEvent, bool) {
-	at, ok := parseRFC3339(rec.Timestamp)
+	at, ok := transcriptTimestamp(rec.Timestamp)
 	if !ok {
 		return activityEvent{}, false
 	}
@@ -213,7 +266,7 @@ func claudeActivityFromRecord(rec *claudeActivityRecord) (activityEvent, bool) {
 		if rec.Message == nil {
 			return activityEvent{}, false
 		}
-		return activityEvent{at: at, kind: claudeStopKind(rec.Message.StopReason)}, true
+		return activityEvent{at: at, kind: claudeStopKind(rec.Message.StopReason), answer: claudeAnswer(rec.Message.Model)}, true
 	case "user":
 		if rec.Message == nil || rec.IsMeta {
 			return activityEvent{}, false
@@ -304,11 +357,32 @@ func claudeTokensFrom(u *claudeUsage) (promptTokens, string, int64) {
 }
 
 func classifyCacheWrite(t *promptTokens, u *claudeUsage) {
+	total := derefInt(u.CacheCreation)
+	if invalidCount(total) != "" {
+		// An invalid flat total voids the whole tier: its derived classes cannot
+		// be trusted to sum to a real recorded value. Keeping the bad figure
+		// visible makes sanitizeTokens reject the tier instead of pricing an
+		// exact-looking but fabricated split.
+		t.unclassifiedCacheWrite = total
+		return
+	}
 	if u.CacheDetail != nil {
 		t.cacheWrite5m = derefInt(u.CacheDetail.Ephemeral5m)
 		t.cacheWrite1h = derefInt(u.CacheDetail.Ephemeral1h)
 	}
-	if total := derefInt(u.CacheCreation); total > t.cacheWrite5m+t.cacheWrite1h {
+	t.classifyWriteTotal(total, u.CacheCreation != nil)
+}
+
+// classifyWriteTotal folds the flat cache-write total into the lifetime split.
+// A remainder the breakdown does not explain stays unclassified; a breakdown
+// that outruns a stated total contradicts it, so no write figure of that record
+// can be trusted and the tier is flagged for sanitizeTokens to reject and name.
+// An absent total states nothing, so the split stands on its own.
+func (t *promptTokens) classifyWriteTotal(total int64, stated bool) {
+	switch {
+	case stated && total < t.cacheWrite5m+t.cacheWrite1h:
+		t.conflicts = t.conflicts.with(tierCacheWrite)
+	case total > t.cacheWrite5m+t.cacheWrite1h:
 		t.unclassifiedCacheWrite = total - t.cacheWrite5m - t.cacheWrite1h
 	}
 }

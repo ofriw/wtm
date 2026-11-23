@@ -35,6 +35,20 @@ type piUsage struct {
 	Cost       *piCost `json:"cost"`
 }
 
+// UnmarshalJSON reads each figure on its own. A typed decode of the whole block
+// fails on the first number this build cannot hold, and with it loses the
+// record's charge, its other counts, and its timestamp (see rawFields).
+func (u *piUsage) UnmarshalJSON(b []byte) error {
+	f, err := rawObject(b)
+	if err != nil {
+		return err
+	}
+	u.Input, u.Output = f.count("input"), f.count("output")
+	u.CacheRead, u.CacheWrite = f.count("cacheRead"), f.count("cacheWrite")
+	u.Cost, err = decodeObject[piCost](f, "cost")
+	return err
+}
+
 // piCost is Pi's own price breakdown. Total is authoritative; the class fields
 // are the per-tier split, present in modern sessions but absent in older ones.
 type piCost struct {
@@ -43,6 +57,19 @@ type piCost struct {
 	CacheRead  *float64 `json:"cacheRead"`
 	CacheWrite *float64 `json:"cacheWrite"`
 	Total      *float64 `json:"total"`
+}
+
+// UnmarshalJSON keeps one unreadable price field from voiding the rest of the
+// breakdown: a rejected figure reads unknown at pricing (see addReportedCost).
+func (c *piCost) UnmarshalJSON(b []byte) error {
+	f, err := rawObject(b)
+	if err != nil {
+		return err
+	}
+	c.Input, c.Output = f.amount("input"), f.amount("output")
+	c.CacheRead, c.CacheWrite = f.amount("cacheRead"), f.amount("cacheWrite")
+	c.Total = f.amount("total")
+	return nil
 }
 
 type piMessage struct {
@@ -109,6 +136,18 @@ type piSpawnStats struct {
 	CacheWriteTokens *int64   `json:"cacheWriteTokens"`
 }
 
+// UnmarshalJSON reads each child figure on its own (see piUsage).
+func (s *piSpawnStats) UnmarshalJSON(b []byte) error {
+	f, err := rawObject(b)
+	if err != nil {
+		return err
+	}
+	s.Cost = f.amount("cost")
+	s.InputTokens, s.OutputTokens = f.count("inputTokens"), f.count("outputTokens")
+	s.CacheReadTokens, s.CacheWriteTokens = f.count("cacheReadTokens"), f.count("cacheWriteTokens")
+	return nil
+}
+
 // piSpawnResult is one child in an older spawn result. Only the usage block is
 // read; the sibling prompt and output are content-heavy and stay undecoded.
 type piSpawnResult struct {
@@ -124,6 +163,27 @@ type piSpawnUsage struct {
 	Output     *int64   `json:"output"`
 	CacheRead  *int64   `json:"cacheRead"`
 	CacheWrite *int64   `json:"cacheWrite"`
+}
+
+// UnmarshalJSON reads each child figure on its own (see piUsage).
+func (u *piSpawnUsage) UnmarshalJSON(b []byte) error {
+	f, err := rawObject(b)
+	if err != nil {
+		return err
+	}
+	u.Model = derefText(f.text("model"))
+	u.Cost = f.amount("cost")
+	u.Input, u.Output = f.count("input"), f.count("output")
+	u.CacheRead, u.CacheWrite = f.count("cacheRead"), f.count("cacheWrite")
+	return nil
+}
+
+// derefText reads an optional decoded string; absent means empty.
+func derefText(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 // piUsageEvents parses one Pi session into cost events and causal turn
@@ -199,7 +259,7 @@ func (s *piParseState) consumePiRecord(line []byte) {
 		s.dropped++
 		return
 	}
-	at, atOK := parseRFC3339(rec.Timestamp)
+	at, atOK := transcriptTimestamp(rec.Timestamp)
 	s.current, s.provider = appendPiRecord(&s.events, &rec, s.current, s.provider, s.spawnAt, &s.dropped)
 	if atOK {
 		if a, ok := piActivityFromRecord(&rec, at); ok {
@@ -209,23 +269,32 @@ func (s *piParseState) consumePiRecord(line []byte) {
 }
 
 // consumePiActivity decodes only the small activity shape, so a content-heavy
-// tool result never allocates its blocks.
+// tool result never allocates its blocks. A present-but-absurd timestamp (a Go
+// zero time, an epoch-zero bug) is corrupt time: the record cannot open or close
+// a turn, so it counts as dropped and the caller taints the total . An
+// absent timestamp keeps the old silent tolerance — it just contributes no turn.
 func (s *piParseState) consumePiActivity(line []byte) {
 	var rec piActivityRecord
 	if json.Unmarshal(line, &rec) != nil || rec.Type != "message" || rec.Message == nil {
 		return
 	}
-	at, ok := parseRFC3339(rec.Timestamp)
-	if !ok {
+	if rec.Timestamp == "" {
 		return
 	}
-	if a, ok := piActivityFromMessage(rec.Message.Role, rec.Message.StopReason, at); ok {
+	at, ok := transcriptTimestamp(rec.Timestamp)
+	if !ok {
+		s.dropped++
+		return
+	}
+	model := preferredModel(rec.Message.ResponseModel, rec.Message.Model)
+	if a, ok := piActivityFromMessage(rec.Message.Role, rec.Message.StopReason, model, at); ok {
 		s.activity = append(s.activity, a)
 	}
 }
 
 // oversizedPiBillable reports whether a discarded Pi record could have billed.
-// An unknown role stays fail-closed; only a visible non-spawn tool result is free.
+// An unknown type stays fail-closed; only a visible non-spawn tool result or a
+// usage-free unbilled record is free.
 func oversizedPiBillable(prefix []byte) bool {
 	t, ok := recordType(prefix)
 	if !ok {
@@ -278,19 +347,22 @@ func piActivityFromRecord(rec *piUsageRecord, at time.Time) (activityEvent, bool
 		if rec.Message == nil {
 			return activityEvent{}, false
 		}
-		return piActivityFromMessage(rec.Message.Role, rec.Message.StopReason, at)
+		return piActivityFromMessage(rec.Message.Role, rec.Message.StopReason, piMessageModel(rec.Message), at)
 	case "usage", "compaction", "branch_summary":
 		return activityEvent{at: at, kind: activityWork}, true
 	}
 	return activityEvent{}, false
 }
 
-func piActivityFromMessage(role, stop string, at time.Time) (activityEvent, bool) {
+// piActivityFromMessage maps a message record to its turn state. An assistant's
+// model is its answer, which may own the turn's opening; a tool result names no
+// answer because it belongs to the parent's record, not to the child's.
+func piActivityFromMessage(role, stop, model string, at time.Time) (activityEvent, bool) {
 	switch role {
 	case "user":
 		return activityEvent{at: at, kind: activityHuman}, true
 	case "assistant":
-		return activityEvent{at: at, kind: piStopKind(stop)}, true
+		return activityEvent{at: at, kind: piStopKind(stop), answer: model}, true
 	case "toolResult":
 		return activityEvent{at: at, kind: activityWork}, true
 	}
@@ -325,10 +397,10 @@ func piBillsTime(t string) bool {
 // summary call. Only a model change moves the running attribution without
 // billing.
 func appendPiRecord(events *[]usageEvent, rec *piUsageRecord, current, provider string, spawnAt map[string]time.Time, dropped *int) (string, string) {
-	if rec.Type == "model_change" {
-		return applyPiModelChange(rec, current, provider)
-	}
 	if !piBillsTime(rec.Type) {
+		if rec.Type == "model_change" {
+			return applyPiModelChange(rec, current, provider)
+		}
 		return current, provider
 	}
 	return appendPiBilledRecord(events, rec, current, provider, spawnAt, dropped)
@@ -349,7 +421,7 @@ func applyPiModelChange(rec *piUsageRecord, current, provider string) (string, s
 // it by type. A record with no usable timestamp cannot be placed on the
 // activity or cost timeline, so it drops; the count discloses that loss.
 func appendPiBilledRecord(events *[]usageEvent, rec *piUsageRecord, current, provider string, spawnAt map[string]time.Time, dropped *int) (string, string) {
-	at, ok := parseRFC3339(rec.Timestamp)
+	at, ok := transcriptTimestamp(rec.Timestamp)
 	if !ok {
 		*dropped++
 		return current, provider
@@ -452,11 +524,15 @@ func appendPiToolResult(events *[]usageEvent, msg *piMessage, id string, at time
 
 // piMessageModel prefers the physical model that answered, so a virtual model
 // routes to the real one.
-func piMessageModel(msg *piMessage) string {
-	if msg.ResponseModel != "" {
-		return msg.ResponseModel
+func piMessageModel(msg *piMessage) string { return preferredModel(msg.ResponseModel, msg.Model) }
+
+// preferredModel returns the physical model when recorded, else the requested
+// one.
+func preferredModel(response, model string) string {
+	if response != "" {
+		return response
 	}
-	return msg.Model
+	return model
 }
 
 // piSpawnChild is one spawned child's billing facts.

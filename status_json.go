@@ -63,9 +63,10 @@ type jsonModelUsage struct {
 
 // jsonTierUsage is one token tier's machine contract: the token count plus the
 // billed cost and optional list price, mirroring the model-level cost shape so
-// the billed/list invariant holds identically at every level.
+// the billed/list invariant holds at every level. Tokens is null when rejected:
+// the price may stay known, the count does not.
 type jsonTierUsage struct {
-	Tokens        int64    `json:"tokens"`
+	Tokens        *int64   `json:"tokens"`
 	Cost          *float64 `json:"cost"`
 	CostEstimated bool     `json:"costEstimated,omitempty"`
 	ListCost      *optCost `json:"listCost,omitempty"`
@@ -224,15 +225,20 @@ func modelUsageJSON(m *modelUsage) jsonModelUsage {
 }
 
 // tiersJSON projects a model's token tiers into the machine contract. It returns
-// nil when no tier recorded tokens, so a cost-only legacy record (an older Pi
-// session or spawn result) omits the breakdown instead of four empty tiers.
+// nil when no tier recorded tokens and none was rejected, so a cost-only legacy
+// record omits the breakdown. A rejected tier emits null, not an omission that
+// would read as "never recorded".
 func tiersJSON(tokens promptTokens, tiers tokenTiers) map[string]jsonTierUsage {
-	if tokens.total() == 0 {
+	if tokens.total() == 0 && tokens.corrupt == 0 {
 		return nil
 	}
 	out := make(map[string]jsonTierUsage, numTiers)
 	for t := tier(0); t < numTiers; t++ {
-		tu := jsonTierUsage{Tokens: tokens.tier(t), Cost: tiers[t].billed.jsonValue(), CostEstimated: tiers[t].billed.isEstimated()}
+		tu := jsonTierUsage{Cost: tiers[t].billed.jsonValue(), CostEstimated: tiers[t].billed.isEstimated()}
+		if !tokens.corrupt.has(t) {
+			n := tokens.tier(t)
+			tu.Tokens = &n
+		}
 		if lc := listCostJSON(tiers[t]); lc != nil {
 			tu.ListCost = lc
 			tu.ListCostEst = tiers[t].list.isEstimated()
@@ -243,11 +249,11 @@ func tiersJSON(tokens promptTokens, tiers tokenTiers) map[string]jsonTierUsage {
 }
 
 // cacheJSON projects a model's derived cache metrics into the machine contract.
-// Both keys are omitted when the model recorded no prompt tokens. The hit rate
-// is also omitted when the guard trips — hits with no recorded build make the
-// ratio undefined — so the contract carries no false 100%.
+// Both keys are omitted without prompt tokens or with a rejected prompt count:
+// a zeroed count would make the subtotal and share a lie. The hit rate also
+// omits undefined builds, so the contract carries no false 100%.
 func cacheJSON(t promptTokens) (*int64, *float64) {
-	if t.context() == 0 {
+	if t.context() == 0 || t.corruptPrompt() {
 		return nil, nil
 	}
 	miss := t.miss()

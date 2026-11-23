@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
@@ -221,8 +222,16 @@ func (p costPair) cell() string {
 }
 
 // roundCost kills float summation noise so JSON output is stable; 1e-6 is well
-// below a cent and above the error of summing real token prices.
-func roundCost(v float64) float64 { return float64(int64(v*1e6+0.5)) / 1e6 }
+// below a cent and above the error of summing real token prices. Above the int64
+// fixed-point range (|v| > MaxInt64/1e6) the int64 conversion would wrap to a
+// wrong exact figure, so the exact float is kept instead.
+func roundCost(v float64) float64 {
+	const scale = 1e6
+	if v >= math.MaxInt64/scale || v <= -math.MaxInt64/scale {
+		return v
+	}
+	return float64(int64(v*scale+0.5)) / scale
+}
 
 // roundRate gives a 0..1 share the same 1e-6 trim as a price, so a ratio in the
 // machine contract is as byte-stable as a cost.
@@ -299,7 +308,8 @@ var usageKey = []byte("\"usage\"")
 // promptTokens are the priced prompt classes shared by every harness. Pi keeps
 // one cache-write class (filled into cacheWrite5m); Claude keeps the 5-minute
 // and 1-hour writes apart. unclassifiedCacheWrite is Claude's flat
-// cache_creation count when the record omits the lifetime breakdown.
+// cache_creation count when the record omits the lifetime breakdown. corrupt
+// marks rejected counts: zeroed, but the tier still reads unknown.
 type promptTokens struct {
 	input                  int64
 	output                 int64
@@ -307,6 +317,26 @@ type promptTokens struct {
 	cacheWrite5m           int64
 	cacheWrite1h           int64
 	unclassifiedCacheWrite int64
+	corrupt                tierMask
+	// conflicts marks a class whose figures contradict each other inside one
+	// record. The parser proves it but has no warning sink, so it flags the tier
+	// and sanitizeTokens (the single sink site) rejects and names it. Cleared
+	// there, so it never reaches a fold.
+	conflicts tierMask
+}
+
+// tierMask marks corrupt classes; the three write classes share tierCacheWrite,
+// because the display collapses them into one cell.
+type tierMask uint8
+
+func (m tierMask) has(id tier) bool { return m&(1<<id) != 0 }
+
+func (m tierMask) with(id tier) tierMask { return m | 1<<id }
+
+// corruptPrompt reports a rejected input, cache-read or cache-write count, which
+// invalidates every derived miss and hit-rate value.
+func (t promptTokens) corruptPrompt() bool {
+	return t.corrupt.has(tierInput) || t.corrupt.has(tierCacheRead) || t.corrupt.has(tierCacheWrite)
 }
 
 // total is the sum of every token class, for dedupe scoring and the empty-tier
@@ -315,6 +345,10 @@ func (t promptTokens) total() int64 {
 	return t.input + t.output + t.cacheRead + t.cacheWrite5m + t.cacheWrite1h + t.unclassifiedCacheWrite
 }
 
+// hasUsageEvidence reports any recorded token use, including a rejected count:
+// sanitization zeroes the figure, but zero tokens is not the same as no record.
+func (t promptTokens) hasUsageEvidence() bool { return t.total() > 0 || t.corrupt != 0 }
+
 // derefInt reads an optional JSON count; absent means zero, never a negative
 // sentinel. Parsers use it so one missing field cannot fail a record.
 func derefInt(p *int64) int64 {
@@ -322,6 +356,97 @@ func derefInt(p *int64) int64 {
 		return 0
 	}
 	return *p
+}
+
+// rawFields is the per-figure decode seam shared by every transcript parser. A
+// typed decode of the whole struct fails on the first number this build cannot
+// hold (an int64 overflow, a fraction, 1e999), and with it loses every readable
+// charge, count, and timestamp in the same record. Reading the object as raw
+// members lets each parser reject one figure by name and keep its siblings.
+type rawFields map[string]json.RawMessage
+
+func rawObject(b []byte) (rawFields, error) {
+	var f rawFields
+	if err := json.Unmarshal(b, &f); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+func (f rawFields) value(key string) (json.RawMessage, bool) {
+	raw, ok := f[key]
+	return raw, ok && statesValue(raw)
+}
+
+// count reads one optional integer figure. A value that is not an integer this
+// build can hold keeps the unreadable sentinel, so its class reads unknown.
+func (f rawFields) count(key string) *int64 {
+	raw, ok := f.value(key)
+	if !ok {
+		return nil
+	}
+	v := new(int64)
+	if json.Unmarshal(raw, v) != nil {
+		*v = unreadableCount
+	}
+	return v
+}
+
+// amount reads one optional price figure; an unreadable one keeps NaN, which
+// invalidAmount rejects by field name. A negative-zero parse (a negative
+// underflow like -1e-999 that rounds to -0) is unreadable too: it is not an
+// exact figure, and passing it would price a real charge at a silent zero.
+// Explicit numeric zero stays a valid, exact free class.
+// amount reads one optional price figure; an unreadable one keeps NaN, which
+// invalidAmount rejects by field name. A numeric overflow (a value this build
+// cannot hold) keeps +Inf so it reports as out of range, not as a non-number.
+func (f rawFields) amount(key string) *float64 {
+	raw, ok := f.value(key)
+	if !ok {
+		return nil
+	}
+	v := new(float64)
+	if json.Unmarshal(raw, v) != nil {
+		if isJSONNumber(raw) {
+			*v = math.Inf(1)
+		} else {
+			*v = math.NaN()
+		}
+		return v
+	}
+	if *v == 0 && math.Signbit(*v) {
+		*v = math.NaN() // negative underflow (-1e-999) rounds to -0; not exact
+	}
+	return v
+}
+
+// text reads one optional string figure; an unreadable one keeps the unreadable
+// marker, which names no tier or model and so prices unknown.
+func (f rawFields) text(key string) *string {
+	raw, ok := f.value(key)
+	if !ok {
+		return nil
+	}
+	v := new(string)
+	if json.Unmarshal(raw, v) != nil {
+		*v = unreadableText
+	}
+	return v
+}
+
+// decodeObject reads a nested figure, keeping absence distinct from a zero value.
+// Only numeric and text members get a per-field pardon: a member that is not the
+// object it claims to be fails the record.
+func decodeObject[T any](f rawFields, key string) (*T, error) {
+	raw, ok := f.value(key)
+	if !ok {
+		return nil, nil
+	}
+	v := new(T)
+	if err := json.Unmarshal(raw, v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 
 // context is the request's input size (every prompt token: fresh, written and
@@ -342,7 +467,7 @@ func (t promptTokens) miss() int64 { return t.context() - t.cacheRead }
 // a model that recorded no prompt tokens at all. The share is also capped at
 // maxHitRate, so the 1e-6 machine rounding cannot lift a near-1 value to 1.0.
 func (t promptTokens) hitRate() (float64, bool) {
-	if t.miss() <= 0 {
+	if t.corruptPrompt() || t.miss() <= 0 {
 		return 0, false
 	}
 	return min(float64(t.cacheRead)/float64(t.context()), maxHitRate), true
@@ -355,8 +480,10 @@ const maxHitRate = 0.999
 
 // ratiosDefined reports whether the summary's input:output ratios exist: both
 // sides must have recorded tokens, since a ratio without a denominator (no
-// output) or a numerator (no prompt tokens) is undefined.
-func (t promptTokens) ratiosDefined() bool { return t.context() > 0 && t.output > 0 }
+// output) or a numerator (no prompt tokens) is undefined, as is a corrupt class.
+func (t promptTokens) ratiosDefined() bool {
+	return t.corrupt == 0 && t.context() > 0 && t.output > 0
+}
 
 // outputRatio is one input:output share for the worktree summary: n divided by
 // the recorded output, ok=false when no output was recorded. Every summary
@@ -386,7 +513,7 @@ func (t promptTokens) tier(id tier) int64 {
 	return 0
 }
 
-// plus folds another token count in field by field.
+// plus folds another count field by field; corruption is sticky across folds.
 func (t promptTokens) plus(o promptTokens) promptTokens {
 	return promptTokens{
 		input: t.input + o.input, output: t.output + o.output,
@@ -394,6 +521,7 @@ func (t promptTokens) plus(o promptTokens) promptTokens {
 		cacheWrite5m:           t.cacheWrite5m + o.cacheWrite5m,
 		cacheWrite1h:           t.cacheWrite1h + o.cacheWrite1h,
 		unclassifiedCacheWrite: t.unclassifiedCacheWrite + o.unclassifiedCacheWrite,
+		corrupt:                t.corrupt | o.corrupt,
 	}
 }
 
@@ -462,6 +590,10 @@ type modelUsage struct {
 }
 
 func (m *modelUsage) active() time.Duration { return unionDuration(m.spans) }
+
+// tokensKnown reports whether the model has token evidence, including a corrupt
+// class that renders unknown instead of absent.
+func (m *modelUsage) tokensKnown() bool { return m.tokens.hasUsageEvidence() }
 
 // harnessUsage is one harness's totals for a worktree.
 type harnessUsage struct {

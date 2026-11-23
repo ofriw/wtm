@@ -596,6 +596,15 @@ func positiveWidthColumns(widths []int) []int {
 	return keep
 }
 
+// warnHiddenColumns discloses dropped columns on stderr. Every grid (table,
+// detail block, token rows) uses this one line, so a narrow terminal always
+// reads as hidden columns, never as a shorter contract.
+func warnHiddenColumns(names []string) {
+	if len(names) > 0 {
+		warnf("terminal too narrow; hid %s; widen the terminal or use --json", strings.Join(names, ", "))
+	}
+}
+
 // hiddenHeaders names the columns dropped from a grid, so a missing column
 // reads as hidden, not absent.
 func hiddenHeaders(headers []string, widths []int) []string {

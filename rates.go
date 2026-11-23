@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -52,7 +53,215 @@ const (
 	// request whose input context exceeds the model's standard window is priced
 	// at the above-200k rate when the catalog lists one.
 	longContextThreshold = 200_000
+	// maxCatalogRate bounds any catalog figure, in USD per token or per query.
+	// The priciest public model is far below it, so a larger value is corrupt
+	// data, not a price: it would turn a typo into a billion-dollar total.
+	maxCatalogRate = 1.0
+	// maxTokenCount bounds a session's recorded counts. A negative or absurd
+	// count is corrupt data; arithmetic on it would yield a negative or an
+	// overflowing price that reads as real money.
+	maxTokenCount = 1e12
+	// maxSessionCost bounds one harness-reported total or tier cost. The priciest
+	// real session is far below it; a larger figure would read as a real bill.
+	maxSessionCost = 1e6
+	// unreadableCount is the transcript decoder's mark for an integer figure it
+	// cannot read (an int64 overflow, a fraction in a count field). The decoder
+	// keeps the record and names the field through invalidCount, so the class
+	// reads unknown while its readable siblings survive. It is a sentinel, never
+	// a count: sums of a few of them stay far inside int64.
+	unreadableCount int64 = -1 << 60
+	// unreadableText is the same mark for a string figure (a service tier, a
+	// child model). It matches no catalog tier or model, so the affected class
+	// prices unknown instead of defaulting.
+	unreadableText = "\ufffdunreadable"
 )
+
+// warnSink reports one rejected catalog or session figure. Callers must route
+// it through progressWarn so a nil renderer still reaches stderr.
+type warnSink func(error)
+
+func doWarnSink(warn warnSink, err error) {
+	if warn != nil {
+		warn(err)
+	}
+}
+
+// progressWarn adapts a progress handle to the catalog warning seam. Warnings
+// ride the renderer when one runs and fall back to plain stderr otherwise:
+// money must not vanish silently in machine-output modes.
+func progressWarn(p *progress) warnSink {
+	return func(err error) { warnProgress(p, "%v", err) }
+}
+
+// dedupeWarn drops identical warning texts after the first, so one cause is
+// disclosed once per run. The catalog retry path re-parses the same cache file
+// after a failed refresh, so a per-run dedupe keeps the warning count honest.
+func dedupeWarn(warn warnSink) warnSink {
+	seen := map[string]bool{}
+	return func(err error) {
+		if err == nil || seen[err.Error()] {
+			return
+		}
+		seen[err.Error()] = true
+		doWarnSink(warn, err)
+	}
+}
+
+// invalidAmount names why a figure cannot be money, in the unit the caller
+// names. An empty result means valid; a listed zero is a real free class.
+func invalidAmount(v float64, max float64, unit string) string {
+	switch {
+	case math.IsNaN(v):
+		return "not a number"
+	case math.IsInf(v, 0):
+		return "number out of range"
+	case v < 0:
+		return "negative"
+	case v > max:
+		return fmt.Sprintf("above %g %s", max, unit)
+	}
+	return ""
+}
+
+func invalidCost(v float64) string { return invalidAmount(v, maxSessionCost, "USD") }
+
+// addReportedCost trusts a harness-reported figure only inside the cost bound.
+// A rejected figure taints the value as unknown and warns once, so corrupt
+// money never renders as exact dollars.
+func addReportedCost(m *money, v float64, field string, warn warnSink) {
+	if cause := invalidCost(v); cause != "" {
+		m.addUnknown()
+		doWarnSink(warn, fmt.Errorf("%s: %s", field, cause))
+		return
+	}
+	m.addKnown(v)
+}
+
+// invalidCount names why a count cannot be used; zero is a real "none".
+func invalidCount(n int64) string {
+	switch {
+	case n == unreadableCount:
+		return "unreadable"
+	case n < 0:
+		return "negative"
+	case n > maxTokenCount:
+		return fmt.Sprintf("above %g", float64(maxTokenCount))
+	}
+	return ""
+}
+
+// sanitizeTokens zeroes every rejected class and marks its tier, so neither the
+// price nor the cell shows a corrupt count. The mark is sticky across folding.
+func sanitizeTokens(t promptTokens, model string, warn warnSink) promptTokens {
+	t.sanitize(&t.input, tierInput, model, "input", warn)
+	t.sanitize(&t.output, tierOutput, model, "output", warn)
+	t.sanitize(&t.cacheRead, tierCacheRead, model, "cacheRead", warn)
+	t.sanitize(&t.cacheWrite5m, tierCacheWrite, model, "cacheWrite5m", warn)
+	t.sanitize(&t.cacheWrite1h, tierCacheWrite, model, "cacheWrite1h", warn)
+	t.sanitize(&t.unclassifiedCacheWrite, tierCacheWrite, model, "unclassifiedCacheWrite", warn)
+	sanitizeWriteConflict(&t, model, warn)
+	return t
+}
+
+// sanitizeWriteConflict rejects a cache-write split the parser found contradicted
+// by its own stated total. The parser has no warning sink, so it flags the tier
+// and this single sanitizing site names it and zeroes every write class.
+func sanitizeWriteConflict(t *promptTokens, model string, warn warnSink) {
+	if !t.conflicts.has(tierCacheWrite) {
+		return
+	}
+	doWarnSink(warn, fmt.Errorf("model %s cache write split: contradicts the stated cache_creation total; count stays unknown", model))
+	t.corrupt = t.corrupt.with(tierCacheWrite)
+	t.cacheWrite5m, t.cacheWrite1h, t.unclassifiedCacheWrite = 0, 0, 0
+	// Clear the flag so a second sanitize of the same events cannot re-emit the
+	// warning: this site is the single-warning owner (see promptTokens.conflicts).
+	t.conflicts = 0
+}
+
+func (t *promptTokens) sanitize(n *int64, id tier, model, class string, warn warnSink) {
+	if cause := invalidCount(*n); cause != "" {
+		doWarnSink(warn, fmt.Errorf("model %s token %s: %s; count stays unknown", model, class, cause))
+		t.corrupt = t.corrupt.with(id)
+		*n = 0
+	}
+}
+
+// validateRate rejects one figure and keeps a nil field nil, so the affected
+// token class reads unknown instead of negative or astronomical. unit names the
+// price basis, so a per-query figure never warns in per-token terms.
+func validateRate(model, field, unit string, v *float64, warn warnSink) *float64 {
+	if v == nil {
+		return nil
+	}
+	if cause := invalidAmount(*v, maxCatalogRate, unit); cause != "" {
+		doWarnSink(warn, rateCatalogError(model, field, cause))
+		return nil
+	}
+	return v
+}
+
+// rateCatalogError is the single phrasing for one rejected catalog figure:
+// field locates it, cause says why, and the consequence names what turns
+// unknown — a token class for a per-token rate, the search price for a
+// per-query fee.
+func rateCatalogError(model, field, cause string) error {
+	consequence := "token class stays unknown"
+	if strings.Contains(field, "webSearch") || strings.Contains(field, "search_context_cost_per_query") {
+		consequence = "search price stays unknown"
+	}
+	return fmt.Errorf("rate catalog %s.%s: %s; %s", model, field, cause, consequence)
+}
+
+// validateRates applies validateRate to every field of one price set. prefix
+// names the set (standard, batch, above_200k) so the warning locates the field.
+func validateRates(model, prefix string, r tokenRates, warn warnSink) tokenRates {
+	return tokenRates{
+		input:        validateRate(model, prefix+"input", "USD/token", r.input, warn),
+		output:       validateRate(model, prefix+"output", "USD/token", r.output, warn),
+		cacheRead:    validateRate(model, prefix+"cacheRead", "USD/token", r.cacheRead, warn),
+		cacheWrite5m: validateRate(model, prefix+"cacheWrite5m", "USD/token", r.cacheWrite5m, warn),
+		cacheWrite1h: validateRate(model, prefix+"cacheWrite1h", "USD/token", r.cacheWrite1h, warn),
+	}
+}
+
+// validateEntry validates one catalog entry. hasAbove stays as decoded: a
+// rejected above-200k figure leaves its class unknown, and dropping the whole
+// set would silently misprice a valid sibling figure. webSearch is a
+// per-query price, so it shares the money ceiling.
+func validateEntry(name string, r modelRate, warn warnSink) modelRate {
+	standard := validateRates(name, "standard.", r.standard, warn)
+	return modelRate{
+		standard:    standard,
+		batch:       validateRates(name, "batch.", r.batch, warn),
+		above:       validateRates(name, "above_200k.", fillAboveFromStandard(r.above, standard, r.brokenAbove), warn),
+		hasAbove:    r.hasAbove,
+		webSearch:   validateRate(name, "webSearch", "USD/query", r.webSearch, warn),
+		brokenAbove: r.brokenAbove,
+	}
+}
+
+// fillAboveFromStandard fills an unlisted above-200k class from the validated
+// standard rate. A stated figure that failed to decode (broken) passes through
+// as nil, so that class reads unknown instead of silently borrowing the cheaper
+// standard rate; valid listed figures pass through to validation untouched.
+func fillAboveFromStandard(above, standard, broken tokenRates) tokenRates {
+	if broken.input == nil {
+		mergeRate(&above.input, standard.input)
+	}
+	if broken.output == nil {
+		mergeRate(&above.output, standard.output)
+	}
+	if broken.cacheRead == nil {
+		mergeRate(&above.cacheRead, standard.cacheRead)
+	}
+	if broken.cacheWrite5m == nil {
+		mergeRate(&above.cacheWrite5m, standard.cacheWrite5m)
+	}
+	if broken.cacheWrite1h == nil {
+		mergeRate(&above.cacheWrite1h, standard.cacheWrite1h)
+	}
+	return above
+}
 
 // errRateCatalogTooLarge marks a catalog body over ratesMaxBytes, so callers and
 // tests can recognise the refusal instead of treating it as a parse failure.
@@ -84,6 +293,11 @@ type tokenRates struct {
 	cacheWrite1h *float64
 }
 
+// any reports whether any price in the set is present.
+func (r tokenRates) any() bool {
+	return r.input != nil || r.output != nil || r.cacheRead != nil || r.cacheWrite5m != nil || r.cacheWrite1h != nil
+}
+
 // modelRate is one catalog entry: the two service tiers, the long-context set
 // and the per-request web search price.
 type modelRate struct {
@@ -113,28 +327,28 @@ func (r modelRate) ratesFor(tier string, context int64) *tokenRates {
 	}
 }
 
-// standardRates selects the standard set, or the long-context set merged with
-// it when the prompt exceeds the threshold.
+// aboveContext selects the long-context rates. A rejected prompt count leaves
+// the context unknown, so choosing a set would invent a price; ok=false refuses
+// the event. Without long rates the standard set is context-free, so a model
+// with only standard rates still prices valid sibling tokens.
+func (r modelRate) aboveContext(t promptTokens) (above bool, ok bool) {
+	if !r.hasAbove {
+		return false, true
+	}
+	if t.corruptPrompt() {
+		return false, false
+	}
+	return t.context() > longContextThreshold, true
+}
+
+// standardRates selects the standard set, or the long-context set when the
+// prompt exceeds the threshold. validateEntry already filled the absent
+// above-200k classes, so pricing needs no merge.
 func (r modelRate) standardRates(above bool) *tokenRates {
 	if !above {
 		return &r.standard
 	}
-	// Merge per class: an above-200k field wins when listed, else the standard
-	// rate prices that class. A whole-set switch would turn a partially-listed
-	// catalog (e.g. only the 1h-write above rate) into unknown for every other
-	// class.
-	merged := r.above
-	mergeRateSet(&merged, r.standard)
-	return &merged
-}
-
-// mergeRateSet fills each unlisted override class from base.
-func mergeRateSet(dst *tokenRates, base tokenRates) {
-	mergeRate(&dst.input, base.input)
-	mergeRate(&dst.output, base.output)
-	mergeRate(&dst.cacheRead, base.cacheRead)
-	mergeRate(&dst.cacheWrite5m, base.cacheWrite5m)
-	mergeRate(&dst.cacheWrite1h, base.cacheWrite1h)
+	return &r.above
 }
 
 // mergeRate keeps a listed rate and fills an unlisted one from base.
@@ -152,25 +366,46 @@ type catalog map[string]modelRate
 // reason can never drift from the estimate it explains.
 const estimateCacheWriteLifetime = "a usage record omitted the cache-write lifetime (5m vs 1h), so wtm priced those tokens at the 5-minute rate; a 1-hour write costs more, so the value is a lower bound, not exact data"
 
-// price turns one Claude event into its price pair and per-tier breakdown. A
+// priceWith turns one event into its price pair and per-tier breakdown and
+// reports rejected derived amounts through warn (nil keeps them silent). A
 // resolved model with zero tokens is a known $0.00; a missing model, tier, or
 // needed class is unknown. A record that omits the cache-write lifetime is
 // priced at the 5-minute rate and marked estimated, because the true 5m/1h
 // split is unknowable. The billed side mirrors the list here; the subscription
-// substitution (usagePricer) replaces billed per tier.
-func (c catalog) price(e usageEvent) pricedEvent {
+// substitution (usagePricer) replaces billed per tier. A corrupt web-search
+// count is named before the rate lookup, so an event no rate set can price
+// still discloses it.
+func (c catalog) priceWith(e usageEvent, warn warnSink) pricedEvent {
+	searchCorrupt := rejectSearchCount(&e, warn)
 	r, ok := resolveModel(c, e.model)
 	if !ok {
 		return unpriced()
 	}
-	rates := r.ratesFor(e.tier, e.tokens.context())
+	rates := r.ratesFor(e.tier, e.tokens)
 	if rates == nil {
 		return unpriced()
 	}
-	p := pricedEvent{tiers: priceTiers(*rates, e.tokens)}
-	p.total.list.addKnown(0) // resolved: a zero is a real zero
-	p.total.list.add(p.tiers.totals())
-	priceWebSearch(&p.total.list, r, e.webSearch)
+	return priceRates(r, *rates, e, searchCorrupt, warn)
+}
+
+// priceRates prices one event against its resolved rate set: a zero-token event
+// is a known $0.00, every rejected tier taints its class, and the web-search
+// count joins the total only (it is priced per query, not per token). A rejected
+// search count leaves the total unknown even when the tokens priced fine. The
+// billed side mirrors the list here; usagePricer substitutes coverage per tier.
+func priceRates(r modelRate, rates tokenRates, e usageEvent, searchCorrupt bool, warn warnSink) pricedEvent {
+	p := pricedEvent{tiers: priceTiers(rates, e.tokens, e.model, warn)}
+	p.tiers.taintCorrupt(e.tokens.corrupt)
+	p.total.list.addKnown(0)           // resolved: a zero is a real zero
+	p.total.list.add(p.tiers.totals()) // a tainted tier taints the total
+	priceWebSearch(&p.total.list, r, e, warn)
+	if searchCorrupt {
+		p.total.list.addUnknown()
+	}
+	if cause := invalidCost(p.total.list.amount); cause != "" && p.total.list.known() {
+		doWarnSink(warn, fmt.Errorf("model %s event price: %s; cost stays unknown", e.model, cause))
+		p.total.list.addUnknown()
+	}
 	p.total.billed = p.total.list
 	return p
 }
@@ -187,54 +422,106 @@ func unpriced() pricedEvent {
 // classes (5m, 1h) collapse into the single write tier, while an unclassified
 // write is priced at the 5-minute rate and marked estimated. The billed side
 // starts equal to the list; the subscription substitution replaces it later.
-func priceTiers(r tokenRates, t promptTokens) tokenTiers {
+func priceTiers(r tokenRates, t promptTokens, model string, warn warnSink) tokenTiers {
 	var tiers tokenTiers
-	addClass(&tiers[tierInput].list, r.input, t.input)
-	addClass(&tiers[tierOutput].list, r.output, t.output)
-	addClass(&tiers[tierCacheRead].list, r.cacheRead, t.cacheRead)
-	addClass(&tiers[tierCacheWrite].list, r.cacheWrite5m, t.cacheWrite5m)
-	addClass(&tiers[tierCacheWrite].list, r.cacheWrite1h, t.cacheWrite1h)
-	addEstimatedClass(&tiers[tierCacheWrite].list, r.cacheWrite5m, t.unclassifiedCacheWrite)
+	addClass(&tiers[tierInput].list, r.input, t.input, model, "input", warn)
+	addClass(&tiers[tierOutput].list, r.output, t.output, model, "output", warn)
+	addClass(&tiers[tierCacheRead].list, r.cacheRead, t.cacheRead, model, "cacheRead", warn)
+	addClass(&tiers[tierCacheWrite].list, r.cacheWrite5m, t.cacheWrite5m, model, "cacheWrite5m", warn)
+	addClass(&tiers[tierCacheWrite].list, r.cacheWrite1h, t.cacheWrite1h, model, "cacheWrite1h", warn)
+	addEstimatedClass(&tiers[tierCacheWrite].list, r.cacheWrite5m, t.unclassifiedCacheWrite, model, "unclassifiedCacheWrite", warn)
 	for i := range tiers {
 		tiers[i].billed = tiers[i].list
 	}
 	return tiers
 }
 
-func priceWebSearch(m *money, r modelRate, requests int64) {
-	if requests <= 0 {
-		return
+// taintCorrupt marks each rejected tier unknown on both sides, so a zeroed count
+// never renders as a partial exact price while good sibling classes keep theirs.
+func (t *tokenTiers) taintCorrupt(mask tierMask) {
+	for id := tier(0); id < numTiers; id++ {
+		if mask.has(id) {
+			t[id].addUnknown()
+		}
 	}
-	if r.webSearch == nil {
-		m.addUnknown()
-		return
-	}
-	m.addKnown(float64(requests) * *r.webSearch)
 }
 
-func addClass(m *money, rate *float64, n int64) {
-	if n == 0 {
-		return
+// rejectSearchCount names a corrupt web-search count before any rate lookup, so
+// a model or context that cannot resolve cannot skip the disclosure. The count
+// is zeroed for the price path, which would warn again on the same figure; the
+// result reports whether the total must read unknown.
+func rejectSearchCount(e *usageEvent, warn warnSink) bool {
+	cause := invalidCount(e.webSearch)
+	if cause == "" {
+		return false
 	}
-	if rate == nil {
-		m.addUnknown()
-		return
-	}
-	m.addKnown(float64(n) * *rate)
+	doWarnSink(warn, countCauseError(e.model, "webSearch", cause))
+	e.webSearch = 0
+	return true
+}
+
+// countCauseError is the single phrasing for a rejected count, so the early
+// search disclosure and the pricing path never warn twice for one figure.
+func countCauseError(model, class, cause string) error {
+	return fmt.Errorf("model %s %s: %s; count stays unknown", model, class, cause)
+}
+
+func priceWebSearch(m *money, r modelRate, e usageEvent, warn warnSink) {
+	priceClass(m, r.webSearch, e.webSearch, e.model, "webSearch", warn, 0)
+}
+
+func addClass(m *money, rate *float64, n int64, model, class string, warn warnSink) {
+	priceClass(m, rate, n, model, class, warn, 0)
 }
 
 // addEstimatedClass prices a class whose split is unknown, at an assumed rate.
 // A nil rate leaves the part unknown: without any basis, an estimate would
 // invent a number, which is worse than an honest gap.
-func addEstimatedClass(m *money, rate *float64, n int64) {
+func addEstimatedClass(m *money, rate *float64, n int64, model, class string, warn warnSink) {
+	priceClass(m, rate, n, model, class, warn, causeCacheWrite)
+}
+
+// priceClass prices one catalog class under the maxSessionCost ceiling: an
+// accepted count times an accepted rate can still exceed it. cause marks an assumed price.
+func priceClass(m *money, rate *float64, n int64, model, class string, warn warnSink, cause estimateCause) {
 	if n == 0 {
 		return
 	}
-	if rate == nil {
-		m.addUnknown()
+	v, ok := classProduct(m, rate, n, model, class, warn)
+	switch {
+	case !ok:
 		return
+	case cause != 0:
+		m.addEstimated(v, cause)
+	default:
+		m.addKnown(v)
 	}
-	m.addEstimated(float64(n)**rate, causeCacheWrite)
+}
+
+// classProduct validates one class's count, rate, and amount; ok reports whether a price exists.
+// The rate is revalidated at this pricing boundary , so a rate that reached
+// multiplication without catalog validation can never produce a wrong exact price.
+func classProduct(m *money, rate *float64, n int64, model, class string, warn warnSink) (float64, bool) {
+	cause := invalidCount(n)
+	if cause != "" || rate == nil {
+		if cause != "" {
+			doWarnSink(warn, countCauseError(model, class, cause))
+		}
+		m.addUnknown()
+		return 0, false
+	}
+	if c := invalidAmount(*rate, maxCatalogRate, "USD/token"); c != "" {
+		doWarnSink(warn, fmt.Errorf("model %s %s price: %s; cost stays unknown", model, class, c))
+		m.addUnknown()
+		return 0, false
+	}
+	v := float64(n) * *rate
+	if c := invalidCost(v); c != "" {
+		doWarnSink(warn, fmt.Errorf("model %s %s price: %s; cost stays unknown", model, class, c))
+		m.addUnknown()
+		return 0, false
+	}
+	return v, true
 }
 
 // resolveModel finds a rate for a recorded model id. The catalog uses many
