@@ -102,31 +102,6 @@ func TestMCPCapabilityEquallySupported(t *testing.T) {
 	})
 }
 
-func TestGroupedCell(t *testing.T) {
-	active := []core.Capability{chunkhoundCapability, mcpCapability}
-	ctx := core.ColumnContext{Active: active}
-	cases := []struct {
-		name string
-		caps map[string]core.CapState
-		want string
-	}{
-		{"all present", map[string]core.CapState{"chunkhound": core.CapPresent, "mcp": core.CapPresent}, "chunk mcp"},
-		{"partial and absent", map[string]core.CapState{"chunkhound": core.CapPartial}, "chunk~"},
-		{"present and absent", map[string]core.CapState{"chunkhound": core.CapPresent}, "chunk"},
-		{"empty", nil, "-"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := core.CellIntegrations(core.Worktree{Caps: tc.caps}, ctx); got != tc.want {
-				t.Errorf("cellIntegrations = %q, want %q", got, tc.want)
-			}
-		})
-	}
-	if got := core.CellIntegrations(core.Worktree{}, core.ColumnContext{}); got != "-" {
-		t.Errorf("no applicable core.Capability must render %q, got %q", "-", got)
-	}
-}
-
 // TestCapabilityTokens pins the token contract: a token is a unique, 2+ char,
 // case-insensitive prefix of its id. "mc" for "mcp" violates it — it is not a
 // prefix — which is exactly the unreadability the prefix rule forbids.

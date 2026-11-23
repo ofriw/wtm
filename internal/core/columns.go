@@ -3,12 +3,9 @@ package core
 import (
 	"fmt"
 	"os"
-	"slices"
 	"sort"
 	"strings"
 	"time"
-
-	"charm.land/lipgloss/v2"
 
 	"wtm/internal/fs"
 	"wtm/internal/temp"
@@ -16,9 +13,8 @@ import (
 )
 
 // columns.go — the status table schema: one column registry shared by the
-// status table and the gc picker, plus the domain stylings that color its
-// cells. The generic layout engine lives in ui; this package owns the columns
-// and their rendering.
+// status table and the gc picker. The generic layout engine lives in ui and
+// the cell stylings live in cli, so this package owns the columns only.
 
 // ColumnContext carries the volatile inputs a cell may need, so cell funcs
 // stay pure and the registry stays the single source of truth. Active is the
@@ -31,12 +27,15 @@ type ColumnContext struct {
 	Active []Capability
 }
 
-// WorktreeColumn is one grid column: its header, its projection from a
-// worktree, and its fit policy. ShrinkRank is the elision order (0 = pinned);
+// WorktreeColumn is one grid column: its stable ID, its header, its projection
+// from a worktree, and its fit policy. ID is the semantic key style routing
+// (cli) keys off — never displayed — so renaming a header cannot silently
+// disable a column's color. ShrinkRank is the elision order (0 = pinned);
 // Floor is the smallest width a shrinkable column may be elided to. This
 // registry is the single source of truth for the status table and the gc
 // picker, so the two can never drift.
 type WorktreeColumn struct {
+	ID         string
 	Header     string
 	Cell       func(Worktree, ColumnContext) string
 	RightAlign bool
@@ -52,12 +51,6 @@ func cellLastUsed(w Worktree, _ ColumnContext) string { return lastUsedCell(w) }
 func cellStatus(w Worktree, c ColumnContext) string   { return w.Status(c.Now, c.TTL) }
 
 // cellTemp shows the remaining idle window, or a dash for permanent checkouts.
-// CellTemp is the TEMP column cell; exported for tests pinning the cell
-// contract independent of a table render.
-func CellTemp(w Worktree, c ColumnContext) string {
-	return cellTemp(w, c)
-}
-
 func cellTemp(w Worktree, c ColumnContext) string {
 	if !w.Temp {
 		return "-"
@@ -65,10 +58,10 @@ func cellTemp(w Worktree, c ColumnContext) string {
 	return temp.RemainingWindowLabel(w.TempExpiresAt(), c.Now)
 }
 
-// CellIntegrations lists the integrations the worktree actually has: the token
+// cellIntegrations lists the integrations the worktree actually has: the token
 // per present capability, token~ per partial. Absent capabilities are omitted,
 // so the cell claims only what is there; "-" when there is nothing to claim.
-func CellIntegrations(w Worktree, c ColumnContext) string {
+func cellIntegrations(w Worktree, c ColumnContext) string {
 	var tokens []string
 	for _, capItem := range c.Active {
 		if s := w.Caps[capItem.ID]; s != CapAbsent {
@@ -86,36 +79,51 @@ func cellUncommitted(w Worktree, _ ColumnContext) string { return dirtyCell(w) }
 var (
 	// Core shrink ranks start at 2: rank 1 belongs to the --wide capability
 	// columns, which elide before any core column gives up width.
-	ColPath         = WorktreeColumn{Header: "PATH", Cell: cellPath, ShrinkRank: 2, Floor: 12}
-	ColBranch       = WorktreeColumn{Header: "BRANCH", Cell: cellBranch, ShrinkRank: 4, Floor: 8}
-	ColUpstream     = WorktreeColumn{Header: "UPSTREAM", Cell: cellUpstream, ShrinkRank: 3, Floor: 8}
-	ColLastUsed     = WorktreeColumn{Header: "LAST USED", Cell: cellLastUsed, RightAlign: true, ShrinkRank: 5, Floor: 10}
-	ColStatus       = WorktreeColumn{Header: "STATUS", Cell: cellStatus}
-	ColTemp         = WorktreeColumn{Header: "TEMP", Cell: cellTemp}
-	ColIntegrations = WorktreeColumn{Header: "INTEGRATIONS", Cell: CellIntegrations, ShrinkRank: 6, Floor: 6}
-	ColUncommitted  = WorktreeColumn{Header: "UNCOMMITTED", Cell: cellUncommitted}
+	colPath         = WorktreeColumn{ID: "path", Header: "PATH", Cell: cellPath, ShrinkRank: 2, Floor: 12}
+	colBranch       = WorktreeColumn{ID: "branch", Header: "BRANCH", Cell: cellBranch, ShrinkRank: 4, Floor: 8}
+	colUpstream     = WorktreeColumn{ID: "upstream", Header: "UPSTREAM", Cell: cellUpstream, ShrinkRank: 3, Floor: 8}
+	colLastUsed     = WorktreeColumn{ID: "lastUsed", Header: "LAST USED", Cell: cellLastUsed, RightAlign: true, ShrinkRank: 5, Floor: 10}
+	colStatus       = WorktreeColumn{ID: "status", Header: "STATUS", Cell: cellStatus}
+	colTemp         = WorktreeColumn{ID: "temp", Header: "TEMP", Cell: cellTemp}
+	colIntegrations = WorktreeColumn{ID: "integrations", Header: "INTEGRATIONS", Cell: cellIntegrations, ShrinkRank: 6, Floor: 6}
+	colUncommitted  = WorktreeColumn{ID: "uncommitted", Header: "UNCOMMITTED", Cell: cellUncommitted}
 )
 
 // CoreColumns is the shared prefix of every status schema: identity, tracking
-// and activity. StatusColumns appends the grouped INTEGRATIONS cell; --wide
-// replaces it with one column per capability, so a new core column reaches both.
-var CoreColumns = []WorktreeColumn{ColPath, ColBranch, ColUpstream, ColLastUsed, ColStatus, ColTemp}
+// and activity. It returns a fresh copy per call: the global schema is
+// immutable, so callers may mutate or retain the returned slice freely.
+// StatusColumns appends the grouped INTEGRATIONS cell; --wide replaces it with
+// one column per capability, so a new core column reaches both.
+func CoreColumns() []WorktreeColumn {
+	return []WorktreeColumn{colPath, colBranch, colUpstream, colLastUsed, colStatus, colTemp}
+}
 
 // StatusColumns is the default status schema; tests and the right-align choice
-// derive from it so the header contract has one source.
-var StatusColumns = append(slices.Clone(CoreColumns), ColIntegrations)
+// derive from it so the header contract has one source. Fresh copy per call.
+func StatusColumns() []WorktreeColumn {
+	return append(CoreColumns(), colIntegrations)
+}
 
 // AllColumns is every status column plus the gc picker's UNCOMMITTED. The fit
 // policy is derived from ColumnRegistry(), which adds the capability columns.
 func AllColumns() []WorktreeColumn {
-	return append(slices.Clone(StatusColumns), ColUncommitted)
+	return append(StatusColumns(), colUncommitted)
+}
+
+// PickerColumns is the gc picker's projection of the shared status grid:
+// STATUS is dropped because every candidate is UNUSED (said once in the title),
+// and UNCOMMITTED replaces the integration columns. TEMP shows the idle window
+// that makes a temporary checkout reclaimable. It derives from the same private
+// column registry as status, so the two grids cannot drift.
+func PickerColumns() []WorktreeColumn {
+	return []WorktreeColumn{colPath, colBranch, colLastUsed, colTemp, colUncommitted, colUpstream}
 }
 
 // ColumnRegistry maps header names to their column definition. It includes
 // AllColumns plus every capability column, so the shrink logic can look up
 // any column's rank and floor by header name. A function (not a package var)
 // so the registry has no hidden ordering dependency on package initialization
-// and the slice cannot be mutated at runtime.
+// and always reflects the currently registered capabilities.
 func ColumnRegistry() map[string]WorktreeColumn { return ColumnRegistryFor(Capabilities()) }
 
 // columnRegistryFor builds the registry for the given capabilities and panics
@@ -132,15 +140,19 @@ func ColumnRegistryFor(caps []Capability) map[string]WorktreeColumn {
 	}
 	for _, c := range caps {
 		col := c.Column()
-		assertNoCollision(c)
+		assertNoCollision(c, col, cols)
 		r[col.Header] = col
 	}
 	return r
 }
-func assertNoCollision(c Capability) {
-	for _, col := range AllColumns() {
-		if col.Header == c.Column().Header {
-			panic(fmt.Sprintf("capability %q collides with core column %q", c.ID, col.Header))
+
+// assertNoCollision panics when a capability header would overwrite a core
+// column. cols is the already-built core registry, so the guard runs once per
+// column instead of rebuilding the schema per capability.
+func assertNoCollision(c Capability, col WorktreeColumn, cols []WorktreeColumn) {
+	for _, core := range cols {
+		if core.Header == col.Header {
+			panic(fmt.Sprintf("capability %q collides with core column %q", c.ID, core.Header))
 		}
 	}
 }
@@ -152,6 +164,15 @@ func ColumnHeaders(cols []WorktreeColumn) []string {
 		headers[i] = c.Header
 	}
 	return headers
+}
+
+// ColumnIDs returns the stable style-routing ID of each column in order.
+func ColumnIDs(cols []WorktreeColumn) []string {
+	ids := make([]string, len(cols))
+	for i, c := range cols {
+		ids[i] = c.ID
+	}
+	return ids
 }
 
 // ColumnRightAligns returns the headers that right-align.
@@ -182,12 +203,18 @@ func GridRows(cols []WorktreeColumn, wts []Worktree, ctx ColumnContext) [][]stri
 	return rows
 }
 
-// ShrinkPolicy computes the shrink priority and floors for the given headers
-// from the column registry, so ui's generic sizing needs no knowledge of the
-// registry.
-func ShrinkPolicy(headers []string) ([]string, map[string]int) {
+// GridPolicy computes the complete shrink policy for the given headers from
+// the column registry: elision priority, floors, and the capability-header
+// identifier that discloses dropped --wide columns. ui's generic sizing needs
+// no knowledge of the registry, and both renderers consume this one value so
+// a nil CapHeader can never silently disable the disclosure.
+func GridPolicy(headers []string) ui.Policy {
 	reg := ColumnRegistry()
-	return dynamicShrinkPriority(headers, reg), dynamicShrinkFloor(headers, reg)
+	return ui.Policy{
+		Priority:  dynamicShrinkPriority(headers, reg),
+		Floors:    dynamicShrinkFloor(headers, reg),
+		CapHeader: IsCapabilityHeader,
+	}
 }
 
 // statusColumnsFor picks the schema: the compact grouped default, or the
@@ -198,26 +225,13 @@ func ShrinkPolicy(headers []string) ([]string, map[string]int) {
 // registration order (pi, claude). Reordering registration changes the order.
 func StatusColumnsFor(wide bool) []WorktreeColumn {
 	if !wide {
-		return slices.Clone(StatusColumns)
+		return StatusColumns()
 	}
-	cols := slices.Clone(CoreColumns)
+	cols := CoreColumns()
 	for _, c := range requireCapabilities() {
 		cols = append(cols, c.Column())
 	}
 	return cols
-}
-
-// PrintStatusTable renders the status table for the given column schema; exported
-// for tests that pin rendering independent of a status command run.
-func PrintStatusTable(cols []WorktreeColumn, wts []Worktree, now time.Time, ttl time.Duration, colorMode string) {
-	printStatusTable(cols, wts, now, ttl, colorMode)
-}
-
-func printStatusTable(cols []WorktreeColumn, wts []Worktree, now time.Time, ttl time.Duration, colorMode string) {
-	ctx := ColumnContext{Now: now, TTL: ttl}
-	headers := ColumnHeaders(cols)
-	priority, floors := ShrinkPolicy(headers)
-	ui.PrintTable(headers, GridRows(cols, wts, ctx), colorMode, statusCell, ColumnRightAligns(cols), priority, floors, IsCapabilityHeader)
 }
 
 type JSONWorktree struct {
@@ -309,109 +323,6 @@ func dirtyCell(w Worktree) string {
 		return "dirty"
 	}
 	return "-"
-}
-
-// ---------- domain stylings ----------
-
-// booleanStyle maps a boolean cell to its style.
-func booleanStyle(active bool) lipgloss.Style {
-	if active {
-		return lipgloss.NewStyle().Foreground(lipgloss.Green)
-	}
-	return lipgloss.NewStyle().Faint(true)
-}
-
-// statusCellStyle maps a status-table cell to its style. Basic ANSI colors are
-// deliberate: the terminal theme owns the palette, and every profile (16/256/
-// truecolor/NO_COLOR) degrades cleanly. UNUSED is Yellow, not Red: it is the
-// gc candidate, not an error.
-func statusCellStyle(header, value string) lipgloss.Style {
-	switch header {
-	case "STATUS":
-		if value == "ACTIVE" {
-			return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Green)
-		}
-		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
-	case "TEMP":
-		return tempCellStyle(value)
-	case "UPSTREAM":
-		return booleanStyle(value != "-")
-	case "BRANCH", "LAST USED":
-		if value == "(detached)" || value == "never" {
-			return lipgloss.NewStyle().Faint(true)
-		}
-	}
-	// Capability columns only appear in the opt-in --wide view.
-	if IsCapabilityHeader(header) {
-		return capabilityCellStyle(value)
-	}
-	return lipgloss.NewStyle()
-}
-
-// capabilityCellStyle maps a --wide capability cell. The state word is the
-// state, so it maps straight to the one semantic color scheme instead of
-// through a value-string wrapper.
-func capabilityCellStyle(value string) lipgloss.Style {
-	switch value {
-	case "yes":
-		return capStateStyle(CapPresent)
-	case "partial":
-		return capStateStyle(CapPartial)
-	default: // "-" and "n/a"
-		return capStateStyle(CapAbsent)
-	}
-}
-
-func tempCellStyle(value string) lipgloss.Style {
-	if value == "-" {
-		return lipgloss.NewStyle().Faint(true)
-	}
-	if value == "expired" {
-		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
-	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Cyan)
-}
-
-// capStateStyle is the one semantic color scheme: present green, partial yellow,
-// absent/n-a faint. A word or a shape carries the state; color only reinforces it.
-func capStateStyle(s CapState) lipgloss.Style {
-	switch s {
-	case CapPresent:
-		return lipgloss.NewStyle().Foreground(lipgloss.Green)
-	case CapPartial:
-		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
-	default:
-		return lipgloss.NewStyle().Faint(true)
-	}
-}
-
-// statusCell renders one plain status cell with its color. The grouped
-// INTEGRATIONS cell colors token-by-token; every other column takes one style.
-func statusCell(header, value string) string {
-	if header == ColIntegrations.Header {
-		return groupedCellStyle(value)
-	}
-	return statusCellStyle(header, value).Render(value)
-}
-
-// groupedCellStyle colors a grouped INTEGRATIONS cell token by token: present
-// green, partial yellow, absent faint. Shape (via the shared markers) carries
-// the state; color only reinforces it.
-func groupedCellStyle(value string) string {
-	if value == "-" {
-		return capStateStyle(CapAbsent).Render(value)
-	}
-	tokens := strings.Fields(value)
-	for i, tok := range tokens {
-		// WHY: the ~ suffix GroupedToken writes is the state, so color keys
-		// off it directly instead of through a token-string wrapper.
-		state := CapPresent
-		if strings.HasSuffix(tok, partialMarker) {
-			state = CapPartial
-		}
-		tokens[i] = capStateStyle(state).Render(tok)
-	}
-	return strings.Join(tokens, " ")
 }
 
 // ---------- shrink helpers (from ui; they need the column registry) ----------

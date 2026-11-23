@@ -18,31 +18,24 @@ import (
 // orchestration (session discovery hooks, temp activity injection). The
 // framework types live in core; command handlers live here.
 
-// Type aliases keep the handlers readable and let the shared model names read
-// naturally while the definitions live in their owning packages.
+// Type aliases give command handlers terse, stable names for the framework
+// types owned by core/git/temp/ui. DECISION (kept deliberately): the kept
+// set (globals, usageError, worktree, workspace, sessionIndex, upstream,
+// tempStore, tempRecord, progress, columnContext) is exactly what handlers
+// touch; each is a pure identity alias (no conversion, no behavior), so no
+// future refactor must keep logic tied to them. Aliases without live uses are
+// deleted, not retained.
 type (
-	globals          = core.Globals
-	usageError       = core.UsageError
-	worktree         = core.Worktree
-	workspace        = core.Workspace
-	sessionIndex     = core.SessionIndex
-	gworktree        = git.GWorktree
-	upstream         = git.Upstream
-	tempStore        = temp.Store
-	tempRecord       = temp.Record
-	progress         = ui.Progress
-	capState         = core.CapState
-	columnContext    = core.ColumnContext
-	worktreeColumn   = core.WorktreeColumn
-	branchChoice     = core.BranchChoice
-	branchLookupMode = core.BranchLookupMode
-)
-
-const (
-	progressAlways = ui.ProgressAlways
-	progressNever  = ui.ProgressNever
-	colorAuto      = ui.ColorAuto
-	colorNever     = ui.ColorNever
+	globals       = core.Globals
+	usageError    = core.UsageError
+	worktree      = core.Worktree
+	workspace     = core.Workspace
+	sessionIndex  = core.SessionIndex
+	upstream      = git.Upstream
+	tempStore     = temp.Store
+	tempRecord    = temp.Record
+	progress      = ui.Progress
+	columnContext = core.ColumnContext
 )
 
 const usage = `wtm — worktree manager
@@ -65,10 +58,6 @@ options:
 
 exit codes: 0 ok, 1 error, 2 usage
 `
-
-func init() {
-	core.UsageText = usage
-}
 
 // Run is the CLI entry point; root's main() calls it.
 func Run(args []string) int {
@@ -102,10 +91,7 @@ func dispatch(cmd string, g *globals, rest []string) error {
 func dispatchSubcommand(cmd string, g *globals, rest []string) error {
 	switch cmd {
 	case "status":
-		return core.CmdStatus(g, rest, core.Hooks{
-			Sessions: harness.DiscoverySessions(false),
-			MCP:      harness.MCPConfigs,
-		})
+		return cmdStatus(g, rest, defaultHooks())
 	case "add":
 		return cmdAdd(g, rest)
 	case "promote":
@@ -142,12 +128,19 @@ func fail(err error) int {
 	return 1
 }
 
-// loadWorkspace wires core discovery to the harness hooks.
-func loadWorkspace(g *globals, showProgress bool, sessions core.SessionDiscovery) (workspace, error) {
-	return core.LoadWorkspace(g, showProgress, core.Hooks{
-		Sessions: sessions,
+// defaultHooks is the shared status wiring used by dispatch and by cli tests,
+// so the tests exercise exactly what the real dispatcher passes to core.
+func defaultHooks() core.Hooks {
+	return core.Hooks{
+		Sessions: harness.DiscoverySessions(false),
 		MCP:      harness.MCPConfigs,
-	})
+	}
+}
+
+func loadWorkspace(g *globals, showProgress bool, sessions core.SessionDiscovery) (workspace, error) {
+	hooks := defaultHooks()
+	hooks.Sessions = sessions
+	return core.LoadWorkspace(g, showProgress, hooks)
 }
 
 // loadGCWorkspace selects the session policy: explicit --path removal stays

@@ -83,24 +83,26 @@ func readSettingsMapUnlocked(p string) (map[string]json.RawMessage, error) {
 	return m, nil
 }
 
-func cmdConfigGet(g *globals) error {
+func cmdConfigGet(g *core.Globals) error {
 	s, p, err := core.LoadSettings()
 	if err != nil {
 		return err
 	}
 	if g.JSON {
+		// core.Settings is embedded so the json tag stays single-owner; the
+		// promoted field keeps the exact key spelling.
 		return fs.PrintJSON(struct {
-			Path      string `json:"path"`
-			UnusedTTL string `json:"unusedTTL"`
-		}{p, s.UnusedTTL})
+			Path string `json:"path"`
+			core.Settings
+		}{p, s})
 	}
 	fmt.Printf("path: %s\nunusedTTL: %s\n", p, s.UnusedTTL)
 	return nil
 }
 
-func cmdConfig(g *globals, args []string) error {
-	fs := core.SubFlags("config", g)
-	pos, err := core.ParseSub(fs, g, args)
+func cmdConfig(g *core.Globals, args []string) error {
+	flags := core.SubFlags("config", g)
+	pos, err := core.ParseSub(flags, g, args, usage)
 	if err != nil {
 		return err
 	}

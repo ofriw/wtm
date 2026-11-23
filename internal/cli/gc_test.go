@@ -172,7 +172,7 @@ func TestGCPickerGrid(t *testing.T) {
 // TestGCPickerGridAlwaysIncludesTempColumn pins the picker schema: TEMP is
 // always present so positional parsers never see a different column set.
 func TestGCPickerGridAlwaysIncludesTempColumn(t *testing.T) {
-	if headers := core.ColumnHeaders(gcPickerColumns); !slices.Contains(headers, "TEMP") {
+	if headers := core.ColumnHeaders(core.PickerColumns()); !slices.Contains(headers, "TEMP") {
 		t.Fatalf("picker headers = %v, want TEMP column", headers)
 	}
 }
@@ -221,12 +221,12 @@ func TestGCPickerColumnBudget(t *testing.T) {
 		Branch: "feature/a-rather-long-branch-name", Dirty: true,
 		Upstream: upstream{Short: "origin/feature/a-rather-long-branch-name", Remote: "origin", Ref: "refs/heads/x"},
 	}}
-	headers := core.ColumnHeaders(gcPickerColumns)
-	rows := core.GridRows(gcPickerColumns, candidates, columnContext{Now: now, TTL: ttl})
+	headers := core.ColumnHeaders(core.PickerColumns())
+	rows := core.GridRows(core.PickerColumns(), candidates, columnContext{Now: now, TTL: ttl})
 	for _, cols := range []int{200, 120, 80, 60, 44} {
 		t.Setenv("COLUMNS", strconv.Itoa(cols))
-		priority, floors := core.ShrinkPolicy(headers)
-		widths := ui.ColumnWidths(headers, rows, pickerBudget(), priority, floors, core.IsCapabilityHeader)
+		p := core.GridPolicy(headers)
+		widths := ui.ColumnWidths(headers, rows, pickerBudget(), p.Priority, p.Floors, p.CapHeader)
 		if got := ui.LineWidth(widths) + ui.PickerChromeWidth + ui.PickerOptionPrefixWidth; got > cols {
 			t.Errorf("picker line = %d cells at %d cols, want <= %d", got, cols, cols)
 		}
@@ -702,11 +702,11 @@ func gcFixtureWithUpstream(t *testing.T) (repo, linked, origin string) {
 // discovered returns the one discovered worktree at path, with its upstream.
 func discovered(t *testing.T, repo, path string) worktree {
 	t.Helper()
-	wts, _, err := core.DiscoverWithSessions(repo, nil, statusHooks())
+	ws, err := core.LoadWorkspace(&globals{Root: repo}, false, defaultHooks())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, w := range wts {
+	for _, w := range ws.Wts {
 		if w.Path == path {
 			return w
 		}

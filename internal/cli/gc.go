@@ -72,14 +72,14 @@ func abortGCResult(o gcOptions) gcResult {
 // re-threading root+surviving.
 type remotePlan struct {
 	keep    bool
-	targets map[string]upstream // deduped delete candidates
-	vetoes  map[string]string   // key -> skip reason, disclosed once each
+	targets map[string]git.Upstream // deduped delete candidates
+	vetoes  map[string]string       // key -> skip reason, disclosed once each
 }
 
 // planRemotes collects the deduped delete candidates for selected.
 // remoteDeleteVeto stays the single veto source; the plan only records it.
-func planRemotes(selected, surviving []worktree, keepRemote bool, root string) remotePlan {
-	plan := remotePlan{keep: keepRemote, targets: map[string]upstream{}, vetoes: map[string]string{}}
+func planRemotes(selected, surviving []core.Worktree, keepRemote bool, root string) remotePlan {
+	plan := remotePlan{keep: keepRemote, targets: map[string]git.Upstream{}, vetoes: map[string]string{}}
 	for _, w := range selected {
 		addRemoteCandidate(&plan, root, w, surviving)
 	}
@@ -90,7 +90,7 @@ func planRemotes(selected, surviving []worktree, keepRemote bool, root string) r
 // their reason, the rest dedup by key. Planning stays offline: existence is
 // probed once per target in attemptRemoteDelete, after consent, under the
 // renderer — a pre-prompt probe would stall the picker on a slow remote.
-func addRemoteCandidate(plan *remotePlan, root string, w worktree, surviving []worktree) {
+func addRemoteCandidate(plan *remotePlan, root string, w core.Worktree, surviving []core.Worktree) {
 	if !w.Upstream.OnRemote() {
 		return
 	}
@@ -133,7 +133,7 @@ func (p remotePlan) keptRemote() bool {
 	return p.keep && len(p.targets) > 0
 }
 
-func confirmGC(selected []worktree, plan remotePlan) (bool, error) {
+func confirmGC(selected []core.Worktree, plan remotePlan) (bool, error) {
 	if !ui.Interactive() {
 		return false, core.Usagef("gc: confirmation requires a terminal; pass --yes")
 	}
@@ -159,7 +159,7 @@ func gcPromptBase(wtCount, remotes int) string {
 	return fmt.Sprintf("Remove %d worktree(s) and delete %d remote branch(es)", wtCount, remotes)
 }
 
-func gcConsentTitle(selected []worktree, plan remotePlan) string {
+func gcConsentTitle(selected []core.Worktree, plan remotePlan) string {
 	base := gcPromptBase(len(selected), plan.count())
 	branches := tempBranchNames(selected)
 	if len(branches) == 0 {
@@ -168,7 +168,7 @@ func gcConsentTitle(selected []worktree, plan remotePlan) string {
 	return base + "; force-delete temp LOCAL branches: " + strings.Join(branches, ", ") + "?"
 }
 
-func tempBranchNames(selected []worktree) []string {
+func tempBranchNames(selected []core.Worktree) []string {
 	var branches []string
 	for _, w := range selected {
 		if w.Temp {
@@ -188,24 +188,24 @@ func validateGCArgs(o gcOptions, pos []string) error {
 	return nil
 }
 
-func parseGCFlags(g *globals, args []string) (gcOptions, error) {
-	fs := core.SubFlags("gc", g)
+func parseGCFlags(g *core.Globals, args []string) (gcOptions, error) {
+	flags := core.SubFlags("gc", g)
 	var o gcOptions
-	fs.BoolVar(&o.all, "all", false, "remove all UNUSED worktrees")
-	fs.BoolVar(&o.keepSessions, "keep-sessions", false, "keep agent session history")
-	fs.BoolVar(&o.keepRemote, "keep-remote", false, "keep remote upstream branches")
-	fs.Func("path", "worktree to remove (repeatable)", func(v string) error {
+	flags.BoolVar(&o.all, "all", false, "remove all UNUSED worktrees")
+	flags.BoolVar(&o.keepSessions, "keep-sessions", false, "keep agent session history")
+	flags.BoolVar(&o.keepRemote, "keep-remote", false, "keep remote upstream branches")
+	flags.Func("path", "worktree to remove (repeatable)", func(v string) error {
 		o.paths = append(o.paths, v)
 		return nil
 	})
-	pos, err := core.ParseSub(fs, g, args)
+	pos, err := core.ParseSub(flags, g, args, usage)
 	if err != nil {
 		return o, err
 	}
 	return o, validateGCArgs(o, pos)
 }
 
-func promptGC(g *globals, selected []worktree, plan remotePlan) (bool, error) {
+func promptGC(g *core.Globals, selected []core.Worktree, plan remotePlan) (bool, error) {
 	if g.Yes {
 		return true, nil
 	}
@@ -216,7 +216,7 @@ func promptGC(g *globals, selected []worktree, plan remotePlan) (bool, error) {
 // candidate scan runs under the progress renderer; the huh picker and ui.Confirm
 // run after it exits, because two tea programs must never share the tty. The
 // remote plan is computed once here so ui.Confirm and purge share one source.
-func selectAndConfirmGC(g *globals, wts []worktree, o gcOptions, ttl time.Duration, root string, now time.Time) ([]worktree, remotePlan, error) {
+func selectAndConfirmGC(g *core.Globals, wts []core.Worktree, o gcOptions, ttl time.Duration, root string, now time.Time) ([]core.Worktree, remotePlan, error) {
 	var none remotePlan
 	candidates, err := scanSelection(g, wts, o, ttl, now)
 	if err != nil || len(candidates) == 0 {
@@ -236,12 +236,12 @@ func selectAndConfirmGC(g *globals, wts []worktree, o gcOptions, ttl time.Durati
 
 // scanSelection runs the candidate scan under the renderer. An explicit --path
 // is already fast and may warn on stderr, so it bypasses the renderer entirely.
-func scanSelection(g *globals, wts []worktree, o gcOptions, ttl time.Duration, now time.Time) ([]worktree, error) {
+func scanSelection(g *core.Globals, wts []core.Worktree, o gcOptions, ttl time.Duration, now time.Time) ([]core.Worktree, error) {
 	if len(o.paths) > 0 {
 		return gcSelection(wts, o, ttl, now, nil)
 	}
-	var candidates []worktree
-	err := withProgress(g, true, func(p *progress) error {
+	var candidates []core.Worktree
+	err := withProgress(g, true, func(p *ui.Progress) error {
 		var serr error
 		candidates, serr = gcSelection(wts, o, ttl, now, p)
 		return serr
@@ -251,21 +251,21 @@ func scanSelection(g *globals, wts []worktree, o gcOptions, ttl time.Duration, n
 
 // chooseCandidates resolves the ui.Interactive picker for scanned candidates;
 // explicit --path and --all selections are already final.
-func chooseCandidates(candidates []worktree, o gcOptions, ttl time.Duration, now time.Time) ([]worktree, error) {
+func chooseCandidates(candidates []core.Worktree, o gcOptions, ttl time.Duration, now time.Time) ([]core.Worktree, error) {
 	if o.all || len(o.paths) > 0 {
 		return candidates, nil
 	}
 	return promptCandidateSelection(candidates, now, ttl, o.keepRemote)
 }
 
-func handleGCAbort(g *globals, o gcOptions, err error) error {
+func handleGCAbort(g *core.Globals, o gcOptions, err error) error {
 	if errors.Is(err, errAborted) && g.JSON {
 		return gcReport(g, abortGCResult(o))
 	}
 	return err
 }
 
-func cmdGC(g *globals, args []string) error {
+func cmdGC(g *core.Globals, args []string) error {
 	o, err := parseGCFlags(g, args)
 	if err != nil {
 		return err
@@ -298,7 +298,7 @@ func reconcileGCTempStore() {
 // reportResult dispatches the report if removals, remote deletes, branch
 // deletes or failures occurred, joining any report failure with the run
 // error. The branch/remote arms exist for branch-only delete retries.
-func reportResult(g *globals, res gcResult, runErr error) error {
+func reportResult(g *core.Globals, res gcResult, runErr error) error {
 	if len(res.Removed) > 0 || len(res.Failed) > 0 || len(res.Skipped) > 0 || len(res.RemoteDeleted) > 0 || len(res.DeletedBranches) > 0 || res.DeletedBranch != "" {
 		if rerr := gcReport(g, res); rerr != nil {
 			if runErr != nil {
@@ -313,9 +313,9 @@ func reportResult(g *globals, res gcResult, runErr error) error {
 // runGCRemove removes the selected git.Worktrees under the renderer, then prints the
 // report only after the renderer exits: a raw stdout write would land mid-frame
 // and corrupt the inline display.
-func runGCRemove(g *globals, root string, selected []worktree, plan remotePlan, o gcOptions, idx sessionIndex, now time.Time) error {
+func runGCRemove(g *core.Globals, root string, selected []core.Worktree, plan remotePlan, o gcOptions, idx core.SessionIndex, now time.Time) error {
 	var res gcResult
-	runErr := withProgress(g, true, func(p *progress) error {
+	runErr := withProgress(g, true, func(p *ui.Progress) error {
 		var rerr error
 		res, rerr = gcCleanup(root, selected, plan, o.keepSessions, idx, gcMode{deleteTemp: true, idleOnly: len(o.paths) == 0}, now, p)
 		return rerr
@@ -323,16 +323,16 @@ func runGCRemove(g *globals, root string, selected []worktree, plan remotePlan, 
 	return reportResult(g, res, runErr)
 }
 
-func promptCandidateSelection(candidates []worktree, now time.Time, ttl time.Duration, keepRemote bool) ([]worktree, error) {
+func promptCandidateSelection(candidates []core.Worktree, now time.Time, ttl time.Duration, keepRemote bool) ([]core.Worktree, error) {
 	if !ui.Interactive() {
 		return nil, core.Usagef("gc: nothing selected; use --all or --path")
 	}
-	header, body, _ := pickerGrid(candidates, columnContext{Now: now, TTL: ttl}, pickerBudget())
+	header, body, _ := pickerGrid(candidates, core.ColumnContext{Now: now, TTL: ttl}, pickerBudget())
 	sel, err := ui.MultiSelect(gcPickerTitle(len(candidates)), gcPickerDescription(candidates, keepRemote, header), body)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]worktree, 0, len(sel))
+	out := make([]core.Worktree, 0, len(sel))
 	for _, i := range sel {
 		out = append(out, candidates[i])
 	}
@@ -343,12 +343,11 @@ func promptCandidateSelection(candidates []worktree, now time.Time, ttl time.Dur
 // terminal minus huh's chrome and option prefix is mandatory: with either
 // omitted, lipgloss wraps the row and the columns visibly misalign. The budget
 // is a parameter so tests pin deterministic widths without a terminal.
-func pickerGrid(candidates []worktree, ctx columnContext, budget int) (string, []string, []int) {
-	cols := gcPickerColumns
+func pickerGrid(candidates []core.Worktree, ctx core.ColumnContext, budget int) (string, []string, []int) {
+	cols := core.PickerColumns()
 	headers := core.ColumnHeaders(cols)
 	rows := core.GridRows(cols, candidates, ctx)
-	priority, floors := core.ShrinkPolicy(headers)
-	headers, rows, widths, aligns := ui.SizedGrid(headers, rows, budget, core.ColumnRightAligns(cols), priority, floors, core.IsCapabilityHeader)
+	headers, _, rows, widths, aligns := ui.SizedGrid(headers, nil, rows, budget, core.ColumnRightAligns(cols), core.GridPolicy(headers))
 	header, body := ui.RenderGrid(headers, rows, widths, aligns)
 	return header, body, widths
 }
@@ -362,15 +361,9 @@ func pickerBudget() int {
 // grid header indented to sit exactly above the option keys (huh indents only
 // by its frame, not by the option prefix). The temp clause appears only when
 // a temp candidate is present, mirroring gcConsentTitle.
-func gcPickerDescription(candidates []worktree, keepRemote bool, header string) string {
+func gcPickerDescription(candidates []core.Worktree, keepRemote bool, header string) string {
 	return gcPickerPolicy(keepRemote, len(tempBranchNames(candidates)) > 0) + "\n" + strings.Repeat(" ", ui.PickerOptionPrefixWidth) + header
 }
-
-// gcPickerColumns is the picker's projection of the shared worktree grid.
-// STATUS is dropped because every candidate is UNUSED (said once in the title),
-// and UNCOMMITTED replaces the integration columns. TEMP shows the idle window
-// that makes a temporary checkout reclaimable.
-var gcPickerColumns = []worktreeColumn{core.ColPath, core.ColBranch, core.ColLastUsed, core.ColTemp, core.ColUncommitted, core.ColUpstream}
 
 // gcPickerTitle keeps the "Select worktrees to remove" contract (pinned by the
 // TUI test) and states "unused" once, since every candidate is UNUSED.
@@ -396,7 +389,7 @@ func gcPickerPolicy(keepRemote, hasTemp bool) string {
 // gcSelection scans UNUSED, non-main git.Worktrees: explicit --path wins, --all
 // takes every scanned candidate. The ui.Interactive choice is deferred to
 // chooseCandidates so it runs outside any progress renderer.
-func gcSelection(wts []worktree, o gcOptions, ttl time.Duration, now time.Time, p *progress) ([]worktree, error) {
+func gcSelection(wts []core.Worktree, o gcOptions, ttl time.Duration, now time.Time, p *ui.Progress) ([]core.Worktree, error) {
 	if len(o.paths) > 0 {
 		return gcByPath(wts, o.paths, ttl, now)
 	}
@@ -407,8 +400,8 @@ func gcSelection(wts []worktree, o gcOptions, ttl time.Duration, now time.Time, 
 
 // unusedCandidates filters to non-main UNUSED git.Worktrees; the main worktree is
 // never a candidate — losing it would destroy the repo itself.
-func unusedCandidates(wts []worktree, now time.Time, ttl time.Duration) []worktree {
-	var candidates []worktree
+func unusedCandidates(wts []core.Worktree, now time.Time, ttl time.Duration) []core.Worktree {
+	var candidates []core.Worktree
 	for _, w := range wts {
 		if !w.Main && w.Unused(now, ttl) {
 			candidates = append(candidates, w)
@@ -420,7 +413,7 @@ func unusedCandidates(wts []worktree, now time.Time, ttl time.Duration) []worktr
 // markDirty computes UNCOMMITTED for each candidate under the phase; the picker
 // column and the forced-removal warning are its only consumers, so it is never
 // computed for every worktree in discover.
-func markDirty(candidates []worktree, p *progress) {
+func markDirty(candidates []core.Worktree, p *ui.Progress) {
 	p.Phase("checking candidates", len(candidates))
 	for i := range candidates {
 		candidates[i].Dirty = git.WorktreeDirty(candidates[i].Path)
@@ -429,7 +422,7 @@ func markDirty(candidates []worktree, p *progress) {
 	}
 }
 
-func findWorktreeByPath(wts []worktree, want, raw string, now time.Time, ttl time.Duration) (*worktree, error) {
+func findWorktreeByPath(wts []core.Worktree, want, raw string, now time.Time, ttl time.Duration) (*core.Worktree, error) {
 	for _, w := range wts {
 		if w.Path != want {
 			continue
@@ -450,7 +443,7 @@ func findWorktreeByPath(wts []worktree, want, raw string, now time.Time, ttl tim
 	return nil, fmt.Errorf("--path %s: not a worktree of this repository", raw)
 }
 
-func appendPathCandidate(wts []worktree, p string, seen map[string]bool, now time.Time, ttl time.Duration) (*worktree, error) {
+func appendPathCandidate(wts []core.Worktree, p string, seen map[string]bool, now time.Time, ttl time.Duration) (*core.Worktree, error) {
 	want, err := fs.CanonicalAbs(p)
 	if err != nil || seen[want] {
 		return nil, err
@@ -459,9 +452,9 @@ func appendPathCandidate(wts []worktree, p string, seen map[string]bool, now tim
 	return findWorktreeByPath(wts, want, p, now, ttl)
 }
 
-func gcByPath(wts []worktree, paths []string, ttl time.Duration, now time.Time) ([]worktree, error) {
+func gcByPath(wts []core.Worktree, paths []string, ttl time.Duration, now time.Time) ([]core.Worktree, error) {
 	seen := map[string]bool{}
-	var out []worktree
+	var out []core.Worktree
 	for _, p := range paths {
 		w, err := appendPathCandidate(wts, p, seen, now, ttl)
 		if err != nil {
@@ -474,7 +467,7 @@ func gcByPath(wts []worktree, paths []string, ttl time.Duration, now time.Time) 
 	return out, nil
 }
 
-func removeOneWorktree(root string, w worktree, idleOnly bool, now time.Time, res *gcResult, p *progress) bool {
+func removeOneWorktree(root string, w core.Worktree, idleOnly bool, now time.Time, res *gcResult, p *ui.Progress) bool {
 	removed, stale, err := removeVerifiedWorktree(root, w, idleOnly, now)
 	reportRemovalError(w, err, res, p)
 	// Stale unverified sessions cannot change the verdict; disclose the ignores.
@@ -506,7 +499,7 @@ func reportRemovalError(w core.Worktree, err error, res *gcResult, p *ui.Progres
 	}
 }
 
-func removeVerifiedWorktree(root string, w worktree, idleOnly bool, now time.Time) (removed bool, stale []string, err error) {
+func removeVerifiedWorktree(root string, w core.Worktree, idleOnly bool, now time.Time) (removed bool, stale []string, err error) {
 	if w.Temp {
 		// Temp verification needs git metadata, so an out-of-band .git backlink
 		// must be repaired before the identity check, not after removal fails.
@@ -534,7 +527,7 @@ func purgeTempBranch(root string, w core.Worktree, res *gcResult) {
 
 // purgeWorktree cleans up after a successful removal: the remote upstream
 // (unless kept), then the agent session history (unless kept).
-func purgeWorktree(root string, w worktree, plan remotePlan, keepSessions bool, res *gcResult, idx sessionIndex, p *progress, outcomes map[string]error) {
+func purgeWorktree(root string, w core.Worktree, plan remotePlan, keepSessions bool, res *gcResult, idx core.SessionIndex, p *ui.Progress, outcomes map[string]error) {
 	// Remote delete runs only after the local worktree is gone, so a failed
 	// local removal never orphans a still-needed remote branch.
 	if !plan.keep && w.Upstream.OnRemote() {
@@ -548,7 +541,7 @@ func purgeWorktree(root string, w worktree, plan remotePlan, keepSessions bool, 
 // remoteDeleteVeto is the single source of truth for "gc must not delete this
 // upstream": "" means delete, anything else is the human-readable skip reason.
 // The plan records it once; purgeRemoteWorktree reads the plan.
-func remoteDeleteVeto(root string, w worktree, surviving []worktree) string {
+func remoteDeleteVeto(root string, w core.Worktree, surviving []core.Worktree) string {
 	if isRemoteDefaultBranch(root, w.Upstream) {
 		return fmt.Sprintf("it is the default branch of %s", w.Upstream.Remote)
 	}
@@ -558,7 +551,7 @@ func remoteDeleteVeto(root string, w worktree, surviving []worktree) string {
 	return ""
 }
 
-func purgeRemoteWorktree(root string, w worktree, plan remotePlan, res *gcResult, p *progress, outcomes map[string]error) {
+func purgeRemoteWorktree(root string, w core.Worktree, plan remotePlan, res *gcResult, p *ui.Progress, outcomes map[string]error) {
 	// A vetoed upstream is skipped with the reason disclosed once per upstream,
 	// since sharers would otherwise repeat the same warning.
 	key := w.Upstream.Key()
@@ -577,7 +570,7 @@ func purgeRemoteWorktree(root string, w worktree, plan remotePlan, res *gcResult
 	deleteRemote(root, w, res, p, outcomes)
 }
 
-func purgeWorktreeSessions(path string, res *gcResult, idx sessionIndex) {
+func purgeWorktreeSessions(path string, res *gcResult, idx core.SessionIndex) {
 	n, err := harness.PurgeSessions(path, idx)
 	res.SessionsPurged += n
 	if err != nil {
@@ -592,7 +585,7 @@ func failRemote(res *gcResult, path, short string, err error) {
 // isRemoteDefaultBranch reports whether u tracks the remote's default branch,
 // guarded first by the remote's recorded HEAD symref and falling back to the
 // repository default branch so cloned repos without symrefs stay protected.
-func isRemoteDefaultBranch(root string, u upstream) bool {
+func isRemoteDefaultBranch(root string, u git.Upstream) bool {
 	if root == "" {
 		return false
 	}
@@ -611,7 +604,7 @@ func isRemoteDefaultBranch(root string, u upstream) bool {
 
 // survivingUpstreamTracked reports whether u is still tracked by a surviving
 // worktree (one not selected for removal in this gc run).
-func survivingUpstreamTracked(surviving []worktree, u upstream) (string, bool) {
+func survivingUpstreamTracked(surviving []core.Worktree, u git.Upstream) (string, bool) {
 	for _, s := range surviving {
 		if s.Upstream.OnRemote() && s.Upstream.Remote == u.Remote && s.Upstream.Ref == u.Ref {
 			return s.Path, true
@@ -623,12 +616,12 @@ func survivingUpstreamTracked(surviving []worktree, u upstream) (string, bool) {
 // survivingWorktrees returns git.Worktrees from all that are not in selected. Used
 // both for pre-removal planning (all minus selected) and post-removal protection
 // (selected minus removed) — the function is generic over both.
-func survivingWorktrees(all, selected []worktree) []worktree {
+func survivingWorktrees(all, selected []core.Worktree) []core.Worktree {
 	sel := make(map[string]bool, len(selected))
 	for _, w := range selected {
 		sel[w.Path] = true
 	}
-	var surviving []worktree
+	var surviving []core.Worktree
 	for _, w := range all {
 		if !sel[w.Path] {
 			surviving = append(surviving, w)
@@ -643,7 +636,7 @@ func survivingWorktrees(all, selected []worktree) []worktree {
 // The delete runs once per upstream and the failure is reported once, except
 // that every affected temp checkout also records it, so each keeps its own
 // local recovery branch (permanent checkouts never delete one).
-func deleteRemote(root string, w worktree, res *gcResult, p *progress, outcomes map[string]error) {
+func deleteRemote(root string, w core.Worktree, res *gcResult, p *ui.Progress, outcomes map[string]error) {
 	key := w.Upstream.Key()
 	err, seen := outcomes[key]
 	if !seen {
@@ -657,7 +650,7 @@ func deleteRemote(root string, w worktree, res *gcResult, p *progress, outcomes 
 
 // attemptRemoteDelete performs one upstream delete; the result is the shared
 // outcome deleteRemote records. Nil means deleted or already gone.
-func attemptRemoteDelete(root string, w worktree, res *gcResult, p *progress) error {
+func attemptRemoteDelete(root string, w core.Worktree, res *gcResult, p *ui.Progress) error {
 	remoteExists, err := git.RemoteRefExists(root, w.Upstream.Remote, w.Upstream.Ref)
 	if err != nil {
 		return err
@@ -684,7 +677,7 @@ type gcMode struct {
 
 // Discovery supplies the purge index. Temp removal separately reads fresh
 // activity under its registry lock; cached evidence never authorizes removal.
-func gcCleanup(root string, selected []worktree, plan remotePlan, keepSessions bool, idx sessionIndex, mode gcMode, now time.Time, p *progress) (gcResult, error) {
+func gcCleanup(root string, selected []core.Worktree, plan remotePlan, keepSessions bool, idx core.SessionIndex, mode gcMode, now time.Time, p *ui.Progress) (gcResult, error) {
 	res := emptyGCResult(keepSessions, plan.keptRemote())
 	removeSelected(root, selected, plan, keepSessions, mode, now, &res, idx, p)
 	if len(res.Failed) > 0 {
@@ -695,9 +688,9 @@ func gcCleanup(root string, selected []worktree, plan remotePlan, keepSessions b
 
 // removeSelected removes each selected worktree, sharing one session index
 // and one per-upstream remote outcome across the run.
-func removeSelected(root string, selected []worktree, plan remotePlan, keepSessions bool, mode gcMode, now time.Time, res *gcResult, idx sessionIndex, p *progress) {
+func removeSelected(root string, selected []core.Worktree, plan remotePlan, keepSessions bool, mode gcMode, now time.Time, res *gcResult, idx core.SessionIndex, p *ui.Progress) {
 	p.Phase("removing worktrees", len(selected))
-	var removed []worktree
+	var removed []core.Worktree
 	for _, w := range selected {
 		if removeOneWorktree(root, w, mode.idleOnly, now, res, p) {
 			removed = append(removed, w)
@@ -710,7 +703,7 @@ func removeSelected(root string, selected []worktree, plan remotePlan, keepSessi
 	finishSelectedCleanup(root, selected, removed, plan, keepSessions, mode, res, idx, p)
 }
 
-func protectRemovalSurvivors(root string, removed, survivors []worktree, plan *remotePlan) {
+func protectRemovalSurvivors(root string, removed, survivors []core.Worktree, plan *remotePlan) {
 	if plan.vetoes == nil {
 		plan.vetoes = map[string]string{}
 	}
@@ -723,7 +716,7 @@ func protectRemovalSurvivors(root string, removed, survivors []worktree, plan *r
 	}
 }
 
-func finishSelectedCleanup(root string, selected, removed []worktree, plan remotePlan, keepSessions bool, mode gcMode, res *gcResult, idx sessionIndex, p *progress) {
+func finishSelectedCleanup(root string, selected, removed []core.Worktree, plan remotePlan, keepSessions bool, mode gcMode, res *gcResult, idx core.SessionIndex, p *ui.Progress) {
 	outcomes := map[string]error{}
 	for _, w := range removed {
 		purgeWorktree(root, w, plan, keepSessions, res, idx, p, outcomes)
@@ -761,7 +754,7 @@ func worktreeCleanupFailed(path string, res *gcResult) bool {
 // Only this checkout's own cleanup failure keeps its branch. Prune is
 // repo-global, so a prune failure vetoing every temp branch would orphan
 // branches whose records are already gone and no later gc can reclaim.
-func finishTempCleanup(root string, w worktree, res *gcResult, p *progress) {
+func finishTempCleanup(root string, w core.Worktree, res *gcResult, p *ui.Progress) {
 	if worktreeCleanupFailed(w.Path, res) {
 		ui.WarnProgress(p, "kept local branch %s due to cleanup failure; fix the cause and complete failed cleanup, then retry `wtm gc --path %q` if the checkout remains, otherwise `wtm delete %q --yes`", w.Branch, w.Path, w.Branch)
 		return
@@ -775,7 +768,7 @@ func finishTempCleanup(root string, w worktree, res *gcResult, p *progress) {
 // pruneWorktrees runs prune unconditionally: the old `len(res.Removed) > 0`
 // gate skipped it exactly when every removal failed, leaving stale admin
 // entries that wedge later runs.
-func pruneWorktrees(res *gcResult, root string, p *progress) {
+func pruneWorktrees(res *gcResult, root string, p *ui.Progress) {
 	p.Phase("pruning", 0)
 	if err := git.WorktreePrune(root); err != nil {
 		res.Failed = append(res.Failed, gcFailure{Path: root, Error: "prune: " + err.Error()})
@@ -826,7 +819,7 @@ func printGCHuman(res gcResult) {
 	}
 }
 
-func gcReport(g *globals, res gcResult) error {
+func gcReport(g *core.Globals, res gcResult) error {
 	if g.JSON {
 		return fs.PrintJSON(res)
 	}

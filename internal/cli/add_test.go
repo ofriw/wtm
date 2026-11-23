@@ -844,7 +844,7 @@ func TestAttachedTempBranchIsPermanent(t *testing.T) {
 	}
 
 	out := CaptureStdout(t, func() {
-		if err := core.CmdStatus(&globals{Root: repo, JSON: true}, nil, statusHooks()); err != nil {
+		if err := cmdStatus(&core.Globals{Root: repo, JSON: true}, nil, defaultHooks()); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -866,7 +866,7 @@ func TestAttachedTempBranchIsPermanent(t *testing.T) {
 	}
 
 	out = CaptureStdout(t, func() {
-		if err := core.CmdStatus(&globals{Root: repo}, nil, statusHooks()); err != nil {
+		if err := cmdStatus(&core.Globals{Root: repo}, nil, defaultHooks()); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -877,7 +877,7 @@ func TestAttachedTempBranchIsPermanent(t *testing.T) {
 
 	BackdateGitActivity(t, res.Path, time.Now().Add(-2*time.Hour))
 	CaptureStdout(t, func() {
-		if err := cmdGC(&globals{Root: repo, Yes: true}, []string{"--all"}); err != nil {
+		if err := cmdGC(&core.Globals{Root: repo, Yes: true}, []string{"--all"}); err != nil {
 			t.Fatal(err)
 		}
 	})

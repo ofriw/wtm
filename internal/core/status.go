@@ -16,9 +16,9 @@ import (
 	"wtm/internal/ui"
 )
 
-// status.go — the worktree domain: the shared model, discovery, and the
-// status command. Discovery relies on injected hooks (session indexing and MCP
-// inventory) so this package never imports the harness.
+// status.go — the worktree domain: the shared model and discovery. Discovery
+// relies on injected hooks (session indexing and MCP inventory) so this
+// package never imports the harness. The status command handler lives in cli.
 
 // Worktree is the shared model: one git worktree plus its harness inventory.
 type Worktree struct {
@@ -125,6 +125,9 @@ func LoadWorkspace(g *Globals, showProgress bool, hooks Hooks) (Workspace, error
 
 func loadWorkspaceWithSessions(g *Globals, showProgress bool, hooks Hooks) (Workspace, error) {
 	var ws Workspace
+	if err := validateDiscoveryHooks(hooks); err != nil {
+		return ws, err
+	}
 	root, err := ResolveRoot(g)
 	if err != nil {
 		return ws, err
@@ -191,11 +194,14 @@ func applyTempRecord(w *Worktree, temps temp.Store, p *ui.Progress) {
 	w.Temp, w.TempTTL, w.TempCreated, w.TempIdentity = true, ttl, rec.CreatedAt, rec.Identity
 }
 
-// DiscoverWithSessions exposes discoverWithSessions: run full repo discovery
-// with an explicit progress handle and harness-provided hooks. cli tests use
-// it to observe the notice stream directly.
-func DiscoverWithSessions(root string, p *ui.Progress, hooks Hooks) ([]Worktree, SessionIndex, error) {
-	return discoverWithSessions(root, p, hooks)
+// validateDiscoveryHooks rejects missing hook wiring at every discovery entry
+// path, so a caller that omits a hook fails with a diagnostic instead of a nil
+// dereference deeper in the flow.
+func validateDiscoveryHooks(hooks Hooks) error {
+	if hooks.Sessions == nil || hooks.MCP == nil {
+		return fmt.Errorf("discovery hooks are required: sessions=%v mcp=%v", hooks.Sessions != nil, hooks.MCP != nil)
+	}
+	return nil
 }
 
 func discoverWithSessions(root string, p *ui.Progress, hooks Hooks) ([]Worktree, SessionIndex, error) {
@@ -459,33 +465,4 @@ func sortWorktrees(wts []Worktree) {
 		}
 		return a.Path < b.Path
 	})
-}
-
-// CmdStatus is the status command handler. cli dispatches to it; hooks carry
-// the harness-provided session/MCP discovery.
-func CmdStatus(g *Globals, args []string, hooks Hooks) error {
-	fs := SubFlags("status", g)
-	wide := fs.Bool("wide", false, "show one column per integration")
-	pos, err := ParseSub(fs, g, args)
-	if err != nil {
-		return err
-	}
-	if len(pos) > 0 {
-		return Usagef("status: unexpected argument %q", pos[0])
-	}
-	// --wide shapes only the table; the JSON contract always reports every
-	// integration, so the combination is a usage error, not a silent no-op.
-	if *wide && g.JSON {
-		return Usagef("status: --wide has no effect with --json (JSON already reports all integrations)")
-	}
-	ws, err := LoadWorkspace(g, false, hooks)
-	if err != nil {
-		return err
-	}
-	now := time.Now()
-	if g.JSON {
-		return PrintStatusJSON(ws.Wts, now, ws.TTL)
-	}
-	printStatusTable(StatusColumnsFor(*wide), ws.Wts, now, ws.TTL, g.Color)
-	return nil
 }

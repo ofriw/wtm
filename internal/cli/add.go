@@ -41,11 +41,11 @@ type addResult struct {
 	ExpiresAt *string `json:"expiresAt,omitempty"`
 }
 
-func cmdAdd(g *globals, args []string) error {
-	fs := core.SubFlags("add", g)
+func cmdAdd(g *core.Globals, args []string) error {
+	flags := core.SubFlags("add", g)
 	var o addOptions
-	bindAddFlags(fs, &o)
-	pos, err := core.ParseSub(fs, g, args)
+	bindAddFlags(flags, &o)
+	pos, err := core.ParseSub(flags, g, args, usage)
 	if err != nil {
 		return err
 	}
@@ -145,7 +145,7 @@ type seedSource struct {
 // Otherwise the worktree at the start-point wins, with the main worktree as
 // fallback. A differing tree is disclosed after indexing, when index state is
 // known. defaultName is empty for an explicit start-point and for attach.
-func resolveAddSource(root string, wts []gworktree, base, from, target, defaultName string) (seedSource, error) {
+func resolveAddSource(root string, wts []git.GWorktree, base, from, target, defaultName string) (seedSource, error) {
 	if from != "" {
 		src, err := fs.CanonicalAbs(from)
 		if err != nil {
@@ -192,7 +192,7 @@ func seedNotice(root, src, base, branch string) (string, bool) {
 
 // seedable reports whether w can be a seed source: it needs a directory to copy
 // from, a usable .git backlink, and must not be the checkout being created.
-func seedable(w gworktree, target string) bool {
+func seedable(w git.GWorktree, target string) bool {
 	return !w.Prunable &&
 		fs.Exists(w.Path) &&
 		!git.WorktreeLinkMissing(w.Path) &&
@@ -202,13 +202,13 @@ func seedable(w gworktree, target string) bool {
 // defaultBranchWorktree returns the first usable worktree that has branch
 // checked out. Entries arrive primary-first, then linked by path (git.go), so
 // the primary wins; otherwise the lowest path wins.
-func defaultBranchWorktree(wts []gworktree, branch, target string) (gworktree, bool) {
+func defaultBranchWorktree(wts []git.GWorktree, branch, target string) (git.GWorktree, bool) {
 	for _, w := range wts {
 		if w.Branch == branch && seedable(w, target) {
 			return w, true
 		}
 	}
-	return gworktree{}, false
+	return git.GWorktree{}, false
 }
 
 // warnSeedSource discloses the real seed source. A missing checkout is normal
@@ -304,7 +304,7 @@ func locationBase(root string, wts []git.GWorktree) string {
 
 // resolveAddTarget picks the checkout directory: fs.Canonical --path or a derived
 // sibling, then one nesting guard shared by both.
-func resolveAddTarget(root string, wts []gworktree, branch, override string) (string, error) {
+func resolveAddTarget(root string, wts []git.GWorktree, branch, override string) (string, error) {
 	var target string
 	if override != "" {
 		abs, err := fs.CanonicalAbs(override)
@@ -377,7 +377,7 @@ type addParams struct {
 	ttl                      time.Duration
 }
 
-func prepareAdd(g *globals, branchArg string, o addOptions) (addParams, error) {
+func prepareAdd(g *core.Globals, branchArg string, o addOptions) (addParams, error) {
 	root, err := core.ResolveRoot(g)
 	if err != nil {
 		return addParams{}, err
@@ -483,7 +483,7 @@ func verifyAttachStart(root, branch, start string) error {
 // occupiedErr names the blocking worktree and a repair the tool itself allows.
 // fs.Canonical() gives one spelling: git emits forward slashes on Windows and may
 // report 8.3 aliases, while every other wtm path is fs.Canonical.
-func occupiedErr(branch string, w gworktree) error {
+func occupiedErr(branch string, w git.GWorktree) error {
 	path := fs.Canonical(w.Path)
 	if w.Prunable || !fs.Exists(path) {
 		return fmt.Errorf("add: branch %q is already checked out at %s (missing; run git worktree prune)", branch, path)
@@ -498,7 +498,7 @@ func occupiedErr(branch string, w gworktree) error {
 // is preserved with %w so errors.Is still sees its cause (core.ErrAmbiguousBranch);
 // any other error degrades to a plain usage failure, keeping exit code 2.
 func addUsage(err error) error {
-	var ue usageError
+	var ue core.UsageError
 	if errors.As(err, &ue) {
 		return fmt.Errorf("add: %w", err)
 	}
@@ -508,10 +508,10 @@ func addUsage(err error) error {
 // resolveAddBranch adopts an existing local branch with git's stored spelling,
 // so normalization never duplicates Feature/X as feature/x. --temp never
 // attaches: adopting a tmp/ branch would hand it to gc.
-func resolveAddBranch(root, raw string, temp bool) (branchChoice, error) {
+func resolveAddBranch(root, raw string, temp bool) (core.BranchChoice, error) {
 	refs, err := git.LocalBranches(root)
 	if err != nil {
-		return branchChoice{}, err
+		return core.BranchChoice{}, err
 	}
 	mode := core.BranchForAdd
 	if temp {
@@ -519,10 +519,10 @@ func resolveAddBranch(root, raw string, temp bool) (branchChoice, error) {
 	}
 	branch, err := core.ResolveLocalBranch(refs, raw, mode)
 	if err != nil {
-		return branchChoice{}, addUsage(err)
+		return core.BranchChoice{}, addUsage(err)
 	}
 	if temp && branch.Exists {
-		return branchChoice{}, fmt.Errorf("add: refusing --temp for existing branch %q; attach it without --temp, or remove the branch first", branch.Name)
+		return core.BranchChoice{}, fmt.Errorf("add: refusing --temp for existing branch %q; attach it without --temp, or remove the branch first", branch.Name)
 	}
 	return branch, nil
 }
@@ -531,7 +531,7 @@ func resolveAddBranch(root, raw string, temp bool) (branchChoice, error) {
 // replicates the source's harness. Idempotent by construction: an existing
 // path, or a branch that is checked out elsewhere, fails before anything is
 // written; an existing free branch is attached, never recreated.
-func addWorktree(g *globals, branchArg string, o addOptions) error {
+func addWorktree(g *core.Globals, branchArg string, o addOptions) error {
 	p, err := prepareAdd(g, branchArg, o)
 	if err != nil {
 		return err

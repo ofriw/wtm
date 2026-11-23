@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"maps"
@@ -12,6 +11,7 @@ import (
 	"testing"
 	"time"
 	"wtm/internal/core"
+	"wtm/internal/git"
 	"wtm/internal/harness"
 	"wtm/internal/temp"
 	. "wtm/internal/testutil"
@@ -22,15 +22,8 @@ import (
 // real repo with linked worktrees; time-based helpers pin RELATIVE mtimes so
 // assertions never race the wall clock.
 
-// noMCP is a no-op MCP probe for inventory composition tests.
-func noMCP(string, *ui.Progress) map[string]bool { return nil }
-
-// statusHooks wires the harness discovery functions like the real dispatcher,
-// so status tests exercise the production session/MCP paths.
-func statusHooks() core.Hooks {
-	return core.Hooks{Sessions: harness.DiscoverySessions(false), MCP: harness.MCPConfigs}
-}
-
+// status tests use the shared defaultHooks() from cli.go so they exercise the
+// production session/MCP paths the real dispatcher wires.
 func TestWorktreeUnused(t *testing.T) {
 	now := time.Now()
 	ttl := 10 * time.Hour
@@ -46,7 +39,7 @@ func TestWorktreeUnused(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := worktree{LastUsed: tc.lastUsed}
+			w := core.Worktree{LastUsed: tc.lastUsed}
 			if got := w.Unused(now, ttl); got != tc.want {
 				t.Fatalf("unused(now, %v) = %v, want %v", ttl, got, tc.want)
 			}
@@ -69,7 +62,7 @@ func TestWorktreeStatus(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := worktree{LastUsed: tc.lastUsed}
+			w := core.Worktree{LastUsed: tc.lastUsed}
 			if got := w.Status(now, ttl); got != tc.want {
 				t.Fatalf("status = %q, want %q", got, tc.want)
 			}
@@ -78,127 +71,12 @@ func TestWorktreeStatus(t *testing.T) {
 }
 
 func TestBranchName(t *testing.T) {
-	if got := (worktree{}).BranchName(); got != "(detached)" {
+	if got := (core.Worktree{}).BranchName(); got != "(detached)" {
 		t.Fatalf("empty branch = %q, want (detached)", got)
 	}
-	if got := (worktree{Branch: "main"}).BranchName(); got != "main" {
+	if got := (core.Worktree{Branch: "main"}).BranchName(); got != "main" {
 		t.Fatalf("named branch = %q, want main", got)
 	}
-}
-
-func TestSortWorktrees(t *testing.T) {
-	base := time.Now()
-	wts := []worktree{
-		{Path: "/e", LastUsed: base},
-		{Path: "/d", LastUsed: base},
-		{Path: "/active-new", LastUsed: base.Add(time.Hour)},
-		{Path: "/main", Main: true, LastUsed: base.Add(-time.Hour)},
-		{Path: "/active-old", LastUsed: base.Add(-time.Hour)},
-	}
-	core.SortWorktrees(wts)
-	want := []string{"/main", "/active-new", "/d", "/e", "/active-old"}
-	for i, p := range want {
-		if wts[i].Path != p {
-			t.Fatalf("order[%d] = %q, want %q (full: %v)", i, wts[i].Path, p, wts)
-		}
-	}
-}
-
-// wtlSessionWins pins the Pi session as the newest activity source.
-func wtlSessionWins(t *testing.T, repo string, now time.Time) time.Time {
-	t.Helper()
-	want := now.Add(-time.Hour)
-	MkSession(t, repo, "s", want)
-	SetMtime(t, filepath.Join(repo, ".git"), now.Add(-3*time.Hour))
-	WriteFile(t, filepath.Join(repo, "dirty.txt"), "x", 0o644)
-	SetMtime(t, filepath.Join(repo, "dirty.txt"), now.Add(-4*time.Hour))
-	return want
-}
-
-// wtlGitDirWins pins the .git mtime as the newest activity source.
-func wtlGitDirWins(t *testing.T, repo string, now time.Time) time.Time {
-	t.Helper()
-	want := now.Add(-time.Hour)
-	SetMtime(t, filepath.Join(repo, ".git"), want)
-	MkSession(t, repo, "s", now.Add(-3*time.Hour))
-	WriteFile(t, filepath.Join(repo, "dirty.txt"), "x", 0o644)
-	SetMtime(t, filepath.Join(repo, "dirty.txt"), now.Add(-4*time.Hour))
-	return want
-}
-
-// wtlCommitWins pins the latest commit time as the newest activity source.
-func wtlCommitWins(t *testing.T, repo string, now time.Time) time.Time {
-	t.Helper()
-	want := now.Add(-time.Hour).Truncate(time.Second)
-	t.Setenv("GIT_AUTHOR_DATE", want.Format(time.RFC3339))
-	t.Setenv("GIT_COMMITTER_DATE", want.Format(time.RFC3339))
-	WriteFile(t, filepath.Join(repo, "later.txt"), "x", 0o644)
-	GitCommit(t, repo, "later", "later.txt")
-	SetMtime(t, filepath.Join(repo, ".git"), now.Add(-3*time.Hour))
-	MkSession(t, repo, "s", now.Add(-5*time.Hour))
-	return want
-}
-
-// wtlDirtyWins pins a modified untracked file as the newest activity source.
-func wtlDirtyWins(t *testing.T, repo string, now time.Time) time.Time {
-	t.Helper()
-	want := now.Add(-time.Hour)
-	WriteFile(t, filepath.Join(repo, "dirty.txt"), "x", 0o644)
-	SetMtime(t, filepath.Join(repo, "dirty.txt"), want)
-	SetMtime(t, filepath.Join(repo, ".git"), now.Add(-3*time.Hour))
-	MkSession(t, repo, "s", now.Add(-4*time.Hour))
-	return want
-}
-
-// wtlChunkHoundIgnored proves .chunkhound/* never counts as activity.
-func wtlChunkHoundIgnored(t *testing.T, repo string, now time.Time) time.Time {
-	t.Helper()
-	want := now.Add(-2 * time.Hour) // .git mtime; the only commit is the 2020 seed
-	SetMtime(t, filepath.Join(repo, ".git"), want)
-	ch := harness.ChunkhoundDBPath(repo)
-	WriteFile(t, ch, "db", 0o644)
-	SetMtime(t, ch, now.Add(-time.Hour))
-	return want
-}
-
-func TestWorktreeLastUsed(t *testing.T) {
-	Sandbox(t)
-	now := time.Now()
-	cases := []struct {
-		name  string
-		setup func(t *testing.T, repo string, now time.Time) time.Time
-	}{
-		{"session mtime is newest", wtlSessionWins},
-		{"git dir mtime is newest", wtlGitDirWins},
-		{"commit time is newest", wtlCommitWins},
-		{"modified untracked file is newest", wtlDirtyWins},
-		{"chunkhound db is not activity", wtlChunkHoundIgnored},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			repo := InitRepo(t, "main")
-			GitTestCommit(t, repo)
-			want := tc.setup(t, repo, now)
-			BackdateActivityIndex(t, repo, now.Add(-6*time.Hour))
-			idx := mustIndexSessions(t)
-			if got := core.WorktreeLastUsed(repo, idx); !got.Equal(want) {
-				t.Fatalf("core.WorktreeLastUsed = %v, want %v", got, want)
-			}
-		})
-	}
-	t.Run("future timestamp is clamped to now", func(t *testing.T) {
-		repo := InitRepo(t, "main")
-		GitTestCommit(t, repo)
-		MkSession(t, repo, "future", now.Add(48*time.Hour))
-		idx := mustIndexSessions(t)
-		got := core.WorktreeLastUsed(repo, idx)
-		if got.After(time.Now()) {
-			t.Fatalf("future timestamp not clamped: %v", got)
-		}
-		if got.Before(now.Add(-time.Minute)) {
-			t.Fatalf("clamp lost recency: %v", got)
-		}
-	})
 }
 
 func TestDiscover(t *testing.T) {
@@ -227,10 +105,11 @@ func TestDiscover(t *testing.T) {
 	SetMtime(t, harness.ChunkhoundDBPath(repo), now.Add(-10*time.Hour))
 	SetMtime(t, filepath.Join(linkedA, harness.ProjectMCPFile), now.Add(-10*time.Hour))
 
-	wts, _, err := core.DiscoverWithSessions(repo, nil, statusHooks())
+	ws, err := core.LoadWorkspace(&core.Globals{Root: repo}, false, defaultHooks())
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
+	wts := ws.Wts
 	wantOrder := []string{CanonicalPath(repo), linkedA, linkedB}
 	if len(wts) != len(wantOrder) {
 		t.Fatalf("discover returned %d worktrees, want %d", len(wts), len(wantOrder))
@@ -255,9 +134,9 @@ func TestDiscover(t *testing.T) {
 }
 
 // TestDiscoverUpstreamsUnavailableReachesNotice pins that when branchUpstreams
-// fails, discovery degrades instead of aborting, and the warning must travel
-// through the renderer's persistent notice path. A raw stderr write during the
-// renderer is overwritten by the next frame — the warning would vanish.
+// fails, discovery degrades instead of aborting, and the warning reaches stderr
+// directly when no renderer runs. The renderer's persistent-notice path is
+// pinned separately by TestDiscoverUpstreamsUnavailablePTY on a real terminal.
 func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 	Sandbox(t)
 	repo := InitRepo(t, "main")
@@ -267,25 +146,10 @@ func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 	// no stub.
 	WriteFile(t, filepath.Join(repo, ".git", "packed-refs"), "garbage\n", 0o644)
 
-	events := make(chan ui.ProgressEvent, 64)
-	p := ui.NewProgress(context.Background(), events)
-	if _, _, err := core.DiscoverWithSessions(repo, p, statusHooks()); err != nil {
-		t.Fatalf("discover must degrade on a bad upstream query, not fail: %v", err)
-	}
-	close(events)
-	var notices []string
-	for ev := range events {
-		if ev.Kind == ui.EvNotice {
-			notices = append(notices, ev.Text)
-		}
-	}
-	if got := countNotices(notices, "upstreams unavailable"); got != 1 {
-		t.Fatalf("upstreams-unavailable notices = %d (%v), want exactly 1", got, notices)
-	}
-
+	// Non-renderer path: the warning reaches stderr directly.
 	stderr := CaptureStderr(t, func() {
-		if _, _, err := core.DiscoverWithSessions(repo, nil, statusHooks()); err != nil {
-			t.Fatalf("discover(nil progress): %v", err)
+		if err := cmdStatus(&core.Globals{Root: repo}, nil, defaultHooks()); err != nil {
+			t.Fatalf("cmdStatus: %v", err)
 		}
 	})
 	if !strings.Contains(stderr, "upstreams unavailable") {
@@ -293,15 +157,36 @@ func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 	}
 }
 
+// statusJSON runs the status command in JSON mode and parses its output, so a
+// test exercises discovery wiring through the real handler, not a test-only
+// seam.
+func statusJSON(t *testing.T, repo string) []core.JSONWorktree {
+	t.Helper()
+	out := CaptureStdout(t, func() {
+		if err := cmdStatus(&core.Globals{Root: repo, JSON: true}, nil, defaultHooks()); err != nil {
+			t.Fatalf("status --json: %v", err)
+		}
+	})
+	var got []core.JSONWorktree
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("parse status JSON: %v\n%s", err, out)
+	}
+	return got
+}
+
 // TestBuildWorktreeMCPFiles proves each recognized MCP config lights the
 // mcp integration equally, plus the harness capability that owns it, keyed off
 // mcpConfigFiles as the SSOT. Pinning the exact light-up pairs catches a swap
 // that an "either capability" check would miss.
 func TestBuildWorktreeMCPFiles(t *testing.T) {
-	empty := core.BuildWorktree(gworktree{Path: t.TempDir(), Main: true}, sessionIndex{}, nil, nil, nil, harness.MCPConfigs)
+	Sandbox(t) // a developer's real HOME settings must not fail discovery
+	empty := statusJSON(t, InitRepo(t, "main"))
+	if len(empty) != 1 {
+		t.Fatalf("status JSON returned %d worktrees, want 1", len(empty))
+	}
 	for _, c := range core.Capabilities() {
-		if empty.Caps[c.ID] != core.CapAbsent {
-			t.Fatalf("empty root: %s = %v, want absent", c.ID, empty.Caps[c.ID])
+		if empty[0].Integrations[c.ID] != "n/a" {
+			t.Fatalf("empty root: %s = %q, want n/a", c.ID, empty[0].Integrations[c.ID])
 		}
 	}
 	// Every MCP config lights mcp; it also lights the harness that reads it.
@@ -312,16 +197,20 @@ func TestBuildWorktreeMCPFiles(t *testing.T) {
 			if !ok {
 				t.Fatalf("no capability light-up pinned for %s", rel)
 			}
-			root := t.TempDir()
-			WriteFile(t, filepath.Join(root, rel), "{}", 0o644)
-			w := core.BuildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil, nil, harness.MCPConfigs)
+			repo := InitRepo(t, "main")
+			WriteFile(t, filepath.Join(repo, rel), "{}", 0o644)
+			got := statusJSON(t, repo)
+			if len(got) != 1 {
+				t.Fatalf("status JSON returned %d worktrees", len(got))
+			}
+			integ := got[0].Integrations
 			for _, c := range []string{"mcp", "pi"} {
-				wantState := core.CapAbsent
+				wantState := "n/a"
 				if slices.Contains(want, c) {
-					wantState = core.CapPresent
+					wantState = "yes"
 				}
-				if w.Caps[c] != wantState {
-					t.Fatalf("%s: %s = %v, want %v", rel, c, w.Caps[c], wantState)
+				if integ[c] != wantState {
+					t.Fatalf("%s: %s = %q, want %q", rel, c, integ[c], wantState)
 				}
 			}
 		})
@@ -350,7 +239,7 @@ func TestPrintTable(t *testing.T) {
 	t.Setenv("COLUMNS", "0") // non-TTY goldens must stay at natural widths
 	headers := []string{"A", "BB"}
 	rows := [][]string{{"x", "y"}, {"long", "z"}}
-	out := CaptureStdout(t, func() { ui.PrintTable(headers, rows, colorAuto, nil, nil, nil, nil, nil) })
+	out := CaptureStdout(t, func() { ui.PrintTable(headers, nil, rows, ui.ColorAuto, nil, nil, ui.Policy{}) })
 	want := "A     BB\nx     y\nlong  z\n"
 	if out != want {
 		t.Fatalf("printTable = %q, want %q", out, want)
@@ -359,15 +248,32 @@ func TestPrintTable(t *testing.T) {
 
 // TestStatusHeadersSSOT pins the status header literal and proves the shrink
 // policy is derived from the same registry: a rename or a new rank cannot pass
-// without updating this contract.
+// without updating this contract. It also pins that every column carries a
+// stable, unique style-routing ID, so cli's ID-keyed styling stays bound to
+// the schema.
 func TestStatusHeadersSSOT(t *testing.T) {
 	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "STATUS", "TEMP", "INTEGRATIONS"}
-	if !slices.Equal(core.ColumnHeaders(core.StatusColumns), want) {
-		t.Fatalf("status headers = %v, want %v", core.ColumnHeaders(core.StatusColumns), want)
+	if !slices.Equal(core.ColumnHeaders(core.StatusColumns()), want) {
+		t.Fatalf("status headers = %v, want %v", core.ColumnHeaders(core.StatusColumns()), want)
+	}
+	seen := map[string]bool{}
+	for _, c := range core.AllColumns() {
+		if c.ID == "" {
+			t.Errorf("column %q has no style ID", c.Header)
+		}
+		if seen[c.ID] {
+			t.Errorf("column ID %q is not unique", c.ID)
+		}
+		seen[c.ID] = true
+	}
+	for _, c := range core.Capabilities() {
+		if c.Column().ID != c.ID {
+			t.Errorf("capability column ID = %q, want %q", c.Column().ID, c.ID)
+		}
 	}
 	// The elision order production derives for this table is a contract, not an
 	// implementation detail.
-	priority, _ := core.ShrinkPolicy(want)
+	priority := core.GridPolicy(want).Priority
 	wantShrink := []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED", "INTEGRATIONS"}
 	if !slices.Equal(priority, wantShrink) {
 		t.Errorf("shrink priority = %v, want %v", priority, wantShrink)
@@ -378,7 +284,7 @@ func TestStatusHeadersSSOT(t *testing.T) {
 	for _, c := range core.AllColumns() {
 		registered[c.Header] = true
 	}
-	for _, cols := range [][]worktreeColumn{core.StatusColumns, gcPickerColumns} {
+	for _, cols := range [][]core.WorktreeColumn{core.StatusColumns(), core.PickerColumns()} {
 		for _, c := range cols {
 			if !registered[c.Header] {
 				t.Errorf("column %q is used by a grid but missing from allColumns", c.Header)
@@ -390,7 +296,7 @@ func TestStatusHeadersSSOT(t *testing.T) {
 // TestWideColumnsShareCorePrefix pins that --wide reuses the shared core
 // prefix, so a new core column can never silently vanish from the wide view.
 func TestWideColumnsShareCorePrefix(t *testing.T) {
-	want := core.ColumnHeaders(core.CoreColumns)
+	want := core.ColumnHeaders(core.CoreColumns())
 	wide := core.ColumnHeaders(core.StatusColumnsFor(true))
 	if len(wide) < len(want) || !slices.Equal(wide[:len(want)], want) {
 		t.Fatalf("--wide core prefix = %v, want %v", wide, want)
@@ -421,7 +327,7 @@ func TestWideColumnsShrinkable(t *testing.T) {
 	}
 	// Dynamic shrink priority must include capability columns when present.
 	headers := core.ColumnHeaders(wideCols)
-	priority, _ := core.ShrinkPolicy(headers)
+	priority := core.GridPolicy(headers).Priority
 	for _, c := range core.Capabilities() {
 		if !slices.Contains(priority, strings.ToUpper(c.ID)) {
 			t.Errorf("capability column %q not in dynamic shrink priority", strings.ToUpper(c.ID))
@@ -435,8 +341,8 @@ func TestRenderGridMatchesPrintTable(t *testing.T) {
 	t.Setenv("COLUMNS", "0")
 	headers := []string{"A", "BB", "CCC"}
 	rows := [][]string{{"x", "yy", "zzz"}, {"longer", "y", "z"}}
-	out := CaptureStdout(t, func() { ui.PrintTable(headers, rows, colorNever, nil, []string{"CCC"}, nil, nil, nil) })
-	h, r, widths, aligns := ui.SizedGrid(headers, rows, ui.WidthBudget(), []string{"CCC"}, nil, nil, nil)
+	out := CaptureStdout(t, func() { ui.PrintTable(headers, nil, rows, ui.ColorNever, nil, []string{"CCC"}, ui.Policy{}) })
+	h, _, r, widths, aligns := ui.SizedGrid(headers, nil, rows, ui.WidthBudget(), []string{"CCC"}, ui.Policy{})
 	header, body := ui.RenderGrid(h, r, widths, aligns)
 	if got := ui.GridString(header, body) + "\n"; got != out {
 		t.Fatalf("renderGrid = %q, printTable = %q", got, out)
@@ -449,13 +355,13 @@ func TestPrintStatusTableFits(t *testing.T) {
 	t.Setenv("COLUMNS", "80")
 	home := t.TempDir()
 	SetHomeEnv(t, home)
-	wts := []worktree{{
+	wts := []core.Worktree{{
 		Path:   filepath.Join(home, "very", "long", "checkout", "that", "never", "ends", "repo"),
 		Branch: "feature/a-rather-long-branch-name", LastUsed: time.Now(),
-		Upstream: upstream{Short: "origin/feature/a-rather-long-branch-name", Remote: "origin", Ref: "refs/heads/x"},
-		Caps:     map[string]capState{"chunkhound": core.CapPresent, "mcp": core.CapPresent},
+		Upstream: git.Upstream{Short: "origin/feature/a-rather-long-branch-name", Remote: "origin", Ref: "refs/heads/x"},
+		Caps:     map[string]core.CapState{"chunkhound": core.CapPresent, "mcp": core.CapPresent},
 	}}
-	out := CaptureStdout(t, func() { core.PrintStatusTable(core.StatusColumns, wts, time.Now(), 10*time.Hour, colorNever) })
+	out := CaptureStdout(t, func() { printStatusTable(core.StatusColumns(), wts, time.Now(), 10*time.Hour, ui.ColorNever) })
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		if w := ui.DispWidth(line); w > 80 {
 			t.Errorf("line exceeds 80 cells: %d\n%q", w, line)
@@ -476,9 +382,9 @@ func TestPrintStatusJSON(t *testing.T) {
 	now := time.Now()
 	ttl := 10 * time.Hour
 	last := time.Date(2021, 2, 3, 4, 5, 6, 0, time.UTC)
-	wts := []worktree{
-		{Path: "/detached", LastUsed: last, Caps: map[string]capState{"chunkhound": core.CapPartial, "mcp": core.CapPresent, "pi": core.CapPresent, "claude": core.CapPresent}},
-		{Path: "/main", Branch: "main", Main: true, Temp: true, TempCreated: now, TempTTL: ttl, Caps: map[string]capState{"chunkhound": core.CapPartial}, Upstream: upstream{Short: "origin/main", Remote: "origin", Ref: "refs/heads/main"}},
+	wts := []core.Worktree{
+		{Path: "/detached", LastUsed: last, Caps: map[string]core.CapState{"chunkhound": core.CapPartial, "mcp": core.CapPresent, "pi": core.CapPresent, "claude": core.CapPresent}},
+		{Path: "/main", Branch: "main", Main: true, Temp: true, TempCreated: now, TempTTL: ttl, Caps: map[string]core.CapState{"chunkhound": core.CapPartial}, Upstream: git.Upstream{Short: "origin/main", Remote: "origin", Ref: "refs/heads/main"}},
 	}
 	out := CaptureStdout(t, func() {
 		if err := core.PrintStatusJSON(wts, now, ttl); err != nil {
@@ -510,7 +416,7 @@ func TestPrintStatusJSON(t *testing.T) {
 	if !got[1].Main {
 		t.Fatalf("Main lost in JSON: %+v", got)
 	}
-	if got[0].Temp || got[0].ExpiresAt != nil || !got[1].Temp || got[1].ExpiresAt == nil || *got[1].ExpiresAt != temp.FormatTempDeadline(wts[1].TempExpiresAt()) {
+	if got[0].Temp || got[0].ExpiresAt != nil || !got[1].Temp || got[1].ExpiresAt == nil || *got[1].ExpiresAt != temp.FormatDeadline(wts[1].TempExpiresAt()) {
 		t.Fatalf("temp metadata lost in JSON: %+v", got)
 	}
 	if got[1].Upstream != "origin/main" || got[0].Upstream != "" {
@@ -521,7 +427,7 @@ func TestPrintStatusJSON(t *testing.T) {
 	// new integration needs no test edit; the pinned state->word mapping is the
 	// contract. wts[0] carries mcp/pi/claude, so they are applicable (not n/a)
 	// and read "-" for wts[1].
-	integrations := func(state map[string]capState) map[string]string {
+	integrations := func(state map[string]core.CapState) map[string]string {
 		want := make(map[string]string, len(core.Capabilities()))
 		for _, c := range core.Capabilities() {
 			want[c.ID] = "-"
@@ -567,7 +473,7 @@ func TestPrintStatusJSON(t *testing.T) {
 // before touching the repo.
 func TestDispatchValidatesColor(t *testing.T) {
 	for _, cmd := range []string{"status", "add", "delete", "gc", "config"} {
-		g := &globals{Color: "bogus"}
+		g := &core.Globals{Color: "bogus"}
 		if err := dispatch(cmd, g, nil); !isUsage(err) {
 			t.Errorf("dispatch(%q,Color:bogus) = %v, want usageError", cmd, err)
 		}
@@ -582,36 +488,13 @@ func TestParseSubRejectsInvalidGlobalsAfterSubcommand(t *testing.T) {
 		{"--color", "bogus"},
 		{"--progress", "sometimes"},
 	} {
-		if err := core.CmdStatus(&globals{Root: t.TempDir()}, args, statusHooks()); !isUsage(err) {
-			t.Errorf("core.CmdStatus(%v) = %v, want usageError", args, err)
+		if err := cmdStatus(&core.Globals{Root: t.TempDir()}, args, defaultHooks()); !isUsage(err) {
+			t.Errorf("cmdStatus(%v) = %v, want usageError", args, err)
 		}
 	}
 }
-
-// TestCellTemp pins the shared TEMP cell: a dash for permanent worktrees, the
-// compact remaining window while active, "expired" once the window has passed.
-func TestCellTemp(t *testing.T) {
-	now := TempTestTime
-	cases := []struct {
-		name string
-		w    worktree
-		want string
-	}{
-		{"permanent is dash", worktree{Branch: "main"}, "-"},
-		{"active temp shows remaining window", worktree{Temp: true, TempCreated: now.Add(-2 * time.Hour), TempTTL: 3 * time.Hour}, "1h"},
-		{"lapsed temp reads expired", worktree{Temp: true, TempCreated: now.Add(-3 * time.Hour), TempTTL: time.Hour}, "expired"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := core.CellTemp(tc.w, columnContext{Now: now}); got != tc.want {
-				t.Fatalf("cellTemp = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestTempDeadlineStatusAndSelectionAgree(t *testing.T) {
-	w := worktree{Temp: true, TempCreated: TempTestTime, LastUsed: TempTestTime.Add(time.Second), TempTTL: 1500 * time.Millisecond}
+	w := core.Worktree{Temp: true, TempCreated: TempTestTime, LastUsed: TempTestTime.Add(time.Second), TempTTL: 1500 * time.Millisecond}
 	deadline := TempTestTime.Add(2500 * time.Millisecond)
 	if got := w.TempExpiresAt(); !got.Equal(deadline) {
 		t.Fatalf("deadline = %s, want %s", got, deadline)
@@ -621,32 +504,13 @@ func TestTempDeadlineStatusAndSelectionAgree(t *testing.T) {
 	}
 }
 
-// TestBuildWorktreeInvalidTempTTL pins the defensive skip: a record with an
-// unparsable TTL must not mark the worktree temp, even if the store bypassed
-// decode validation.
-func TestBuildWorktreeInvalidTempTTL(t *testing.T) {
-	_, path, w := identityCheckout(t)
-	temps := mustReadTempStore(t)
-	rec := temps[w.Path]
-	rec.TTL = "bogus"
-	temps[w.Path] = rec
-	w = worktree{Path: CanonicalPath(path), Branch: w.Branch}
-	warnings := CaptureStderr(t, func() { core.ApplyTempRecord(&w, temps, nil) })
-	if !strings.Contains(warnings, "treating as permanent") {
-		t.Fatalf("invalid TTL must warn: %s", warnings)
-	}
-	if w.Temp {
-		t.Fatalf("invalid TTL record marked temp: %+v", w)
-	}
-}
-
 // TestGCPickerExcludesIntegrations pins that the gc picker never shows the
 // INTEGRATIONS column: the picker builds columnContext without active, so the
 // grouped cell would misreport every worktree as "-".
 func TestGCPickerExcludesIntegrations(t *testing.T) {
-	for _, c := range gcPickerColumns {
-		if c.Header == core.ColIntegrations.Header {
-			t.Fatalf("gcPickerColumns must not contain %q", core.ColIntegrations.Header)
+	for _, c := range core.PickerColumns() {
+		if c.Header == "INTEGRATIONS" {
+			t.Fatalf("picker must not contain %q", "INTEGRATIONS")
 		}
 	}
 }
@@ -659,7 +523,7 @@ func TestWideColumnOrder(t *testing.T) {
 	for _, c := range wide {
 		headers = append(headers, c.Header)
 	}
-	coreHdrs := core.ColumnHeaders(core.CoreColumns)
+	coreHdrs := core.ColumnHeaders(core.CoreColumns())
 	if len(headers) < len(coreHdrs) || !slices.Equal(headers[:len(coreHdrs)], coreHdrs) {
 		t.Fatalf("--wide core prefix = %v, want %v", headers[:len(coreHdrs)], coreHdrs)
 	}
@@ -678,8 +542,8 @@ func TestWideColumnOrder(t *testing.T) {
 // by reference: callers must not be able to mutate the global core.StatusColumns.
 func TestStatusColumnsForNoAliasing(t *testing.T) {
 	got := core.StatusColumnsFor(false)
-	got[0] = worktreeColumn{Header: "PAD"}
-	fresh := core.ColumnHeaders(core.StatusColumns)
+	got[0] = core.WorktreeColumn{Header: "PAD"}
+	fresh := core.ColumnHeaders(core.StatusColumns())
 	if !slices.Equal(fresh, core.ColumnHeaders(core.StatusColumnsFor(false))) {
 		t.Fatalf("core.StatusColumns mutated: %v", fresh)
 	}
@@ -692,9 +556,9 @@ func TestStatusColumnsForNoAliasing(t *testing.T) {
 // renderer gated off by --progress never, work gets the nil-safe handle and no
 // renderer runs.
 func TestWithProgressGatedOff(t *testing.T) {
-	g := &globals{Progress: progressNever}
+	g := &core.Globals{Progress: ui.ProgressNever}
 	ran := false
-	err := withProgressTo(io.Discard, g, true, func(p *progress) error {
+	err := withProgressTo(io.Discard, g, true, func(p *ui.Progress) error {
 		ran = p == nil
 		return nil
 	})

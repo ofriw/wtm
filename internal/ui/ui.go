@@ -46,23 +46,34 @@ const (
 	ColorNever  = "never"
 )
 
-// CellRenderer renders one plain cell value into its colored form. PrintTable
-// calls it only when the profile supports styling, so it may always decorate.
-type CellRenderer func(header, value string) string
+// CellRenderer renders one plain cell value into its colored form. It keys off
+// the column's stable ID (not its display header) so styling survives header
+// renames. PrintTable calls it only when the profile supports styling, so it
+// may always decorate.
+type CellRenderer func(id, value string) string
+
+// Policy bundles the shrink-policy inputs a grid needs: the elision priority
+// and floors (derived from the caller's column registry) plus capHeader, which
+// identifies capability headers so dropped --wide columns can be disclosed.
+type Policy struct {
+	Priority  []string
+	Floors    map[string]int
+	CapHeader func(string) bool
+}
 
 // PrintTable renders a width-fitted table. Deterministic output is a test
 // contract: the budget comes from COLUMNS or a TTY only, and cells are sized
 // and middle-elided here — never by the table resizer, whose end-elision and
 // shrink-column choice we cannot observe or pin. Styles are applied only when
 // the resolved profile supports them; NoTTY output stays pure ASCII so pipes,
-// --json and goldens remain byte-stable. priority/floors come from the
-// caller's column registry; capHeader identifies capability headers for the
-// drop disclosure.
-func PrintTable(headers []string, rows [][]string, colorMode string, render CellRenderer, rightAlign []string, priority []string, floors map[string]int, capHeader func(string) bool) {
-	headers, rows, widths, aligns := SizedGrid(headers, rows, WidthBudget(), rightAlign, priority, floors, capHeader)
+// --json and goldens remain byte-stable. p carries the shrink policy from the
+// caller's column registry and the capability-header identifier for the drop
+// disclosure.
+func PrintTable(headers, ids []string, rows [][]string, colorMode string, render CellRenderer, rightAlign []string, p Policy) {
+	headers, ids, rows, widths, aligns := SizedGrid(headers, ids, rows, WidthBudget(), rightAlign, p)
 	profile := ResolveColorProfile(colorMode)
 	if profile > colorprofile.NoTTY && render != nil {
-		headers, rows = RenderCells(headers, rows, render)
+		headers, rows = RenderCells(headers, ids, rows, render)
 	}
 	header, body := RenderGrid(headers, rows, widths, aligns)
 	writeTable(GridString(header, body), profile)
@@ -70,15 +81,14 @@ func PrintTable(headers []string, rows [][]string, colorMode string, render Cell
 
 // SizedGrid resolves a grid against a width budget: columns are sized, then
 // middle-elided, and alignment is resolved from the plain headers before
-// elision so ANSI decoration can never change which columns are right-aligned.
-// Return order matches RenderGrid's parameters, so RenderGrid(SizedGrid(...))
-// composes.
-func SizedGrid(headers []string, rows [][]string, budget int, rightAlign []string, priority []string, floors map[string]int, capHeader func(string) bool) ([]string, [][]string, []int, []lipgloss.Position) {
-	widths := ColumnWidths(headers, rows, budget, priority, floors, capHeader)
-	headers, rows, widths = DropZeroColumns(headers, rows, widths, capHeader)
+// elision. ids is pruned in lockstep with headers/rows, so renderers always
+// see ids aligned to the kept columns.
+func SizedGrid(headers, ids []string, rows [][]string, budget int, rightAlign []string, p Policy) ([]string, []string, [][]string, []int, []lipgloss.Position) {
+	widths := ColumnWidths(headers, rows, budget, p.Priority, p.Floors, p.CapHeader)
+	headers, ids, rows, widths = DropZeroColumns(headers, ids, rows, widths, p.CapHeader)
 	aligns := ColumnAligns(headers, rightAlign)
 	headers, rows = ElideCells(headers, rows, widths)
-	return headers, rows, widths, aligns
+	return headers, ids, rows, widths, aligns
 }
 
 // RenderGrid splits a rendered grid into its header line ("" when headers is
@@ -159,8 +169,10 @@ func truthy(v string) bool {
 }
 
 // RenderCells bolds the header row and renders each body cell through render.
-// It runs after elision so widths are measured on plain text.
-func RenderCells(headers []string, rows [][]string, render CellRenderer) ([]string, [][]string) {
+// It runs after elision so widths are measured on plain text. ids parallels
+// headers and is what render receives; a nil ids only matters when render is
+// non-nil.
+func RenderCells(headers, ids []string, rows [][]string, render CellRenderer) ([]string, [][]string) {
 	styled := make([]string, len(headers))
 	for i, h := range headers {
 		styled[i] = lipgloss.NewStyle().Bold(true).Render(h)
@@ -169,7 +181,7 @@ func RenderCells(headers []string, rows [][]string, render CellRenderer) ([]stri
 	for r, row := range rows {
 		cells := make([]string, len(row))
 		for i, c := range row {
-			cells[i] = render(headers[i], c)
+			cells[i] = render(ids[i], c)
 		}
 		out[r] = cells
 	}
@@ -281,10 +293,10 @@ func shrinkToFloors(headers []string, widths []int, priority []string, floors ma
 // Capability columns dropped from a narrow --wide view are disclosed on stderr
 // (stdout stays machine-clean for pipes and goldens), so a missing column reads
 // as hidden, not absent. capHeader identifies those columns.
-func DropZeroColumns(headers []string, rows [][]string, widths []int, capHeader func(string) bool) ([]string, [][]string, []int) {
+func DropZeroColumns(headers, ids []string, rows [][]string, widths []int, capHeader func(string) bool) ([]string, []string, [][]string, []int) {
 	keep := positiveWidthColumns(widths)
 	if len(keep) == len(widths) {
-		return headers, rows, widths
+		return headers, ids, rows, widths
 	}
 	var hidden []string
 	for i, h := range headers {
@@ -299,7 +311,13 @@ func DropZeroColumns(headers []string, rows [][]string, widths []int, capHeader 
 	for r, row := range rows {
 		out[r] = selectStrings(row, keep)
 	}
-	return selectStrings(headers, keep), out, selectInts(widths, keep)
+	// ids parallels headers; nil stays nil so a caller without per-cell ids
+	// gets a nil back and RenderCells stays a no-op for them.
+	var idOut []string
+	if ids != nil {
+		idOut = selectStrings(ids, keep)
+	}
+	return selectStrings(headers, keep), idOut, out, selectInts(widths, keep)
 }
 
 func positiveWidthColumns(widths []int) []int {

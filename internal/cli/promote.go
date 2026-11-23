@@ -20,9 +20,9 @@ type promoteResult struct {
 	Promoted bool   `json:"promoted"`
 }
 
-func cmdPromote(g *globals, args []string) error {
-	fs := core.SubFlags("promote", g)
-	pos, err := core.ParseSub(fs, g, args)
+func cmdPromote(g *core.Globals, args []string) error {
+	flags := core.SubFlags("promote", g)
+	pos, err := core.ParseSub(flags, g, args, usage)
 	if err != nil {
 		return err
 	}
@@ -35,7 +35,7 @@ func cmdPromote(g *globals, args []string) error {
 // promoteWorktree resolves the worktree addressed by branch and clears its temp
 // record. A worktree that is already permanent is the desired end state, so it
 // succeeds with promoted=false rather than erroring (safe for retries).
-func promoteWorktree(g *globals, branch string) error {
+func promoteWorktree(g *core.Globals, branch string) error {
 	ws, err := loadWorkspace(g, true, harness.DiscoverySessions(false))
 	if err != nil {
 		return err
@@ -60,7 +60,7 @@ func promoteWorktree(g *globals, branch string) error {
 // different checkout; the error names the command that reaches the alias.
 // The alias resolves through resolveRepoBranch so the hint uses Git's stored
 // spelling, which may differ by case from the requested tmp/ name.
-func explainPromoteMiss(root string, wts []worktree, branch string, cause error) error {
+func explainPromoteMiss(root string, wts []core.Worktree, branch string, cause error) error {
 	alias, err := core.TempBranch(branch)
 	if !errors.Is(cause, errNoWorktreeForBranch) || err != nil || alias == branch {
 		return cause
@@ -79,7 +79,7 @@ func explainPromoteMiss(root string, wts []worktree, branch string, cause error)
 	return cause
 }
 
-func printPromoteResult(g *globals, res promoteResult) error {
+func printPromoteResult(g *core.Globals, res promoteResult) error {
 	if g.JSON {
 		return fs.PrintJSON(res)
 	}

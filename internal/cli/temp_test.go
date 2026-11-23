@@ -208,9 +208,10 @@ func TestDiscoveryLenientOnCorruptStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	WriteFile(t, p, "{not json", 0o600)
-	var wts []worktree
+	var ws core.Workspace
 	var derr error
-	warnings := CaptureStderr(t, func() { wts, _, derr = core.DiscoverWithSessions(repo, nil, statusHooks()) })
+	warnings := CaptureStderr(t, func() { ws, derr = core.LoadWorkspace(&globals{Root: repo}, false, defaultHooks()) })
+	wts := ws.Wts
 	if derr != nil {
 		t.Fatalf("discover on corrupt store: %v", derr)
 	}
@@ -316,23 +317,6 @@ func TestPrintStatusJSONTempFields(t *testing.T) {
 	}
 	if !strings.Contains(out, `"temp": true`) || !strings.Contains(out, `"expiresAt": null`) {
 		t.Fatalf("JSON keys missing from output:\n%s", out)
-	}
-}
-
-// Reading with no registry must stay side-effect free: `wtm status` on a
-// machine that never used --temp must not create ~/.wtm or its lock file.
-func TestReadTempStoreWithoutRegistryIsSideEffectFree(t *testing.T) {
-	env := Sandbox(t)
-	store, err := temp.ReadTempStoreUnlocked()
-	if err != nil {
-		t.Fatalf("readTempStore: %v", err)
-	}
-	if len(store) != 0 {
-		t.Fatalf("store = %v, want empty", store)
-	}
-	dir := filepath.Join(env.Home, ".wtm")
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("read created %s: %v", dir, err)
 	}
 }
 

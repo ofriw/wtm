@@ -11,12 +11,9 @@ import (
 )
 
 // globals.go — the command framework shared by every subcommand: the global
-// flag state, usage-error mapping and the flag helpers. It lives here (not in
-// cli) because the status command — which needs all of it — also lives here,
-// and cli imports core, never the reverse.
-
-// UsageText is the full help text; cli installs it at init.
-var UsageText = ""
+// flag state, usage-error mapping and the flag helpers. It lives here so core's
+// discovery model and cli's handlers share one contract; cli imports core,
+// never the reverse.
 
 // UsageError maps to exit code 2.
 type UsageError string
@@ -85,20 +82,20 @@ func PrintSubFlags(fs *flag.FlagSet, g *Globals) {
 	local.PrintDefaults()
 }
 
-// ParseSub parses subcommand arguments allowing flags and positionals to be
-// interleaved (go flag stops at the first positional; usage is
-// `wtm add <branch> [<start-point>] [-p|--path <dir>]`). -h prints the
-// subcommand flags and then global usage, and yields errHelpOK.
-// Globals are validated here after parsing: subFlags binds them to g, so a
-// bogus --color/--progress placed after the subcommand is only visible now,
-// not in dispatch's pre-parse check.
-func ParseSub(fs *flag.FlagSet, g *Globals, args []string) ([]string, error) {
+// ParseSub parses subcommand arguments, allowing flags and positionals to be
+// interleaved (go flag stops at the first positional). -h prints the
+// subcommand flags followed by global usage and yields errHelpOK; usage is the
+// full help text passed per invocation by cli.Run, so -h shows the current
+// command's text without a package-global. Globals are validated here after
+// parsing: subFlags binds them to g, so a bogus --color/--progress after the
+// subcommand is only visible now, not in dispatch's pre-parse check.
+func ParseSub(fs *flag.FlagSet, g *Globals, args []string, usage string) ([]string, error) {
 	var pos []string
 	for {
 		if err := fs.Parse(args); err != nil {
 			if errors.Is(err, flag.ErrHelp) {
 				PrintSubFlags(fs, g)
-				fmt.Print(UsageText)
+				fmt.Print(usage)
 				return nil, ErrHelpOK
 			}
 			return nil, Usagef("%s: %v", fs.Name(), err)

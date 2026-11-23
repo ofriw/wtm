@@ -1,6 +1,7 @@
 package core
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -45,7 +46,7 @@ var capabilityRegistry []Capability
 // The check uses the real column header (assertNoCollision), so a header that
 // stops equaling the upper-cased ID still surfaces here and at registry build.
 func RegisterCapability(c Capability) {
-	assertNoCollision(c)
+	assertNoCollision(c, c.Column(), AllColumns())
 	capabilityRegistry = append(capabilityRegistry, c)
 }
 
@@ -58,8 +59,10 @@ func requireCapabilities() []Capability {
 	return capabilityRegistry
 }
 
-// Capabilities is the SSOT.
-func Capabilities() []Capability { return capabilityRegistry }
+// Capabilities is the SSOT for production readers. It fails fast on an empty
+// registry (same panic as requireCapabilities) and returns a fresh copy so
+// callers cannot mutate the live registry through the returned slice.
+func Capabilities() []Capability { return slices.Clone(requireCapabilities()) }
 
 // PresentIf reports present when ok.
 func PresentIf(ok bool) CapState {
@@ -127,7 +130,7 @@ func Applicable(active []Capability, id string) bool {
 // capability, so ui styling keys off the registry instead of a column list.
 // Headers are always upper-cased from capability ids, so exact match suffices.
 func IsCapabilityHeader(header string) bool {
-	for _, c := range Capabilities() {
+	for _, c := range requireCapabilities() {
 		if header == strings.ToUpper(c.ID) {
 			return true
 		}
@@ -135,14 +138,16 @@ func IsCapabilityHeader(header string) bool {
 	return false
 }
 
-// partialMarker flags a partially wired integration in the grouped cell.
-const partialMarker = "~"
+// PartialMarker is the suffix GroupedToken appends to a partially wired
+// integration. cli's grouped-cell renderer keys the partial color off it, so
+// the two cannot disagree about what "partial" looks like.
+const PartialMarker = "~"
 
 // GroupedToken renders a capability the worktree carries: the token when fully
 // wired, token~ when partial. Absent capabilities never reach here.
 func (c Capability) GroupedToken(s CapState) string {
 	if s == CapPartial {
-		return c.Token + partialMarker
+		return c.Token + PartialMarker
 	}
 	return c.Token
 }
@@ -168,6 +173,7 @@ func (c Capability) WideText(s CapState, inUse bool) string {
 // from the registry so the schema never grows by hand.
 func (c Capability) Column() WorktreeColumn {
 	return WorktreeColumn{
+		ID:     c.ID,
 		Header: strings.ToUpper(c.ID),
 		Cell: func(w Worktree, ctx ColumnContext) string {
 			return c.WideText(w.Caps[c.ID], Applicable(ctx.Active, c.ID))
