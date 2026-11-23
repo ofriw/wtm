@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,10 @@ import (
 func atMin(base time.Time, minutes int) time.Time {
 	return base.Add(time.Duration(minutes) * time.Minute)
 }
+
+// sessionBlocks is the span-only view of a session's causal turns, used by
+// activity tests that need no model attribution.
+func sessionBlocks(events []activityEvent) []span { return turnSpans(buildTurns(events)) }
 
 func TestSessionBlocksExcludeIdleBetweenTurns(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -146,5 +151,118 @@ func TestPiActivityIgnoresMessageTextOutsideTheKey(t *testing.T) {
 	}
 	if len(parsed.activity) != 0 {
 		t.Fatalf("activity = %v, want none", parsed.activity)
+	}
+}
+
+// TestClampSpansBoundsFutureTurns pins the clamp boundary: a straddling turn
+// ends at the report clock, and a wholly future turn is dropped.
+func TestClampSpansBoundsFutureTurns(t *testing.T) {
+	now := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
+	straddling := clampSpans(sessionBlocks([]activityEvent{
+		{at: now.Add(-10 * time.Minute), kind: activityHuman},
+		{at: now.Add(10 * time.Minute), kind: activityEnd},
+	}), now)
+	if got := unionDuration(straddling); got != 10*time.Minute {
+		t.Fatalf("straddling active = %v, want 10m", got)
+	}
+	future := clampSpans(sessionBlocks([]activityEvent{
+		{at: now.Add(time.Minute), kind: activityHuman},
+		{at: now.Add(2 * time.Minute), kind: activityEnd},
+	}), now)
+	if len(future) != 0 {
+		t.Fatalf("future spans = %v, want none", future)
+	}
+}
+
+// TestAttributeTurnsClampsClippedModelSpans pins  at the fold boundary: a
+// model span stamped after the report instant must never let a model row exceed
+// the harness total in the same run. It drives addBilledSession, the real fold
+// entry, instead of re-enacting its composition.
+func TestAttributeTurnsClampsClippedModelSpans(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 10, 0, 0, time.UTC)
+	var u worktreeUsage
+	u.addBilledSession("pi",
+		[]usageEvent{{at: now.Add(-5 * time.Minute), end: now.Add(15 * time.Minute), model: "m"}},
+		[]activityEvent{
+			{at: now.Add(-10 * time.Minute), kind: activityHuman},
+			{at: now.Add(-5 * time.Minute), kind: activityWork},
+			{at: now.Add(20 * time.Minute), kind: activityEnd},
+		},
+		nil, func(usageEvent) pricedEvent { return unpriced() }, now)
+	h := u.harnesses["pi"]
+	// The clipped span runs to now+15m, so pre-fix it stayed unclamped at 20m
+	// and a model row could claim more time than the worktree total. The fix
+	// clamps it to the report clock: 5m of real usage before now.
+	if got := h.model("m").active(); got != 5*time.Minute {
+		t.Fatalf("model active = %v, want 5m (clipped span clamped to the report clock)", got)
+	}
+	if h.active() < h.model("m").active() {
+		t.Fatalf("model active %v exceeds harness active %v", h.model("m").active(), h.active())
+	}
+}
+
+// TestTurnOpeningsCreditTheAnswerer pins the attribution contract: a turn's
+// opening belongs to the model of its assistant answer, never to a warmup or
+// summary usage record; the boundary record stays with the turn it closed; and
+// clipped model time is never re-attributed.
+func TestTurnOpeningsCreditTheAnswerer(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	sec := func(n int) time.Time { return base.Add(time.Duration(n) * time.Second) }
+	warmup := []usageEvent{{at: sec(5), model: "warmup"}}
+	child := []usageEvent{{at: sec(5), end: sec(60), model: "child"}, {at: sec(65), model: "parent"}}
+	cases := []struct {
+		name    string
+		turns   []turn
+		events  []usageEvent
+		covered []span
+		want    map[string][]span
+	}{
+		{
+			name:   "warmup is not an answer",
+			turns:  []turn{{span: span{sec(0), sec(30)}, answer: "answer", answerAt: sec(30)}},
+			events: warmup,
+			want:   map[string][]span{"answer": {{sec(0), sec(30)}}},
+		},
+		{
+			name:   "opening stops at the answer's first record",
+			turns:  []turn{{span: span{sec(0), sec(65)}, answer: "parent", answerAt: sec(5)}},
+			events: child,
+			want:   map[string][]span{"parent": {{sec(0), sec(5)}}},
+		},
+		{
+			name:    "covered opening is not re-attributed",
+			turns:   []turn{{span: span{sec(0), sec(65)}, answer: "parent", answerAt: sec(5)}},
+			events:  child,
+			covered: []span{{sec(2), sec(4)}},
+			want:    map[string][]span{"parent": {{sec(0), sec(2)}, {sec(4), sec(5)}}},
+		},
+		{
+			name:   "boundary record stays with the turn it closed",
+			turns:  []turn{{span: span{sec(0), sec(3)}, answer: "a", answerAt: sec(3)}, {span: span{sec(3), sec(10)}, answer: "b", answerAt: sec(10)}},
+			events: []usageEvent{{at: sec(3), model: "a"}, {at: sec(10), model: "b"}},
+			want:   map[string][]span{"a": {{sec(0), sec(3)}}, "b": {{sec(3), sec(10)}}},
+		},
+		{
+			name:  "no assistant answer falls back to a point event",
+			turns: []turn{{span: span{sec(0), sec(60)}, answerAt: sec(0)}},
+			events: []usageEvent{
+				{at: sec(0), model: "boundary"},
+				{at: sec(30), model: "late"},
+				{at: sec(10), model: "early"},
+			},
+			want: map[string][]span{"early": {{sec(0), sec(10)}}},
+		},
+	}
+	for _, c := range cases {
+		got := turnOpenings(c.turns, c.events, c.covered)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: openings = %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for name, want := range c.want {
+			if !slices.Equal(got[name], want) {
+				t.Errorf("%s: %s opening = %v, want %v", c.name, name, got[name], want)
+			}
+		}
 	}
 }

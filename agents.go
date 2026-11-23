@@ -380,12 +380,15 @@ func recordType(prefix []byte) (string, bool) {
 // instead of one per worktree.
 type sessionIndex map[string][]sessionRef
 
-// sessionRef carries an owned file, the boundary for empty-dir cleanup, and
-// the harness that owns it, so usage loads without re-resolving the harness.
+// sessionRef carries an owned file, the boundary for empty-dir cleanup, the
+// harness that owns it, and the cwd the session was recorded from, so usage
+// loads without re-resolving the harness and prices with the session's own
+// settings, not the worktree root's.
 type sessionRef struct {
 	path       string
 	group      string
 	harness    string
+	cwd        string
 	root       string
 	rootTarget string
 	owner      func(*bufio.Reader) (string, error)
@@ -587,7 +590,8 @@ func (s *sessionScan) resolve(a agent, cands []sessionCandidate) error {
 		}
 		c := r.candidate
 		s.idx[r.cwd] = append(s.idx[r.cwd], sessionRef{
-			path: c.path, group: c.group, harness: a.name, root: c.root, rootTarget: c.rootTarget, owner: a.sessionOwner,
+			path: c.path, group: c.group, harness: a.name, cwd: r.cwd,
+			root: c.root, rootTarget: c.rootTarget, owner: a.sessionOwner,
 		})
 	}
 	return nil
@@ -702,6 +706,7 @@ type parsedSession struct {
 	events   []usageEvent
 	activity []activityEvent
 	price    func(usageEvent) pricedEvent
+	proof    coveredProof // per-event subscription proof for the dedupe election
 }
 
 // usageLoss accumulates what a parse walk lost, so folding can taint the total
@@ -732,8 +737,9 @@ func (l *usageLoss) recordDropped(harness string, n int) {
 }
 
 // buildUsage is the exact-cwd form: it folds only sessions whose cwd equals the
-// worktree. Production status uses buildUsageFor, which also includes descendant
-// sessions; tests and callers without a worktree list use this form.
+// worktree. Production status folds through buildUsageForReportAt, which also
+// includes descendant sessions; this form serves tests and callers without a
+// worktree list.
 //
 // cat is nil when no catalog is available: a catalog-rated harness then reports
 // unknown cost instead of a wrong number. subs is the run's credential proof; an
@@ -743,33 +749,88 @@ func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions
 	return buildUsageSessions(wtPath, idx[canonical(wtPath)], cat, subs)
 }
 
-// buildUsageFor includes sessions whose cwd is a descendant of the worktree, so
-// work done from a repo subdirectory still counts for that worktree. The exact
-// index stays the authority for destructive operations (see purgeSessions).
-func buildUsageFor(wtPath string, wts []worktree, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
-	u, _, err := buildUsageForReport(wtPath, wts, idx, cat, subs)
-	return u, err
-}
-
-// buildUsageForReport is buildUsageFor plus the per-worktree settings refusals,
-// so status can emit them from the parent after the worker join. Its warnings
-// slice is the disclosure seam: TestUsageReportCarriesWorktreeWarnings pins it.
-func buildUsageForReport(wtPath string, wts []worktree, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, []error, error) {
-	return buildUsageSessionsReport(wtPath, sessionsForWorktree(wtPath, wts, idx), cat, subs)
+// buildUsageForReportAt is the one report entry: it includes sessions whose cwd
+// is a descendant of the worktree, so work done from a repo subdirectory still
+// counts, and returns the per-worktree settings refusals for status to emit
+// after the worker join. Its warnings slice is the disclosure seam that
+// TestUsageReportCarriesWorktreeWarnings pins. It pins the report clock: every
+// worktree in one status run clamps ACTIVE to the same instant, so the table
+// and the JSON cannot disagree. The exact index stays the authority for
+// destructive operations (see purgeSessions).
+func buildUsageForReportAt(wtPath string, wts []worktree, idx sessionIndex, cat catalog, subs subscriptions, now time.Time) (worktreeUsage, []error, error) {
+	return buildUsageSessionsReport(wtPath, sessionsForWorktree(wtPath, wts, idx), cat, subs, now)
 }
 
 func buildUsageSessions(wtPath string, refs []sessionRef, cat catalog, subs subscriptions) (worktreeUsage, error) {
-	u, _, err := buildUsageSessionsReport(wtPath, refs, cat, subs)
+	u, _, err := buildUsageSessionsReport(wtPath, refs, cat, subs, nowFunc())
 	return u, err
 }
 
-func buildUsageSessionsReport(wtPath string, refs []sessionRef, cat catalog, subs subscriptions) (worktreeUsage, []error, error) {
-	subs, warnings := subs.forWorktree(wtPath)
-	sessions, loss := parseWorktreeSessions(refs, cat, subs)
+func buildUsageSessionsReport(wtPath string, refs []sessionRef, cat catalog, subs subscriptions, now time.Time) (worktreeUsage, []error, error) {
+	proofs := newProofCache(subs, wtPath)
+	sessions, loss := parseWorktreeSessions(refs, cat, proofs)
 	var u worktreeUsage
-	foldParsedSessions(&u, sessions)
+	foldParsedSessions(&u, sessions, now)
 	markPartial(&u, loss.lost)
-	return u, warnings, usageLossErr(loss.firstErr, loss.dropped)
+	return u, proofs.warnings, usageLossErr(loss.firstErr, loss.dropped)
+}
+
+// proofCache resolves the proof per session cwd: a metered settings file in a
+// session's own directory, or above it, voids that session's proof instead of
+// hiding behind the worktree root's clean verdict. A ref built without a cwd
+// falls back to the worktree root, so tests and callers that never index a cwd
+// keep the previous pricing.
+//
+// WHY memoized: one status run holds many sessions per cwd and each proof walks
+// the disk. The cache stores the resolved subscription per cwd; the worktree
+// root resolves through the same map, so a descendant cwd seeds the root
+// exactly once. Warnings leave through the worker sink (dedupeWarn), never via
+// a stored per-cwd slice, and the parent pass collapses overlap across
+// worktrees (see emitUsageResults).
+type proofCache struct {
+	base     subscriptions
+	wtPath   string
+	byCwd    map[string]subscriptions
+	warnings []error
+}
+
+func newProofCache(base subscriptions, wtPath string) *proofCache {
+	return &proofCache{base: base, wtPath: wtPath, byCwd: map[string]subscriptions{}}
+}
+
+func (c *proofCache) forRef(ref sessionRef) subscriptions {
+	return c.forCwd(ref.cwd)
+}
+
+func (c *proofCache) forCwd(cwd string) subscriptions {
+	if cwd == "" {
+		cwd = c.wtPath
+	}
+	if subs, ok := c.byCwd[cwd]; ok {
+		return subs
+	}
+	subs, warnings := c.base.forWorktree(cwd)
+	// Resolve the worktree root through the same map first: a descendant cwd
+	// sees the root's verdict even when no session ever touched the root, and
+	// the root seeds exactly once.
+	if cwd != c.wtPath {
+		root := c.forCwd(c.wtPath)
+		subs.claude = subs.claude && root.claude
+	}
+	// Only settings refusals fall back to list price, so only they carry the
+	// caveat. Record warnings keep their own cause verbatim.
+	for _, w := range warnings {
+		c.warnings = append(c.warnings, fmt.Errorf("%w; claude costs use list price", w))
+	}
+	c.byCwd[cwd] = subs
+	return subs
+}
+
+// sink returns the worker's dedupe sink: repeated identical warnings collapse
+// to one line per worker, so a large corrupt transcript stays memory-bound and
+// the parent pass (emitUsageResults) only handles overlap across worktrees.
+func (c *proofCache) sink() warnSink {
+	return dedupeWarn(func(err error) { c.warnings = append(c.warnings, err) })
 }
 
 // sessionsForWorktree returns the sessions whose cwd is the worktree or a
@@ -819,45 +880,125 @@ func deeperWorktree(cwd, root string, wts []worktree) bool {
 
 // parseWorktreeSessions reads every owned session, remembering unreadable files
 // and dropped records so the fold can taint the total.
-func parseWorktreeSessions(refs []sessionRef, cat catalog, subs subscriptions) ([]parsedSession, usageLoss) {
+func parseWorktreeSessions(refs []sessionRef, cat catalog, proofs *proofCache) ([]parsedSession, usageLoss) {
 	loss := newUsageLoss()
 	var sessions []parsedSession
 	for _, ref := range refs {
-		if s, ok := parseWorktreeSession(ref, cat, subs, &loss); ok {
+		if s, ok := parseWorktreeSession(ref, cat, proofs, &loss); ok {
 			sessions = append(sessions, s)
 		}
 	}
 	return sessions, loss
 }
 
-func parseWorktreeSession(ref sessionRef, cat catalog, subs subscriptions, loss *usageLoss) (parsedSession, bool) {
+func parseWorktreeSession(ref sessionRef, cat catalog, proofs *proofCache, loss *usageLoss) (parsedSession, bool) {
 	a, ok := agentByName(ref.harness)
 	if !ok || a.parseUsage == nil {
 		return parsedSession{}, false
 	}
-	parsed, err := readUsage(a, ref.path)
-	if err != nil {
-		// A bad file sorts anywhere, so record the loss now and taint the
-		// total after folding, when even a good session listed later in the
-		// walk has folded.
-		loss.fail(ref.harness, err)
+	parsed, ok := readSession(a, ref, loss)
+	if !ok {
 		return parsedSession{}, false
 	}
-	loss.recordDropped(ref.harness, parsed.dropped)
-	return parsedSession{harness: ref.harness, events: parsed.events, activity: parsed.activity, price: usagePricer(a, cat, subs)}, true
+	warn := proofs.sink()
+	// Sanitize before dedupe: a corrupt count must never win a slot or feed the fold.
+	sanitizeEvents(parsed.events, warn)
+	subs := sessionSubscriptions(ref, proofs)
+	price := usagePricer(a, cat, subs, warn)
+	return parsedSession{harness: ref.harness, events: parsed.events, activity: parsed.activity, price: price, proof: sessionProof(ref, subs)}, true
 }
 
-func foldParsedSessions(u *worktreeUsage, sessions []parsedSession) {
+// readSession reads one session file and records any loss: an unreadable file
+// sorts anywhere, so the loss is tainted after the fold joins every session;
+// dropped records are the parse's own disclosure count.
+func readSession(a agent, ref sessionRef, loss *usageLoss) (sessionParse, bool) {
+	parsed, err := readUsage(a, ref.path)
+	if err != nil {
+		loss.fail(ref.harness, err)
+		return sessionParse{}, false
+	}
+	loss.recordDropped(ref.harness, parsed.dropped)
+	return parsed, true
+}
+
+// sessionSubscriptions resolves the proof for one session's harness: Claude
+// refines the base proof per worktree repo; Pi uses the base grant.
+func sessionSubscriptions(ref sessionRef, proofs *proofCache) subscriptions {
+	if ref.harness == claudeAgent.name {
+		return proofs.forRef(ref)
+	}
+	return proofs.base
+}
+
+// sessionProof is one session's per-event coverage proof. It consults the
+// event's own provider and timestamp, so transcript placement cannot decide
+// whether a subscription proves a charge.
+func sessionProof(ref sessionRef, subs subscriptions) coveredProof {
+	return func(e usageEvent) bool {
+		return subs.coverage(ref.harness, e.provider, e.at) != coverageNone
+	}
+}
+
+// sanitizeEvents rejects corrupt token and web-search counts before the fold
+// reads them, and discloses corrupt text figures (a non-string Pi child model, a
+// non-string Claude service_tier) once per cause. A sentinel model becomes the
+// established "unknown" fallback label instead of a garbage name — before any
+// warning names it, so a corrupt-count warning never prints the raw sentinel;
+// a sentinel tier stays unknown (ratesFor has no match) but is now named
+// instead of silent. A corrupt web-search count warns here even when no catalog
+// can resolve the event, so a missing catalog never suppresses the disclosure
+// ; the pricing path warns with identical text, which the per-run dedupe
+// collapses to one line. A rejected self-priced Pi cost warns here once per
+// cause without mutating the event, so a bad price in a forked transcript is
+// disclosed before the duplicate election picks the winning copy unchanged; the
+// winner itself still warns at pricing with the same text, which the per-run
+// dedupe collapses to one line.
+func sanitizeEvents(events []usageEvent, warn warnSink) {
+	modelWarned := false
+	tierWarned := false
+	costWarned := map[string]bool{}
+	for i := range events {
+		model := events[i].model
+		if model == unreadableText {
+			if !modelWarned {
+				doWarnSink(warn, fmt.Errorf("model figure unreadable; reported as unknown"))
+				modelWarned = true
+			}
+			model = "unknown"
+			events[i].model = model
+		}
+		events[i].tokens = sanitizeTokens(events[i].tokens, model, warn)
+		if cause := invalidCount(events[i].webSearch); cause != "" {
+			doWarnSink(warn, countCauseError(model, "webSearch", cause))
+		}
+		if events[i].tier == unreadableText {
+			if !tierWarned {
+				doWarnSink(warn, fmt.Errorf("service_tier figure unreadable; tier stays unknown"))
+				tierWarned = true
+			}
+		}
+		if events[i].cost != nil {
+			if cause := invalidCost(*events[i].cost); cause != "" && !costWarned[cause] {
+				costWarned[cause] = true
+				doWarnSink(warn, fmt.Errorf("cost.total: %s", cause))
+			}
+		}
+	}
+}
+
+func foldParsedSessions(u *worktreeUsage, sessions []parsedSession, now time.Time) {
 	lists := make([][]usageEvent, len(sessions))
+	proofs := make([]coveredProof, len(sessions))
 	for i, s := range sessions {
 		lists[i] = s.events
+		proofs[i] = s.proof
 	}
 	// Spans fold the original events; only the billed winners carry cost. This
 	// keeps activity time independent of the session order and of what dedupe
 	// removes from a shared transcript.
-	billed := dedupeKeyedEvents(lists)
+	billed := dedupeKeyedEvents(lists, proofs)
 	for i, s := range sessions {
-		u.addBilledSession(s.harness, s.events, s.activity, billed[i], s.price)
+		u.addBilledSession(s.harness, s.events, s.activity, billed[i], s.price, now)
 	}
 }
 
@@ -921,14 +1062,16 @@ func readUsage(a agent, path string) (sessionParse, error) {
 // so a covered event never shows a bare $0.00 beside a metered list per tier.
 // API-key and otherwise metered usage still bills, so a proven $0 never claims
 // the whole invoice.
-func usagePricer(a agent, cat catalog, subs subscriptions) func(usageEvent) pricedEvent {
+func usagePricer(a agent, cat catalog, subs subscriptions, warn warnSink) func(usageEvent) pricedEvent {
 	return func(e usageEvent) pricedEvent {
-		p := listPrice(a, cat, e)
+		p := listPrice(a, cat, e, warn)
 		switch subs.coverage(a.name, e.provider, e.at) {
 		case coverageAllowance:
 			coverTiers(&p, knownZero)
 		case coverageOveragePossible:
-			if (p.total.list.known() && p.total.list.amount != 0) || e.tokens.total() > 0 || e.webSearch > 0 || e.cost != nil {
+			// A nonzero search count is spend evidence even when rejected: an
+			// unknown list price must not yield an exact zero.
+			if (p.total.list.known() && p.total.list.amount != 0) || e.tokens.hasUsageEvidence() || e.webSearch != 0 || e.cost != nil {
 				coverTiers(&p, estimatedZero)
 			} else {
 				coverTiers(&p, knownZero)
@@ -959,12 +1102,12 @@ func coverTiers(p *pricedEvent, zero func() money) {
 // harness-supplied cost wins, a catalog-rated token record is priced from the
 // catalog, and everything else (including a catalog-rated record with no
 // catalog) is unknown.
-func listPrice(a agent, cat catalog, e usageEvent) pricedEvent {
+func listPrice(a agent, cat catalog, e usageEvent, warn warnSink) pricedEvent {
 	switch {
-	case e.cost != nil:
-		return piPrice(e)
+	case e.cost != nil || e.tierCost != nil:
+		return piPrice(e, warn)
 	case a.catalogRated && cat != nil:
-		return cat.price(e)
+		return cat.priceWith(e, warn)
 	default:
 		return unpriced()
 	}
@@ -972,15 +1115,20 @@ func listPrice(a agent, cat catalog, e usageEvent) pricedEvent {
 
 // piPrice prices a self-reported Pi event: the record carries the total and,
 // in modern sessions, the per-class split. An older record with only the total
-// leaves every tier absent rather than inventing a breakdown.
-func piPrice(e usageEvent) pricedEvent {
+// leaves every tier absent rather than inventing a breakdown, and a record with
+// only the split leaves the total unknown. A corrupt figure is unknown: a
+// negative subtracts money and an overflow reads as a real bill.
+func piPrice(e usageEvent, warn warnSink) pricedEvent {
 	var p pricedEvent
-	p.total.list.addKnown(*e.cost)
+	if e.cost != nil {
+		addReportedCost(&p.total.list, *e.cost, "cost.total", warn)
+	} else {
+		// A record that reports only its per-class split states no total, so the
+		// total stays unknown instead of borrowing a partial breakdown.
+		p.total.list.addUnknown()
+	}
 	if c := e.tierCost; c != nil {
-		addKnownClass(&p.tiers[tierInput].list, c.input)
-		addKnownClass(&p.tiers[tierOutput].list, c.output)
-		addKnownClass(&p.tiers[tierCacheRead].list, c.cacheRead)
-		addKnownClass(&p.tiers[tierCacheWrite].list, c.cacheWrite)
+		addReportedTiers(&p.tiers, c, warn)
 	}
 	for i := range p.tiers {
 		p.tiers[i].billed = p.tiers[i].list
@@ -989,11 +1137,20 @@ func piPrice(e usageEvent) pricedEvent {
 	return p
 }
 
+// addReportedTiers records a harness-reported per-class price. Each field names
+// itself so a rejected figure discloses the class it voided.
+func addReportedTiers(tiers *tokenTiers, c *tokenCosts, warn warnSink) {
+	addKnownClass(&tiers[tierInput].list, c.input, "tierCost.input", warn)
+	addKnownClass(&tiers[tierOutput].list, c.output, "tierCost.output", warn)
+	addKnownClass(&tiers[tierCacheRead].list, c.cacheRead, "tierCost.cacheRead", warn)
+	addKnownClass(&tiers[tierCacheWrite].list, c.cacheWrite, "tierCost.cacheWrite", warn)
+}
+
 // addKnownClass records a harness-reported class price. A nil field leaves the
 // tier untouched, which reads as absent, never as a real zero.
-func addKnownClass(m *money, v *float64) {
+func addKnownClass(m *money, v *float64, field string, warn warnSink) {
 	if v != nil {
-		m.addKnown(*v)
+		addReportedCost(m, *v, field, warn)
 	}
 }
 

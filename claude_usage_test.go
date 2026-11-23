@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -49,7 +51,7 @@ func keptBilled(events []usageEvent, billed []bool) []usageEvent {
 // the surviving billed events, so the tests pin the dedupe contract, not its
 // plumbing.
 func dedupeOne(sessions ...[]usageEvent) []usageEvent {
-	billed := dedupeKeyedEvents(sessions)
+	billed := dedupeKeyedEvents(sessions, nil)
 	var out []usageEvent
 	for i, s := range sessions {
 		out = append(out, keptBilled(s, billed[i])...)
@@ -97,7 +99,7 @@ func TestClaudeUsageDedupeAcrossSessions(t *testing.T) {
 		{event("m1", 100), event("m2", 10)},
 		{event("m1", 400)},
 	}
-	billed := dedupeKeyedEvents(sessions)
+	billed := dedupeKeyedEvents(sessions, nil)
 	a, b := keptBilled(sessions[0], billed[0]), keptBilled(sessions[1], billed[1])
 	if len(a) != 1 {
 		t.Fatalf("session a kept %d events, want 1 (m2 only): %+v", len(a), a)
@@ -118,11 +120,28 @@ func TestClaudeDedupeWebSearchBreaksTokenTie(t *testing.T) {
 		return usageEvent{at: at(0), key: "m1:r1", model: "m", tokens: promptTokens{output: 10}, webSearch: web}
 	}
 	sessions := [][]usageEvent{{mk(1)}, {mk(3)}}
-	billed := dedupeKeyedEvents(sessions)
+	billed := dedupeKeyedEvents(sessions, nil)
 	kept := keptBilled(sessions[0], billed[0])
 	kept = append(kept, keptBilled(sessions[1], billed[1])...)
 	if len(kept) != 1 || kept[0].webSearch != 3 {
 		t.Fatalf("kept = %+v, want the webSearch=3 record alone", kept)
+	}
+}
+
+// TestClaudeCorruptWebSearchDuplicateLosesToValidSibling pins that a corrupt
+// web-search count must not win the token tie and taint the turn as unknown; the
+// valid sibling keeps the slot and its catalog-priced web search.
+func TestClaudeCorruptWebSearchDuplicateLosesToValidSibling(t *testing.T) {
+	line := func(web int64) string {
+		return fmt.Sprintf(`{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","requestId":"r1","message":{"id":"m1","model":"m","usage":{"input_tokens":10,"server_tool_use":{"web_search_requests":%d}}}}`, web)
+	}
+	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(line(1e13) + "\n" + line(1) + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := dedupeOne(parsed.events)
+	if len(kept) != 1 || kept[0].webSearch != 1 {
+		t.Fatalf("kept = %+v, want the webSearch=1 record alone", kept)
 	}
 }
 
@@ -330,5 +349,110 @@ func TestClaudeOversizedNonBilledRecordsDoNotDrop(t *testing.T) {
 	}
 	if len(parsed.events) != 1 {
 		t.Fatalf("events = %d, want the good record", len(parsed.events))
+	}
+}
+
+// claudeSiblingRates prices every class at a distinct, readable figure, so a
+// test can tell which classes a rejected one took down with it.
+const claudeSiblingRates = `{"m":{"input_cost_per_token":0.01,"output_cost_per_token":0.02,` +
+	`"cache_read_input_token_cost":0.003,"cache_creation_input_token_cost":0.03}}`
+
+// claudeCatalogStatus prices one Claude turn through the real CLI against a
+// test-written catalog, returning the model row and the run's stderr.
+func claudeCatalogStatus(t *testing.T, rates, usage string) (map[string]any, string) {
+	t.Helper()
+	env := sandbox(t)
+	pinClock(t)
+	path := filepath.Join(env.Home, "rates.json")
+	writeFile(t, path, rates, 0o644)
+	repo := nativeRepo(t)
+	seedClaudeModelSession(t, repo, "turn", "m", usage)
+	stdout, stderr, rc := runWTM(t, repo, []string{ratesEnv + "=" + path}, "status", "--json")
+	if rc != 0 {
+		t.Fatalf("status exit %d: %s", rc, stderr)
+	}
+	return statusModel(t, statusRows(t, stdout)[0], claudeAgent.name, "m"), stderr
+}
+
+// TestClaudeUnreadableFigureKeepsSiblings pins  for Claude: a count this
+// build cannot read voids only its own class. The turn stays billed, its
+// readable counts keep their exact prices, and one warning names the field.
+func TestClaudeUnreadableFigureKeepsSiblings(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage, cause string
+		input              any
+	}{
+		{"int-overflow", `{"input_tokens":9223372036854775808,"output_tokens":7,"cache_read_input_tokens":100}`, "token input: unreadable", nil},
+		{"int-fraction", `{"input_tokens":1.5,"output_tokens":7,"cache_read_input_tokens":100}`, "token input: unreadable", nil},
+		{"search-fraction", `{"input_tokens":100,"output_tokens":7,"server_tool_use":{"web_search_requests":1.5}}`, "webSearch: unreadable", float64(100)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model, stderr := claudeCatalogStatus(t, claudeSiblingRates, tc.usage)
+			if n := strings.Count(stderr, tc.cause); n != 1 {
+				t.Errorf("warnings for %q = %d, want 1:\n%s", tc.cause, n, stderr)
+			}
+			// A rejected figure leaves its cost unknown: an exact total built
+			// without that class would read as the real invoice.
+			if model["cost"] != nil {
+				t.Errorf("model cost = %v, want null", model["cost"])
+			}
+			if got := statusTier(t, model, "input")["tokens"]; got != tc.input {
+				t.Errorf("input tier tokens = %v, want %v", got, tc.input)
+			}
+			if out := statusTier(t, model, "output"); out["tokens"] != float64(7) || out["cost"] != 0.14 {
+				t.Errorf("output tier = %+v, want the readable 7 tokens at 0.14", out)
+			}
+		})
+	}
+}
+
+// TestClaudeCacheWriteSplitContradiction pins that a lifetime breakdown that
+// outruns the record's own flat cache_creation total contradicts it, so no
+// write figure of that record is trusted: the tier reads unknown, the cause
+// warns once, and the total never reads exact. A breakdown with no stated total
+// states no contradiction, so it keeps pricing exactly.
+func TestClaudeCacheWriteSplitContradiction(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage string
+		warns       bool
+		tokens      any
+		write, cost any
+	}{
+		{
+			name:   "contradiction",
+			usage:  `{"input_tokens":100,"output_tokens":10,"cache_creation_input_tokens":500,"cache_creation":{"ephemeral_5m_input_tokens":700,"ephemeral_1h_input_tokens":0}}`,
+			warns:  true,
+			tokens: nil,
+			write:  nil,
+			cost:   nil,
+		},
+		{
+			name:   "absent-total",
+			usage:  `{"input_tokens":100,"output_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":700,"ephemeral_1h_input_tokens":0}}`,
+			tokens: float64(700),
+			write:  21.0,
+			cost:   22.2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := 0
+			if tc.warns {
+				want = 1
+			}
+			model, stderr := claudeCatalogStatus(t, claudeSiblingRates, tc.usage)
+			if n := strings.Count(stderr, "cache write split"); n != want {
+				t.Errorf("contradiction warnings = %d, want %d:\n%s", n, want, stderr)
+			}
+			if got := statusTier(t, model, "cacheWrite"); got["tokens"] != tc.tokens || got["cost"] != tc.write {
+				t.Errorf("cacheWrite tier = %+v, want tokens %v cost %v", got, tc.tokens, tc.write)
+			}
+			if model["cost"] != tc.cost {
+				t.Errorf("model cost = %v, want %v", model["cost"], tc.cost)
+			}
+			// The classes the contradiction does not touch keep their exact price.
+			if in := statusTier(t, model, "input"); in["cost"] != float64(1) {
+				t.Errorf("input tier = %+v, want the valid sibling to keep its 1", in)
+			}
+		})
 	}
 }

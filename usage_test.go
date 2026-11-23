@@ -3,6 +3,7 @@ package main
 import (
 	"math/rand"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -186,6 +187,69 @@ func TestUnionDuration(t *testing.T) {
 				t.Errorf("unionDuration = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestUnionDurationSaturatesOverflow pins that two spans whose times lie far
+// outside the supported range each saturate Time.Sub to the maximum duration,
+// and their sum must saturate instead of wrapping negative (which projected to
+// an exact zero).
+func TestUnionDurationSaturatesOverflow(t *testing.T) {
+	far1 := span{start: time.Date(1000, 1, 1, 0, 0, 0, 0, time.UTC), end: time.Date(1300, 1, 1, 0, 0, 0, 0, time.UTC)}
+	far2 := span{start: time.Date(1400, 1, 1, 0, 0, 0, 0, time.UTC), end: time.Date(1700, 1, 1, 0, 0, 0, 0, time.UTC)}
+	got := unionDuration([]span{far1, far2})
+	if got <= 0 {
+		t.Fatalf("unionDuration = %v, want a saturated positive total (never a wrapped zero)", got)
+	}
+	if seconds(got) <= 0 {
+		t.Fatalf("seconds = %d, want positive: overflow must not project to zero", seconds(got))
+	}
+}
+
+// TestReviewAmounts pins that the fixed-point cost rounding must never wrap a
+// representable float into a wrong exact figure. A total above the int64
+// fixed-point range keeps its exact float value instead of wrapping to a huge
+// negative, and still renders and serializes as a known positive number.
+func TestReviewAmounts(t *testing.T) {
+	for _, v := range []float64{1e13, 1e15, 9e18} {
+		if got := roundCost(v); got != v {
+			t.Errorf("roundCost(%g) = %g, want the unchanged exact float", v, got)
+		}
+	}
+	var m money
+	m.addKnown(1e15)
+	if m.cell() == "-" || strings.HasPrefix(m.cell(), "-$") || m.jsonValue() == nil {
+		t.Errorf("large money = %q / %v, want a known positive figure", m.cell(), m.jsonValue())
+	}
+}
+
+// TestReviewNoCatalogSearch pins f3: a corrupt web-search count warns during
+// sanitization, before any rate lookup, so a missing catalog cannot suppress the
+// disclosure.
+func TestReviewNoCatalogSearch(t *testing.T) {
+	events := []usageEvent{{model: "m", webSearch: -3}}
+	var warns []string
+	sanitizeEvents(events, func(err error) { warns = append(warns, err.Error()) })
+	if len(warns) != 1 || !strings.Contains(warns[0], "webSearch") || !strings.Contains(warns[0], "negative") {
+		t.Errorf("warnings = %q, want one webSearch negative warning", warns)
+	}
+}
+
+// TestReviewSum pins that aggregates accumulate without wrapping and keep the
+// unknown taint sticky when any contributor is unpriced.
+func TestReviewSum(t *testing.T) {
+	var p costPair
+	for i := 0; i < 1000; i++ {
+		var m money
+		m.addKnown(1e6)
+		p.list.add(m)
+	}
+	if got := *p.list.jsonValue(); got != 1e9 {
+		t.Errorf("sum = %g, want 1e9", got)
+	}
+	p.addUnknown()
+	if p.list.jsonValue() != nil {
+		t.Errorf("unknown taint must stick: %v", p.list.jsonValue())
 	}
 }
 
@@ -374,8 +438,8 @@ func TestFoldEventUnbilledKeepsSpanNotCost(t *testing.T) {
 		c.list.addKnown(1)
 		return pricedEvent{total: c}
 	}
-	prev := foldEvent(per, &h, usageEvent{at: at(0), model: "m"}, false, "", price)
-	foldEvent(per, &h, usageEvent{at: at(10), model: "m"}, false, prev, price)
+	prev := foldEvent(per, &h, usageEvent{at: at(0), model: "m"}, false, "", price, nil)
+	foldEvent(per, &h, usageEvent{at: at(10), model: "m"}, false, prev, price, nil)
 	if got := per["m"].active(); got != 10*time.Second {
 		t.Errorf("model active = %v, want 10s", got)
 	}
@@ -417,7 +481,7 @@ func TestFoldSessionShortMaskBills(t *testing.T) {
 		return m
 	})
 	var u worktreeUsage
-	u.addBilledSession("pi", events, nil, []bool{false}, price)
+	u.addBilledSession("pi", events, nil, []bool{false}, price, nowFunc())
 	if got := u.cost().cell(); got != "$2.00" {
 		t.Errorf("cost = %q, want $2.00 (short mask bills the tail)", got)
 	}
@@ -432,13 +496,46 @@ func TestFoldSessionShortMaskBills(t *testing.T) {
 func TestDedupeEqualScoresElectFirst(t *testing.T) {
 	a := usageEvent{at: at(1), model: "m", key: "k", cost: fptr(1)}
 	b := usageEvent{at: at(2), model: "m", key: "k", cost: fptr(1)}
-	masks := dedupeKeyedEvents([][]usageEvent{{a}, {b}})
+	masks := dedupeKeyedEvents([][]usageEvent{{a}, {b}}, nil)
 	if !masks[0][0] || masks[1][0] {
 		t.Fatalf("masks = %v, want the first equal copy billed only", masks)
 	}
-	same := dedupeKeyedEvents([][]usageEvent{{a, b}})
+	same := dedupeKeyedEvents([][]usageEvent{{a, b}}, nil)
 	if !same[0][0] || same[0][1] {
 		t.Fatalf("same-session masks = %v, want the first equal copy billed only", same)
+	}
+}
+
+// TestReviewDuplicate pins that when a larger covered duplicate of a billed turn
+// exists beside a metered copy, the metered copy must still win the slot, so the
+// bill stays at list price. The election must preserve the metered evidence
+// independently of which copy supplies the winning token count, in either
+// session order.
+func TestReviewDuplicate(t *testing.T) {
+	covered := func(usageEvent) bool { return true }
+	metered := func(usageEvent) bool { return false }
+	coveredTurn := usageEvent{at: at(1), model: "m", key: "k", tokens: promptTokens{input: 100001}}
+	meteredTurn := usageEvent{at: at(2), model: "m", key: "k", tokens: promptTokens{input: 100000}}
+	cases := []struct {
+		name     string
+		sessions [][]usageEvent
+		proofs   []coveredProof
+		billed   int // session index that must carry the charge
+	}{
+		{"metered-first", [][]usageEvent{{meteredTurn}, {coveredTurn}}, []coveredProof{metered, covered}, 0},
+		{"covered-first", [][]usageEvent{{coveredTurn}, {meteredTurn}}, []coveredProof{covered, metered}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			masks := dedupeKeyedEvents(tc.sessions, tc.proofs)
+			for si, mask := range masks {
+				for ei, billed := range mask {
+					if want := si == tc.billed; billed != want {
+						t.Errorf("session %d event %d billed = %v, want %v", si, ei, billed, want)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -487,7 +584,7 @@ func TestCostPairReasons(t *testing.T) {
 // displayed tiers, so the sub-rows a reader sees are the record's own numbers.
 func TestPiTierBreakdownFolds(t *testing.T) {
 	var u worktreeUsage
-	price := usagePricer(agent{name: "pi"}, nil, subscriptions{})
+	price := usagePricer(agent{name: "pi"}, nil, subscriptions{}, nil)
 	u.addSession("pi", []usageEvent{{
 		at: at(0), model: "m", cost: fptr(0.30),
 		tokens:   promptTokens{input: 1000, output: 500, cacheRead: 2000, cacheWrite5m: 100},
@@ -702,7 +799,7 @@ func TestDedupeRandomOrder(t *testing.T) {
 			sessions[si] = slices.Clone(sessions[si])
 			rng.Shuffle(len(sessions[si]), func(i, j int) { sessions[si][i], sessions[si][j] = sessions[si][j], sessions[si][i] })
 		}
-		masks := dedupeKeyedEvents(sessions)
+		masks := dedupeKeyedEvents(sessions, nil)
 		billed := map[string]int{}
 		for si, events := range sessions {
 			for ei, e := range events {
@@ -739,7 +836,7 @@ func TestTokensAccrueOnlyForBilled(t *testing.T) {
 		{at: at(0), model: "m", cost: fptr(1), tokens: promptTokens{input: 100}},
 		{at: at(10), model: "m", cost: fptr(1), tokens: promptTokens{input: 100}},
 	}
-	u.addBilledSession("pi", events, nil, []bool{true, false}, price)
+	u.addBilledSession("pi", events, nil, []bool{true, false}, price, nowFunc())
 	m := u.harnesses["pi"].models["m"]
 	if got := m.tokens.input; got != 100 {
 		t.Errorf("billed tokens = %d, want 100", got)
@@ -753,7 +850,7 @@ func TestTokensAccrueOnlyForBilled(t *testing.T) {
 // total, never a tier, so tiers can sum below the model total.
 func TestWebSearchJoinsTotalNotTiers(t *testing.T) {
 	c := testRates(t)
-	p := c.price(usageEvent{model: "m1", tier: "standard", webSearch: 2})
+	p := c.priceWith(usageEvent{model: "m1", tier: "standard", webSearch: 2}, nil)
 	if !p.total.list.known() || p.total.list.amount == 0 {
 		t.Fatalf("web-search total must be known nonzero, got %+v", p.total.list)
 	}
@@ -771,7 +868,7 @@ func TestWebSearchJoinsTotalNotTiers(t *testing.T) {
 func TestDedupeCostPresenceBeatsTokenSize(t *testing.T) {
 	a := usageEvent{at: at(1), model: "m", key: "k", cost: fptr(2), tokens: promptTokens{input: 100}}
 	b := usageEvent{at: at(2), model: "m", key: "k", tokens: promptTokens{input: 5000}}
-	masks := dedupeKeyedEvents([][]usageEvent{{a}, {b}})
+	masks := dedupeKeyedEvents([][]usageEvent{{a}, {b}}, nil)
 	if !masks[0][0] || masks[1][0] {
 		t.Fatalf("masks = %v, want the cost-bearing copy billed only", masks)
 	}

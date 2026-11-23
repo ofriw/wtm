@@ -267,7 +267,7 @@ func TestPiEventKeyIgnoresProvider(t *testing.T) {
 		t.Errorf("spawn batch index must keep equal children distinct")
 	}
 	lists := [][]usageEvent{{a}, {b}}
-	masks := dedupeKeyedEvents(lists)
+	masks := dedupeKeyedEvents(lists, nil)
 	if n := len(keptBilled(lists[0], masks[0])) + len(keptBilled(lists[1], masks[1])); n != 1 {
 		t.Errorf("forked repeat kept %d events, want 1", n)
 	}
@@ -308,7 +308,7 @@ func TestPiRecordIdentityUsesID(t *testing.T) {
 		t.Errorf("distinct ids share key %q; dedupe would drop one", events[0].key)
 	}
 	lists := [][]usageEvent{{events[0]}, {events[0]}}
-	masks := dedupeKeyedEvents(lists)
+	masks := dedupeKeyedEvents(lists, nil)
 	if n := len(keptBilled(lists[0], masks[0])) + len(keptBilled(lists[1], masks[1])); n != 1 {
 		t.Errorf("forked record kept %d events, want 1", n)
 	}
@@ -602,7 +602,7 @@ func TestPiSameIDCostRevisionBillsOnce(t *testing.T) {
 		t.Fatalf("same id keys differ: %q vs %q", a.key, b.key)
 	}
 	lists := [][]usageEvent{{a}, {b}}
-	masks := dedupeKeyedEvents(lists)
+	masks := dedupeKeyedEvents(lists, nil)
 	kept := append(keptBilled(lists[0], masks[0]), keptBilled(lists[1], masks[1])...)
 	if len(kept) != 1 {
 		t.Fatalf("kept %d events, want 1", len(kept))
@@ -624,7 +624,7 @@ func TestPiSameIDNilVsZeroBillsOnce(t *testing.T) {
 		t.Fatalf("same id keys differ: %q vs %q", a.key, b.key)
 	}
 	lists := [][]usageEvent{{a}, {b}}
-	masks := dedupeKeyedEvents(lists)
+	masks := dedupeKeyedEvents(lists, nil)
 	kept := append(keptBilled(lists[0], masks[0]), keptBilled(lists[1], masks[1])...)
 	if len(kept) != 1 {
 		t.Fatalf("kept %d events, want 1", len(kept))
@@ -646,7 +646,7 @@ func TestPiSameIDDifferentTimestampBillsTwice(t *testing.T) {
 		t.Fatalf("same id but different time share key %q; one turn would drop", a.key)
 	}
 	lists := [][]usageEvent{{a}, {b}}
-	masks := dedupeKeyedEvents(lists)
+	masks := dedupeKeyedEvents(lists, nil)
 	kept := append(keptBilled(lists[0], masks[0]), keptBilled(lists[1], masks[1])...)
 	if len(kept) != 2 {
 		t.Fatalf("kept %d events, want 2 (distinct times bill separately)", len(kept))
@@ -733,9 +733,9 @@ func TestPiSpawnWithoutIDCrossSessionBillsOnce(t *testing.T) {
 		}
 		return m
 	})
-	billed := dedupeKeyedEvents([][]usageEvent{a, b})
-	u.addBilledSession("pi", a, nil, billed[0], price)
-	u.addBilledSession("pi", b, nil, billed[1], price)
+	billed := dedupeKeyedEvents([][]usageEvent{a, b}, nil)
+	u.addBilledSession("pi", a, nil, billed[0], price, nowFunc())
+	u.addBilledSession("pi", b, nil, billed[1], price, nowFunc())
 	if got := u.cost().cell(); got != "$0.30" {
 		t.Fatalf("cost = %q, want $0.30 (cross-session spawn bills once)", got)
 	}
@@ -815,6 +815,9 @@ func TestPiOversizedNonBilledRecordsDoNotDrop(t *testing.T) {
 	}
 }
 
+// TestOversizedPiBillable pins the classifier for a discarded record. A body
+// may hold any text, so only structured evidence bills: escaped words must not,
+// but visible usage, spawn details, or an unknown type must.
 // TestOversizedPiMessageBillable pins the classifier for a discarded message.
 // A tool result body may contain any text, so only structured evidence counts:
 // escaped body words must not bill, but a real `usage` field must, because

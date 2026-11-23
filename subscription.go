@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,31 +101,46 @@ func readPiOAuth(path string) (map[string]bool, error) {
 // binary does. A suffix-independent .config.json under the config dir wins;
 // otherwise the file is .claude<suffix>.json beside CLAUDE_CONFIG_DIR or HOME.
 // The suffix is "-custom-oauth" when a custom OAuth endpoint is configured.
-// It returns false when neither HOME nor the config dir is resolvable.
-func claudeAccountFile() (string, bool) {
-	if primary, ok := claudePrimaryAccountFile(); ok {
-		return primary, true
+// ok is false when neither HOME nor the config dir is resolvable, and err
+// reports a stat failure that makes the proof unknowable.
+func claudeAccountFile() (path string, ok bool, err error) {
+	if primary, ok, err := claudePrimaryAccountFile(); ok || err != nil {
+		return primary, ok, err
 	}
 	base := os.Getenv("CLAUDE_CONFIG_DIR")
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", false
+			return "", false, nil
 		}
 		base = home
 	}
-	return filepath.Join(base, ".claude"+claudeAccountSuffix()+".json"), true
+	return filepath.Join(base, ".claude"+claudeAccountSuffix()+".json"), true, nil
 }
 
 // claudePrimaryAccountFile is the config-dir .config.json, which wins over the
-// suffixed file whenever it exists.
-func claudePrimaryAccountFile() (string, bool) {
+// suffixed file whenever it exists. An absent file is a normal signed-out state;
+// any other stat failure makes existence unknowable, so the caller must not fall
+// back to the other path and claim a proof the machine cannot support.
+func claudePrimaryAccountFile() (string, bool, error) {
 	configDir := claudeAgent.configDir()
 	if configDir == "" {
-		return "", false
+		return "", false, nil
 	}
 	primary := filepath.Join(configDir, ".config.json")
-	return primary, exists(primary)
+	_, err := os.Lstat(primary)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("claude account %s: %w", primary, err)
+	}
+	// Lstat distinguishes an absent directory entry from a dangling symlink;
+	// the latter is present but cannot prove which account Claude reads.
+	if _, err := os.Stat(primary); err != nil {
+		return "", false, fmt.Errorf("claude account %s: %w", primary, err)
+	}
+	return primary, true, nil
 }
 
 // claudeAccountSuffix marks the account file a custom OAuth endpoint writes.
@@ -203,7 +219,12 @@ func readClaudeSubscription() (bool, time.Time, bool, error) {
 	if metered {
 		return false, time.Time{}, false, nil
 	}
-	path, ok := claudeAccountFile()
+	path, ok, err := claudeAccountFile()
+	if err != nil {
+		// An unknowable account voids the proof: claiming coverage would hide
+		// real money. loadUsage discloses the cause.
+		return false, time.Time{}, false, err
+	}
 	if !ok {
 		return false, time.Time{}, false, nil
 	}

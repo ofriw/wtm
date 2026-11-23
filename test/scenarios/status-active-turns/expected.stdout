@@ -45,7 +45,7 @@ no agent usage recorded
         "models": {
           "deepseek-flash": {
             "cost": 1.75,
-            "activeSeconds": 3000
+            "activeSeconds": 3060
           }
         }
       }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -1105,7 +1106,7 @@ func TestParentScopeKillSwitchWarnsOncePerRun(t *testing.T) {
 	t.Setenv(ratesEnv, ratesPath)
 	ws := workspace{wts: []worktree{{Path: dir}}, idx: idx}
 	for run := 1; run <= 2; run++ {
-		errOut := captureStderr(t, func() { _ = ws.loadUsage(nil) })
+		errOut := captureStderr(t, func() { _ = ws.loadUsage(nil, nowFunc()) })
 		if got := strings.Count(errOut, "WTM_CLAUDE_PARENT_SCOPE=0"); got != 1 {
 			t.Fatalf("run %d warnings = %d, want exactly 1 per run:\n%s", run, got, errOut)
 		}
@@ -1150,7 +1151,7 @@ func TestClaudeAccountOversizedWarns(t *testing.T) {
 	writeFile(t, ratesPath, testCatalog, 0o644)
 	t.Setenv(ratesEnv, ratesPath)
 	ws := workspace{wts: []worktree{{Path: dir}}, idx: idx}
-	errOut := captureStderr(t, func() { _ = ws.loadUsage(nil) })
+	errOut := captureStderr(t, func() { _ = ws.loadUsage(nil, nowFunc()) })
 	if !strings.Contains(errOut, "67108865") || !strings.Contains(errOut, "list price") {
 		t.Fatalf("warning must name the size and the list-price fallback:\n%s", errOut)
 	}
@@ -1293,8 +1294,8 @@ func TestStatusWarnsOnRefusedProjectSettings(t *testing.T) {
 
 // TestUsageReportCarriesWorktreeWarnings pins the disclosure seam: a refused
 // project settings file voids the Claude proof (list price) and must reach status
-// as a warning through buildUsageForReport's slice. Dropping or corrupting that
-// slice must fail here, not show up as an unexplained bill.
+// as a warning through buildUsageForReportAt's slice. Dropping or corrupting
+// that slice must fail here, not show up as an unexplained bill.
 func TestUsageReportCarriesWorktreeWarnings(t *testing.T) {
 	sandbox(t)
 	dir, idx := claudeWorktreeDir(t)
@@ -1303,7 +1304,7 @@ func TestUsageReportCarriesWorktreeWarnings(t *testing.T) {
 	if err := os.MkdirAll(settings, 0o700); err != nil {
 		t.Fatalf("seed settings directory: %v", err)
 	}
-	u, warnings, err := buildUsageForReport(dir, []worktree{{Path: dir}}, idx, testRates(t), loadSubscriptions(true))
+	u, warnings, err := buildUsageForReportAt(dir, []worktree{{Path: dir}}, idx, testRates(t), loadSubscriptions(true), nowFunc())
 	if err != nil {
 		t.Fatalf("buildUsageForReport: %v", err)
 	}
@@ -1315,5 +1316,54 @@ func TestUsageReportCarriesWorktreeWarnings(t *testing.T) {
 	}
 	if got := u.cost().cell(); got != "$0.10" {
 		t.Fatalf("cost = %q, want the list price $0.10 (the proof must be voided)", got)
+	}
+}
+
+// TestClaudeAccountStatErrorVoidsProof pins F7: an unknowable account file must
+// not fall back to the other path and invent a proof. A self-referential link
+// makes stat fail with a cause other than "missing", which is the case a plain
+// existence check hides.
+func TestClaudeAccountStatErrorVoidsProof(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink loops need privileges on Windows")
+	}
+	env := sandbox(t)
+	link := filepath.Join(env.ClaudeDir, ".config.json")
+	if err := os.Symlink(".config.json", link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	// A legacy-file proof must not be claimed when the primary is unknowable.
+	writeClaudeAccount(t, "stripe_subscription", "2025-01-01T00:00:00Z")
+	subs := loadSubscriptions(true)
+	if subs.claude {
+		t.Fatal("an unstatable account file must not prove a subscription")
+	}
+	if subs.claudeErr == nil || !strings.Contains(subs.claudeErr.Error(), ".config.json") {
+		t.Fatalf("claudeErr = %v, want the account stat failure", subs.claudeErr)
+	}
+}
+
+// TestClaudeAccountDanglingSymlinkVoidsProof pins the ENOENT-distinction rule:
+// a present primary entry whose symlink target is missing is not absence. It is
+// an unreadable account, so it voids the proof instead of letting the fallback
+// prove a subscription. The loop (ELOOP) case stays covered by
+// TestClaudeAccountStatErrorVoidsProof.
+func TestClaudeAccountDanglingSymlinkVoidsProof(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	env := sandbox(t)
+	link := filepath.Join(env.ClaudeDir, ".config.json")
+	if err := os.Symlink(filepath.Join(env.ClaudeDir, "missing-target"), link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	// A legacy-file proof must not be claimed when the primary is dangling.
+	writeClaudeAccount(t, "stripe_subscription", "2025-01-01T00:00:00Z")
+	subs := loadSubscriptions(true)
+	if subs.claude {
+		t.Fatal("a dangling primary account must not prove a subscription")
+	}
+	if subs.claudeErr == nil || !strings.Contains(subs.claudeErr.Error(), ".config.json") {
+		t.Fatalf("claudeErr = %v, want the primary stat failure", subs.claudeErr)
 	}
 }

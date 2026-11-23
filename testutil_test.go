@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -349,10 +350,13 @@ func childTerminalEnv(overrides []string) []string {
 }
 
 // runWTM execs the real binary in dir with extra env, returning stdout, stderr
-// and the exit code.
+// and the exit code. The subprocess is bounded by a timeout so a wedged binary
+// fails the test instead of hanging it.
 func runWTM(t *testing.T, dir string, env []string, args ...string) (string, string, int) {
 	t.Helper()
-	cmd := exec.Command(buildWTM(t), args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, buildWTM(t), args...)
 	cmd.Dir = dir
 	cmd.Env = childTerminalEnv(env)
 	var out, errOut bytes.Buffer
@@ -361,10 +365,13 @@ func runWTM(t *testing.T, dir string, env []string, args ...string) (string, str
 	rc := 0
 	if err != nil {
 		var exit *exec.ExitError
-		if !errors.As(err, &exit) {
+		if errors.As(err, &exit) {
+			rc = exit.ExitCode()
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("run wtm %v timed out after 2m", args)
+		} else {
 			t.Fatalf("run wtm %v: %v", args, err)
 		}
-		rc = exit.ExitCode()
 	}
 	return out.String(), errOut.String(), rc
 }
@@ -373,5 +380,28 @@ func runWTM(t *testing.T, dir string, env []string, args ...string) (string, str
 // addBilledSession with dedupe masks; tests that need no dedupe use this
 // shorthand, so the shipped code carries no test-only wrapper.
 func (u *worktreeUsage) addSession(harness string, events []usageEvent, price func(usageEvent) pricedEvent) {
-	u.addBilledSession(harness, events, nil, nil, price)
+	u.addBilledSession(harness, events, nil, nil, price, nowFunc())
+}
+
+// statusModel digs one harness model row out of a `status --json` worktree row,
+// at the usage.<harness>.models.<model> boundary the machine contract publishes.
+func statusModel(t *testing.T, row map[string]any, harness, model string) map[string]any {
+	t.Helper()
+	models := subscriptionObject(t, subscriptionObject(t, row["usage"])[harness])["models"]
+	return subscriptionObject(t, subscriptionObject(t, models)[model])
+}
+
+// statusTier digs one priced class out of a model row: the tokens and cost pair
+// the contract publishes per tier.
+func statusTier(t *testing.T, model map[string]any, name string) map[string]any {
+	t.Helper()
+	return subscriptionObject(t, subscriptionObject(t, model["tiers"])[name])
+}
+
+// pinClock fixes the report instant one minute after the fixture transcript's
+// opening prompt, so an open turn claims a bounded ACTIVE instead of the real
+// time elapsed since 2026-01-01.
+func pinClock(t *testing.T) {
+	t.Helper()
+	t.Setenv("WTM_NOW", time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC).Format(time.RFC3339))
 }

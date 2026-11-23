@@ -125,7 +125,7 @@ func TestBuildUsageForCountsDescendantSessions(t *testing.T) {
 		t.Fatalf("exact cost = %v, want %v", got, want)
 	}
 
-	all, err := buildUsageFor(root, []worktree{{Path: root}}, idx, nil, subscriptions{})
+	all, _, err := buildUsageForReportAt(root, []worktree{{Path: root}}, idx, nil, subscriptions{}, nowFunc())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestBuildUsageForCountsDescendantSessions(t *testing.T) {
 		t.Fatalf("descendant cost = %v, want %v", got, want)
 	}
 
-	nested, err := buildUsageFor(root, []worktree{{Path: root}, {Path: sub}}, idx, nil, subscriptions{})
+	nested, _, err := buildUsageForReportAt(root, []worktree{{Path: root}, {Path: sub}}, idx, nil, subscriptions{}, nowFunc())
 	if err != nil {
 		t.Fatal(err)
 	}

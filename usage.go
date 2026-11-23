@@ -556,27 +556,42 @@ func (e usageEvent) endAt() time.Time {
 // span is one half-open activity interval.
 type span struct{ start, end time.Time }
 
-// unionDuration merges overlapping spans and returns the covered time. A span
-// with one event has zero length (its start equals its end).
-func unionDuration(spans []span) time.Duration {
+// mergeSpans sorts and unions overlapping or touching spans. It clones its
+// input, so callers may pass a slice they still own.
+func mergeSpans(spans []span) []span {
 	if len(spans) == 0 {
-		return 0
+		return nil
 	}
 	sorted := slices.Clone(spans)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].start.Before(sorted[j].start) })
-	total := time.Duration(0)
-	cur := sorted[0]
+	out := []span{sorted[0]}
 	for _, s := range sorted[1:] {
-		if s.start.After(cur.end) {
-			total += cur.end.Sub(cur.start)
-			cur = s
+		last := &out[len(out)-1]
+		if s.start.After(last.end) {
+			out = append(out, s)
 			continue
 		}
-		if s.end.After(cur.end) {
-			cur.end = s.end
+		last.end = maxTime(last.end, s.end)
+	}
+	return out
+}
+
+// unionDuration merges overlapping spans and returns the covered time. A span
+// with one event has zero length (its start equals its end). The sum is
+// saturated at the maximum representable duration: a corrupt-but-parseable
+// timestamp far outside the supported range makes Time.Sub saturate, and adding
+// two such spans would wrap negative (and project to an exact zero). Saturating
+// keeps the total a qualified over-approximation instead of a false figure.
+func unionDuration(spans []span) time.Duration {
+	// mergeSpans yields sorted, non-overlapping spans, so each end >= start.
+	var total uint64
+	for _, s := range mergeSpans(spans) {
+		total += uint64(s.end.Sub(s.start))
+		if total > math.MaxInt64 {
+			total = math.MaxInt64
 		}
 	}
-	return total + cur.end.Sub(cur.start)
+	return time.Duration(total)
 }
 
 // modelUsage is one model's totals inside a harness; spans are its usage
@@ -650,33 +665,84 @@ func (u *worktreeUsage) harness(name string) *harnessUsage {
 }
 
 // addBilledSession folds one session where billed[i] marks the events that
-// contribute cost. Activity folds every event's causal turns, so dedupe never
-// changes active time; only the billed subset contributes money. A nil mask
-// bills every event, which is the no-dedupe case. A nil activity slice is the
-// test/older-parse fallback: it treats the usage event range as one turn.
-func (u *worktreeUsage) addBilledSession(harness string, events []usageEvent, activity []activityEvent, billed []bool, price func(usageEvent) pricedEvent) {
-	if len(events) == 0 {
+// contribute cost. Activity folds every event's causal turns before the cost
+// gate, so dedupe never changes active time and a session that recorded turns
+// but no usage still proves TIME (cost stays absent, never a free zero). Only
+// the billed subset contributes money. A nil mask bills every event, which is
+// the no-dedupe case. A nil activity slice is the test/older-parse fallback: it
+// treats the usage event range as one turn.
+func (u *worktreeUsage) addBilledSession(harness string, events []usageEvent, activity []activityEvent, billed []bool, price func(usageEvent) pricedEvent, now time.Time) {
+	turns := sessionTurns(activity, events)
+	if len(events) == 0 && len(turns) == 0 {
 		return
 	}
 	h := u.harness(harness)
-	blocks := sessionActivity(activity, events)
-	h.spans = append(h.spans, blocks...)
-	perModel := foldSession(events, h, billed, price)
+	// An empty event set is a usage-free transcript: its turns prove TIME (and
+	// the answering model's share) but no money or loss.
+	if len(events) > 0 {
+		attributeTurns(h, foldSession(events, h, billed, price, answerBarriers(turns, events)), turns, events, now)
+	} else {
+		creditAnswers(h, turns, now)
+	}
+	h.spans = append(h.spans, clampSpans(turnSpans(turns), now)...)
+}
+
+// attributeTurns clips each model's usage runs to the turns, then credits the
+// turns' uncovered openings to the answering models. Attribution uses the
+// complete turns; only the resulting spans are clamped to the clock, so a turn
+// crossing the clock still credits its answering model.
+func attributeTurns(h *harnessUsage, perModel map[string]*modelUsage, turns []turn, events []usageEvent, now time.Time) {
+	clipped, covered := clipModels(perModel, turns)
+	prefixes := turnOpenings(turns, events, mergeSpans(covered))
 	for name, m := range perModel {
-		m.spans = clipSpans(m.spans, blocks)
+		m.spans = append(clampSpans(clipped[name], now), clampSpans(prefixes[name], now)...)
 		h.model(name).absorb(m)
 	}
+	absorbAnswerOnly(h, perModel, prefixes, now)
+}
+
+// creditAnswers proves a usage-free transcript's model time: every turn with an
+// explicit answer credits that model its opening. No usage means no partial
+// flag, because no billed record was lost.
+func creditAnswers(h *harnessUsage, turns []turn, now time.Time) {
+	absorbAnswerOnly(h, nil, turnOpenings(turns, nil, nil), now)
+}
+
+// absorbAnswerOnly adds the prefixes of models that no usage event names, so a
+// named assistant reply with no usage still appears with its time. perModel may
+// be nil, which is the usage-free transcript case.
+func absorbAnswerOnly(h *harnessUsage, perModel map[string]*modelUsage, prefixes map[string][]span, now time.Time) {
+	for name, spans := range prefixes {
+		if perModel[name] != nil {
+			continue
+		}
+		h.model(name).absorb(&modelUsage{spans: clampSpans(spans, now)})
+	}
+}
+
+// clipModels clips each model's raw runs to the session turns and returns the
+// per-model result plus one flat slice of that time for coverage checks.
+func clipModels(perModel map[string]*modelUsage, turns []turn) (map[string][]span, []span) {
+	blocks := turnSpans(turns)
+	clipped := make(map[string][]span, len(perModel))
+	var covered []span
+	for name, m := range perModel {
+		spans := clipSpans(m.spans, blocks)
+		clipped[name] = spans
+		covered = append(covered, spans...)
+	}
+	return clipped, covered
 }
 
 // foldSession accumulates one session's harness cost and returns each model's
 // raw usage spans and cost. The caller clips those spans to the session's
 // causal turns, so model TIME excludes idle between turns without losing a
 // spawn child's call-to-result attribution.
-func foldSession(events []usageEvent, h *harnessUsage, billed []bool, price func(usageEvent) pricedEvent) map[string]*modelUsage {
+func foldSession(events []usageEvent, h *harnessUsage, billed []bool, price func(usageEvent) pricedEvent, barriers map[string][]span) map[string]*modelUsage {
 	perModel := map[string]*modelUsage{}
 	prev := ""
 	for i, e := range events {
-		prev = foldEvent(perModel, h, e, billed == nil || i >= len(billed) || billed[i], prev, price)
+		prev = foldEvent(perModel, h, e, billed == nil || i >= len(billed) || billed[i], prev, price, barriers[e.model])
 	}
 	return perModel
 }
@@ -687,9 +753,9 @@ func foldSession(events []usageEvent, h *harnessUsage, billed []bool, price func
 // clips the raw runs to the session's causal turns, so idle never reaches a
 // model's TIME. An isolated event is a point. A non-billed event still chains
 // spans; only its money is skipped.
-func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, bill bool, prev string, price func(usageEvent) pricedEvent) string {
+func foldEvent(perModel map[string]*modelUsage, h *harnessUsage, e usageEvent, bill bool, prev string, price func(usageEvent) pricedEvent, barriers []span) string {
 	m := modelFor(perModel, e.model)
-	extendRun(m, e, prev)
+	extendRun(m, e, prev, barriers)
 	if bill {
 		foldBilled(m, h, e, price)
 	}
@@ -709,14 +775,65 @@ func modelFor(perModel map[string]*modelUsage, name string) *modelUsage {
 // extendRun chains consecutive same-model events into one raw run; a different
 // model or an empty run starts a new span. Raw spans may include idle between
 // turns; addBilledSession clips them to the causal turns.
-func extendRun(m *modelUsage, e usageEvent, prev string) {
-	if prev == e.model && len(m.spans) > 0 {
+func extendRun(m *modelUsage, e usageEvent, prev string, barriers []span) {
+	if prev == e.model && len(m.spans) > 0 && !bridgesForeignTurn(&m.spans[len(m.spans)-1], e, barriers) {
 		last := &m.spans[len(m.spans)-1]
 		last.start = minTime(last.start, e.at)
 		last.end = maxTime(last.end, e.endAt())
 		return
 	}
 	m.spans = append(m.spans, span{start: e.at, end: e.endAt()})
+}
+
+// bridgesForeignTurn reports whether chaining the previous span onto e would
+// bridge a turn answered by another model. Such a barrier lies wholly between
+// the previous span's end and e's start, so the chain would cover the foreign
+// answer's turn.
+func bridgesForeignTurn(last *span, e usageEvent, barriers []span) bool {
+	for _, b := range barriers {
+		if !b.start.Before(last.end) && !b.end.After(e.at) {
+			return true
+		}
+	}
+	return false
+}
+
+// answerBarriers maps each model named by the transcript to the merged spans of
+// turns answered by a different model. A chain of same-model point events must
+// never bridge one of these turns: bridging would attribute the foreign
+// answer's turn to the wrong model. Turns with no named answer are not
+// barriers, so the fallback opening attribution keeps ownership of them. A
+// session where every answered turn belongs to one model has no barriers, so
+// same-model chains across identical-answer turns stay intact.
+func answerBarriers(turns []turn, events []usageEvent) map[string][]span {
+	names := make(map[string]bool)
+	for _, e := range events {
+		names[e.model] = true
+	}
+	byAnswer := map[string][]span{}
+	for _, t := range turns {
+		if t.answer == "" {
+			continue
+		}
+		byAnswer[t.answer] = append(byAnswer[t.answer], t.span)
+	}
+	if len(byAnswer) <= 1 {
+		return nil
+	}
+	out := make(map[string][]span, len(names))
+	for name := range names {
+		var foreign []span
+		for ans, spans := range byAnswer {
+			if ans != name {
+				foreign = append(foreign, spans...)
+			}
+		}
+		if len(foreign) == 0 {
+			continue
+		}
+		out[name] = mergeSpans(foreign)
+	}
+	return out
 }
 
 // foldBilled adds one event's priced pair to the model and harness totals.
@@ -730,20 +847,26 @@ func foldBilled(m *modelUsage, h *harnessUsage, e usageEvent, price func(usageEv
 
 // dedupeScore orders two copies of one billed turn. A copy that carries its own
 // price first beats one that lost it, so a self-priced Pi copy is never dropped
-// for a larger token-only copy (see piEventKeyN). Then the larger token total
-// wins, because a partial stream undercounts; a token tie breaks on the
-// web-search count, which the catalog prices as real money, then on the larger
-// self-priced cost. Either field alone can carry cost the other copy lacks.
+// for a larger token-only copy (see piEventKeyN). A valid copy then beats one
+// with a rejected figure, so a corrupt remainder never outranks the valid copy
+// of the same turn. Then the larger token total wins, because a partial stream
+// undercounts; a token tie breaks on the web-search count, which the catalog
+// prices as real money, then on the larger self-priced cost. Either field alone
+// can carry cost the other copy lacks.
 type dedupeScore struct {
 	tokens  int64
 	web     int64
 	cost    float64
 	hasCost bool
+	valid   bool
 }
 
 func (s dedupeScore) beats(o dedupeScore) bool {
 	if s.hasCost != o.hasCost {
 		return s.hasCost
+	}
+	if s.valid != o.valid {
+		return s.valid
 	}
 	if s.tokens != o.tokens {
 		return s.tokens > o.tokens
@@ -754,64 +877,145 @@ func (s dedupeScore) beats(o dedupeScore) bool {
 	return s.cost > o.cost
 }
 
+// invalidTierCosts reports whether any harness-reported tier price is rejected.
+func invalidTierCosts(c *tokenCosts) bool {
+	return invalidCostPtr(c.input) || invalidCostPtr(c.output) || invalidCostPtr(c.cacheRead) || invalidCostPtr(c.cacheWrite)
+}
+
+func invalidCostPtr(v *float64) bool { return v != nil && invalidCost(*v) != "" }
+
 // scoreOf reads the comparable size of one event for dedupe: token and
 // web-search counts for catalog-priced turns, self-priced cost for Pi turns.
+// A corrupt figure ranks as absent and marks the copy invalid, using the same
+// validators as the fold, so it cannot outscore its valid sibling and bury real
+// money. No warning fires here: folding stays the single warning and
+// unknown-taint site.
 func scoreOf(e usageEvent) dedupeScore {
-	s := dedupeScore{tokens: e.tokens.total(), web: e.webSearch}
+	s := dedupeScore{tokens: e.tokens.total(), valid: e.tokens.corrupt == 0}
+	if invalidCount(e.webSearch) == "" {
+		s.web = e.webSearch
+	} else {
+		s.valid = false
+	}
 	if e.cost != nil {
-		s.cost, s.hasCost = *e.cost, true
+		if invalidCost(*e.cost) == "" {
+			s.cost, s.hasCost = *e.cost, true
+		} else {
+			s.valid = false
+		}
+	}
+	if e.tierCost != nil && invalidTierCosts(e.tierCost) {
+		s.valid = false
 	}
 	return s
 }
+
+// dedupeBest is a key's winning score across every copy, plus the winning score
+// across the metered (uncovered) copies alone. hasUncovered is tracked
+// independently of which copy supplies the overall winning score: a larger
+// covered copy must not erase the fact that a metered twin proves the charge
+// . Election prefers the best-scoring metered copy whenever one exists, so
+// transcript placement never decides whether a subscription proves the charge.
+type dedupeBest struct {
+	score        dedupeScore
+	uncovered    dedupeScore
+	hasUncovered bool
+}
+
+// coveredProof reports whether one event's own provider and timestamp fall under
+// its session's subscription proof. It is per-event, so a metered twin in one
+// session is never hidden by a covered copy of the same turn in another.
+type coveredProof func(usageEvent) bool
 
 // dedupeKeyedEvents decides which occurrence of each billed turn prices. It
 // returns a per-session billed mask: true marks the occurrence that contributes
 // cost. Spans ignore the mask and fold every event, so dedupe never changes
 // activity time. Keyless events always bill. The winner is the first occurrence
-// of a key with the best score, so the billed money total is stable across
-// session order; which tied copy wins can vary, and it carries the provider,
-// model and timestamp the pricer reads. The caller keeps its event slices;
-// only the returned masks describe the change.
-func dedupeKeyedEvents(sessions [][]usageEvent) [][]bool {
-	best := bestScores(sessions)
+// of a key with the best score, except that a covered copy never beats a metered
+// twin: when any uncovered copy of a key exists, only an uncovered copy can be
+// elected, so billing stays at list price instead of substituting coverage for a
+// duplicate whose provenance is unestablished. The caller keeps its event
+// slices; only the returned masks describe the change.
+func dedupeKeyedEvents(sessions [][]usageEvent, covered []coveredProof) [][]bool {
+	best := bestScores(sessions, covered)
 	masks := make([][]bool, len(sessions))
 	for si, events := range sessions {
-		masks[si] = electBilledMask(events, best)
+		masks[si] = electBilledMask(events, best, coveredOf(covered, si))
 	}
 	return masks
 }
 
-// bestScores records the winning score per billed-turn key.
-func bestScores(sessions [][]usageEvent) map[string]dedupeScore {
-	best := map[string]dedupeScore{}
-	for _, events := range sessions {
+// coveredOf returns the session's coverage proof, defaulting to never-covered so
+// a caller that passes no proofs treats every copy as metered.
+func coveredOf(covered []coveredProof, si int) coveredProof {
+	if si < len(covered) && covered[si] != nil {
+		return covered[si]
+	}
+	return func(usageEvent) bool { return false }
+}
+
+// bestScores records the overall winning score per billed-turn key and the
+// winning score among the metered (uncovered) copies alone. Coverage is read per
+// event, not per session. The uncovered score is tracked on every uncovered
+// copy, even one that loses to a covered twin: the existence of a metered copy
+// is evidence that must survive the election regardless of which copy supplies
+// the winning figures.
+func bestScores(sessions [][]usageEvent, covered []coveredProof) map[string]dedupeBest {
+	best := map[string]dedupeBest{}
+	for si, events := range sessions {
+		cov := coveredOf(covered, si)
 		for _, e := range events {
 			if e.key == "" {
 				continue
 			}
 			s := scoreOf(e)
-			if w, ok := best[e.key]; !ok || s.beats(w) {
-				best[e.key] = s
+			w, ok := best[e.key]
+			// A tie keeps the first occurrence as the winner.
+			if !ok || s.beats(w.score) {
+				w.score = s
 			}
+			if !cov(e) {
+				if !w.hasUncovered || s.beats(w.uncovered) {
+					w.uncovered = s
+				}
+				w.hasUncovered = true
+			}
+			best[e.key] = w
 		}
 	}
 	return best
 }
 
-// electBilledMask marks the first occurrence matching each key's best score.
-func electBilledMask(events []usageEvent, best map[string]dedupeScore) []bool {
+// electBilledMask marks the billed occurrence of each key. When a metered
+// (uncovered) copy exists, the first copy at the best uncovered score wins the
+// slot and covered copies are skipped: only a metered copy can prove the
+// charge, regardless of which copy supplied the overall best score . When
+// every copy is covered, the first copy at the best score wins, so equal
+// duplicates later in the walk drop.
+func electBilledMask(events []usageEvent, best map[string]dedupeBest, covered coveredProof) []bool {
 	mask := make([]bool, len(events))
 	for ei, e := range events {
 		if e.key == "" {
 			mask[ei] = true
 			continue
 		}
-		// Keep only the first record matching the best score; delete its
-		// key so equal duplicates later in the walk drop too. Equality is
-		// the beats tie (neither side wins), so equal-cost copies elect the first.
 		w, ok := best[e.key]
+		if !ok {
+			continue
+		}
+		if w.hasUncovered {
+			if covered(e) {
+				continue // a covered copy never substitutes for a metered twin
+			}
+			target := w.uncovered
+			if !scoreOf(e).beats(target) && !target.beats(scoreOf(e)) {
+				mask[ei] = true
+				delete(best, e.key)
+			}
+			continue
+		}
 		s := scoreOf(e)
-		if ok && !s.beats(w) && !w.beats(s) {
+		if !s.beats(w.score) && !w.score.beats(s) {
 			mask[ei] = true
 			delete(best, e.key)
 		}

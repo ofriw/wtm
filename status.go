@@ -190,7 +190,7 @@ func (ws *workspace) parseUsage(cat catalog, subs subscriptions, p *progress) er
 		}
 		path := ws.wts[i].Path
 		p.detail(displayPath(path))
-		u, warnings, err := buildUsageForReport(path, ws.wts, ws.idx, cat, subs)
+		u, warnings, err := buildUsageForReportAt(path, ws.wts, ws.idx, cat, subs, nowFunc())
 		p.advance(1)
 		// Keep a total loss so the loss reads as unknown, never as no usage.
 		if u.hasEvents() || u.partial {

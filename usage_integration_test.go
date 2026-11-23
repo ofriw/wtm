@@ -195,6 +195,51 @@ func TestBuildUsageDedupesPiForkAcrossSessionFiles(t *testing.T) {
 	}
 }
 
+// TestBuildUsageCorruptDuplicateLosesToValidSibling pins that a corrupt copy of
+// a repeated billed turn never outranks the valid one: a rejected cost or count
+// must not win the slot on its larger token count, so the valid copy prices and
+// the money never vanishes into an unknown total.
+func TestBuildUsageCorruptDuplicateLosesToValidSibling(t *testing.T) {
+	piLine := func(input int64, total float64) string {
+		return fmt.Sprintf(`{"type":"message","id":"e0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"input":%d,"cost":{"total":%v}}}}`, input, total)
+	}
+	for _, tc := range []struct {
+		name       string
+		harness    string
+		cat        catalog
+		a, b       string
+		wantAmount float64
+	}{
+		// The corrupt $1e9 copy must lose to the valid $1.50 sibling.
+		{"cost-overflow", piAgent.name, nil, piLine(1000, 1e9), piLine(1, 1.5), 1.5},
+		// m1 charges $1/M input and $2/M output: the valid six-token copy costs
+		// 7e-6, while the corrupt copy's 100 output tokens would cost 2e-4.
+		{"token-corrupt", claudeAgent.name, testRates(t), claudeUsageLine(`{"input_tokens":-5,"output_tokens":100}`), claudeUsageLine(`{"input_tokens":5,"output_tokens":1}`), 7e-6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			af, bf := filepath.Join(dir, "a.jsonl"), filepath.Join(dir, "b.jsonl")
+			writeFile(t, af, tc.a+"\n", 0o644)
+			writeFile(t, bf, tc.b+"\n", 0o644)
+			idx := sessionIndex{canonical(dir): {
+				{path: af, harness: tc.harness},
+				{path: bf, harness: tc.harness},
+			}}
+			u, err := buildUsage(dir, idx, tc.cat, subscriptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cost := u.cost()
+			if !cost.known() {
+				t.Fatalf("cost unknown: the corrupt duplicate won the slot instead of the valid copy")
+			}
+			if math.Abs(cost.billed.amount-tc.wantAmount) > 1e-12 {
+				t.Fatalf("cost = %+v, want %v from the valid copy", cost.billed, tc.wantAmount)
+			}
+		})
+	}
+}
+
 // TestBuildUsageAllUnreadableIsUnknown pins that total loss reads as unknown:
 // with no readable spans the worktree keeps no harness, but the partial flag
 // must still taint the total instead of reading as no usage.
@@ -308,9 +353,9 @@ func TestBuildUsageActiveTimeSurvivesDedupe(t *testing.T) {
 		return m
 	})
 	var whole, deduped worktreeUsage
-	whole.addBilledSession("pi", []usageEvent{a, b}, nil, nil, price)
-	masks := dedupeKeyedEvents([][]usageEvent{{a, b}})
-	deduped.addBilledSession("pi", []usageEvent{a, b}, nil, masks[0], price)
+	whole.addBilledSession("pi", []usageEvent{a, b}, nil, nil, price, nowFunc())
+	masks := dedupeKeyedEvents([][]usageEvent{{a, b}}, nil)
+	deduped.addBilledSession("pi", []usageEvent{a, b}, nil, masks[0], price, nowFunc())
 	if whole.active() != deduped.active() {
 		t.Fatalf("active = %v after dedupe, want %v (dedupe never changes time)", deduped.active(), whole.active())
 	}
@@ -334,7 +379,7 @@ func TestBuildUsageBadTimestampWarnsAndPartials(t *testing.T) {
 		wts: []worktree{{Path: dir}},
 		idx: sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}},
 	}
-	errOut := captureStderr(t, func() { _ = ws.loadUsage(nil) })
+	errOut := captureStderr(t, func() { _ = ws.loadUsage(nil, nowFunc()) })
 	if got := strings.Count(errOut, warnPrefix); got != 1 {
 		t.Fatalf("warnings = %d, want 1:\n%s", got, errOut)
 	}
@@ -359,7 +404,7 @@ func TestBuildUsageOversizedRecordWarnsAndPartials(t *testing.T) {
 		wts: []worktree{{Path: dir}},
 		idx: sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}},
 	}
-	errOut := captureStderr(t, func() { _ = ws.loadUsage(nil) })
+	errOut := captureStderr(t, func() { _ = ws.loadUsage(nil, nowFunc()) })
 	if !strings.Contains(errOut, "oversized") {
 		t.Fatalf("warning must name the oversized loss:\n%s", errOut)
 	}
@@ -384,7 +429,7 @@ func TestBuildUsageOversizedUnbilledRecordDoesNotTaint(t *testing.T) {
 		wts: []worktree{{Path: dir}},
 		idx: sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}},
 	}
-	errOut := captureStderr(t, func() { _ = ws.loadUsage(nil) })
+	errOut := captureStderr(t, func() { _ = ws.loadUsage(nil, nowFunc()) })
 	if errOut != "" {
 		t.Fatalf("non-billed oversized record must not warn:\n%s", errOut)
 	}
@@ -440,7 +485,7 @@ func TestLoadUsagePiOnlyNeedsNoRatesCatalog(t *testing.T) {
 		wts: []worktree{{Path: dir}},
 		idx: sessionIndex{canonical(dir): {{path: path, harness: piAgent.name}}},
 	}
-	errOut := captureStderr(t, func() { _ = ws.loadUsage(nil) })
+	errOut := captureStderr(t, func() { _ = ws.loadUsage(nil, nowFunc()) })
 	if strings.Contains(errOut, "claude cost unavailable") {
 		t.Fatalf("a Pi-only repo must not load the catalog:\n%s", errOut)
 	}
@@ -554,5 +599,34 @@ func TestBuildUsageGoodSessionStaysExact(t *testing.T) {
 	}
 	if got := u.cost().cell(); got != "$1.50" {
 		t.Errorf("cost = %q, want $1.50", got)
+	}
+}
+
+// TestBuildUsageCorruptTierLosesToValidTierSibling pins the tier half of the
+// corrupt-duplicate rule: two copies of one Pi turn agree on its tokens and its
+// $1 total but report opposite input-class prices. A rejected tier cannot win
+// the slot on first occurrence, so the valid copy's $1 tier charge is what the
+// fold reports instead of an unknown class.
+func TestBuildUsageCorruptTierLosesToValidTierSibling(t *testing.T) {
+	piTierLine := func(input float64) string {
+		return fmt.Sprintf(`{"type":"message","id":"e0","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"input":2,"cost":{"input":%v,"total":1}}}}`, input)
+	}
+	dir := t.TempDir()
+	af, bf := filepath.Join(dir, "a.jsonl"), filepath.Join(dir, "b.jsonl")
+	writeFile(t, af, piTierLine(-1)+"\n", 0o644)
+	writeFile(t, bf, piTierLine(1)+"\n", 0o644)
+	idx := sessionIndex{canonical(dir): {
+		{path: af, harness: piAgent.name},
+		{path: bf, harness: piAgent.name},
+	}}
+	u, err := buildUsage(dir, idx, nil, subscriptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.harness(piAgent.name).model("m").tiers[tierInput].list; !got.known() || got.amount != 1 {
+		t.Fatalf("input tier = %+v, want the valid copy's $1", got)
+	}
+	if cost := u.cost(); !cost.billed.known() || cost.billed.amount != 1 {
+		t.Fatalf("cost = %+v, want the stated $1 total", cost.billed)
 	}
 }
