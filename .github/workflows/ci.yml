@@ -138,7 +138,12 @@ jobs:
       - name: Warm Go cache under a spaced path
         env:
           GOCACHE: ${{ runner.temp }}/go cache
-        run: go build ./...
+        run: |
+          go build ./...
+          # go build never compiles _test.go files, so test-only imports
+          # (creack/pty for the !windows gc TUI tests) must be fetched here,
+          # or the offline GOPROXY=off step below cannot resolve them.
+          go mod download
       - name: Native status JSON with spaced GOCACHE and no network
         env:
           GOCACHE: ${{ runner.temp }}/go cache
