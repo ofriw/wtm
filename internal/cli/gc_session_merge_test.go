@@ -3,6 +3,7 @@ package cli
 import (
 	"path/filepath"
 	"testing"
+	"wtm/internal/core"
 	"wtm/internal/fs"
 	. "wtm/internal/testutil"
 )
@@ -16,7 +17,7 @@ func TestGCCleanupReusesDiscoverySessionIndex(t *testing.T) {
 	idx := mustIndexSessions(t)
 	unknown := filepath.Join(filepath.Dir(claude), "unverified.jsonl")
 	WriteFile(t, unknown, "{broken\n", 0o600)
-	res, err := gcCleanup(repo, []worktree{w}, remotePlan{keep: true}, false, idx, gcMode{}, TempNow, nil)
+	res, err := gcCleanup(repo, []core.Worktree{w}, remotePlan{keep: true}, false, idx, gcMode{}, TempNow, nil)
 	if err != nil || res.SessionsPurged != 2 || len(res.Removed) != 1 {
 		t.Fatalf("cleanup = %+v, %v; want checkout and two owned sessions removed", res, err)
 	}

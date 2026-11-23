@@ -5,11 +5,14 @@ package cli
 import (
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"wtm/internal/core"
 	. "wtm/internal/testutil"
+	"wtm/internal/ui"
 )
 
 // progress_tui_test.go — Tier-2 e2e of inline progress on a real stderr PTY.
@@ -116,7 +119,7 @@ func TestWithProgressRendererPTY(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- withProgressTo(slaveErr, &g, true, func(p *progress) error {
+		errCh <- withProgressTo(slaveErr, &g, true, func(p *ui.Progress) error {
 			p.Phase("demo", 1)
 			p.Advance(1)
 			return workErr

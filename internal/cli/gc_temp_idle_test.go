@@ -9,9 +9,10 @@ import (
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	. "wtm/internal/testutil"
+	"wtm/internal/ui"
 )
 
-func idleTempCheckout(t *testing.T) (string, worktree, string) {
+func idleTempCheckout(t *testing.T) (string, core.Worktree, string) {
 	t.Helper()
 	repo, _, w := identityCheckout(t)
 	path := w.Path
@@ -35,7 +36,7 @@ func commitIdleBaseline(t *testing.T, path string) {
 	MustGit(t, path, "commit", "-qm", "old", "--date="+TempTestTime.Format(time.RFC3339))
 }
 
-func activateTemp(t *testing.T, w worktree, activity string) {
+func activateTemp(t *testing.T, w core.Worktree, activity string) {
 	t.Helper()
 	switch activity {
 	case "edit":
@@ -52,22 +53,22 @@ func activateTemp(t *testing.T, w worktree, activity string) {
 }
 
 // Cleanup reuses discovery's real ownership index, independent of idle refresh.
-func cleanupSessionIndex(t *testing.T, repo string) sessionIndex {
+func cleanupSessionIndex(t *testing.T, repo string) core.SessionIndex {
 	t.Helper()
-	ws, err := core.LoadWorkspace(&globals{Root: repo}, false, statusHooks())
+	ws, err := core.LoadWorkspace(&core.Globals{Root: repo}, false, defaultHooks())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return ws.Idx
 }
 
-func runIdleCleanup(t *testing.T, repo string, w worktree, idx sessionIndex) (gcResult, string) {
+func runIdleCleanup(t *testing.T, repo string, w core.Worktree, idx core.SessionIndex) (gcResult, string) {
 	t.Helper()
 	var res gcResult
 	warnings := CaptureStderr(t, func() {
-		err := withProgress(&globals{JSON: true}, true, func(p *progress) error {
+		err := withProgress(&core.Globals{JSON: true}, true, func(p *ui.Progress) error {
 			var err error
-			res, err = gcCleanup(repo, []worktree{w}, remotePlan{keep: true}, false, idx, gcMode{deleteTemp: true, idleOnly: true}, TempNow, p)
+			res, err = gcCleanup(repo, []core.Worktree{w}, remotePlan{keep: true}, false, idx, gcMode{deleteTemp: true, idleOnly: true}, TempNow, p)
 			return err
 		})
 		if err != nil {

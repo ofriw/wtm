@@ -31,7 +31,7 @@ func addTestRepo(t *testing.T) string {
 }
 
 // addResultOf drives cmdAdd with --json and decodes the machine result.
-func addResultOf(t *testing.T, g *globals, args ...string) addResult {
+func addResultOf(t *testing.T, g *core.Globals, args ...string) addResult {
 	t.Helper()
 	g.JSON = true
 	var err error
@@ -114,7 +114,7 @@ func TestAddDefaults(t *testing.T) {
 	Sandbox(t)
 	repo := addTestRepo(t)
 	target := addTarget(repo, "feature-x")
-	res := addResultOf(t, &globals{Root: repo}, "feature-x", "--no-index")
+	res := addResultOf(t, &core.Globals{Root: repo}, "feature-x", "--no-index")
 	if res.Path != target || res.Branch != "feature-x" {
 		t.Fatalf("path/branch = (%q,%q), want (%q,feature-x)", res.Path, res.Branch, target)
 	}
@@ -143,7 +143,7 @@ func TestAddNormalizesBranch(t *testing.T) {
 		t.Run(tc.in, func(t *testing.T) {
 			repo := addTestRepo(t)
 			target := addTarget(repo, tc.branch)
-			res := addResultOf(t, &globals{Root: repo}, tc.in, "--no-index")
+			res := addResultOf(t, &core.Globals{Root: repo}, tc.in, "--no-index")
 			if res.Branch != tc.branch || res.Path != target {
 				t.Fatalf("normalize %q = branch %q path %q, want %q %q", tc.in, res.Branch, res.Path, tc.branch, target)
 			}
@@ -186,7 +186,7 @@ func TestAddStartPointPositional(t *testing.T) {
 	GitCommit(t, repo, "topic commit", "topic.txt")
 	MustGit(t, repo, "checkout", "-q", "main")
 	target := addTarget(repo, "from-topic")
-	res := addResultOf(t, &globals{Root: repo}, "from-topic", "refs/heads/topic", "--no-index")
+	res := addResultOf(t, &core.Globals{Root: repo}, "from-topic", "refs/heads/topic", "--no-index")
 	if res.Base != "refs/heads/topic" {
 		t.Fatalf("base = %q, want refs/heads/topic", res.Base)
 	}
@@ -200,21 +200,21 @@ func TestAddStartPointPositional(t *testing.T) {
 // whether the branch is new or already exists.
 func TestAddStartPointInvalidUsesUsageInBothModes(t *testing.T) {
 	for _, tc := range []struct {
-		Name, branch string
+		name, branch string
 		attach       bool
 	}{
 		{"create", "feature/new", false},
 		{"attach", "feature/existing", true},
 	} {
-		t.Run(tc.Name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			Sandbox(t)
 			repo := addTestRepo(t)
 			if tc.attach {
 				GitTestBranch(t, repo, tc.branch)
 			}
-			err := addWorktree(&globals{Root: repo}, tc.branch, addOptions{start: "no-such-ref", noIndex: true})
+			err := addWorktree(&core.Globals{Root: repo}, tc.branch, addOptions{start: "no-such-ref", noIndex: true})
 			if !isUsage(err) || !strings.Contains(err.Error(), "is not a commit") {
-				t.Fatalf("add %s bad start-point = %v, want a usage refusal", tc.Name, err)
+				t.Fatalf("add %s bad start-point = %v, want a usage refusal", tc.name, err)
 			}
 			if fs.Exists(addTarget(repo, tc.branch)) || git.RefExists(repo, "refs/heads/"+tc.branch) != tc.attach {
 				t.Fatal("rejected start-point must write nothing")
@@ -230,7 +230,7 @@ func TestAddFromSource(t *testing.T) {
 	GitWorktreeAdd(t, repo, src, "src-branch", "refs/heads/main")
 	WriteFile(t, filepath.Join(src, harness.ChunkhoundConfigFile), `{"src":true}`, 0o644)
 	target := addTarget(repo, "wt-from")
-	res := addResultOf(t, &globals{Root: repo}, "wt-from", "--from", src, "--no-index")
+	res := addResultOf(t, &core.Globals{Root: repo}, "wt-from", "--from", src, "--no-index")
 	if res.Source != src {
 		t.Fatalf("source = %q, want --from worktree %q", res.Source, src)
 	}
@@ -252,7 +252,7 @@ func TestAddSeedsFromStartPointWorktree(t *testing.T) {
 	WriteFile(t, filepath.Join(base, harness.ChunkhoundConfigFile), `{"from":"base"}`, 0o644)
 
 	target := addTarget(repo, "wt-child")
-	res := addResultOf(t, &globals{Root: repo}, "wt-child", "refs/heads/base-branch", "--no-index")
+	res := addResultOf(t, &core.Globals{Root: repo}, "wt-child", "refs/heads/base-branch", "--no-index")
 	if res.Source != base {
 		t.Fatalf("source = %q, want start-point worktree %q", res.Source, base)
 	}
@@ -274,7 +274,7 @@ func TestAddStartPointWithoutWorktreeWarns(t *testing.T) {
 
 	var res addResult
 	errOut := CaptureStderr(t, func() {
-		res = addResultOf(t, &globals{Root: repo}, "wt-fallback", "refs/heads/topic", "--no-index")
+		res = addResultOf(t, &core.Globals{Root: repo}, "wt-fallback", "refs/heads/topic", "--no-index")
 	})
 	if res.Source != CanonicalPath(repo) {
 		t.Fatalf("source = %q, want main worktree fallback %q", res.Source, CanonicalPath(repo))
@@ -295,7 +295,7 @@ func TestAddAttachFallbackWarnsWithoutReembed(t *testing.T) {
 
 	var res addResult
 	errOut := CaptureStderr(t, func() {
-		res = addResultOf(t, &globals{Root: repo}, "feature/attach", "--no-index")
+		res = addResultOf(t, &core.Globals{Root: repo}, "feature/attach", "--no-index")
 	})
 	if res.Source != CanonicalPath(repo) {
 		t.Fatalf("source = %q, want main worktree %q", res.Source, CanonicalPath(repo))
@@ -328,7 +328,7 @@ func stubChunkHound(t *testing.T) {
 // database before the warning may claim one.
 func TestAddAttachStaleOnlyWhenSkippedWithCopiedIndex(t *testing.T) {
 	for _, tc := range []struct {
-		Name        string
+		name        string
 		noIndex     bool
 		withDB      bool
 		withDBDir   bool
@@ -340,7 +340,7 @@ func TestAddAttachStaleOnlyWhenSkippedWithCopiedIndex(t *testing.T) {
 		{"skipped without copied index", true, false, false, false, false},
 		{"skipped with empty db dir", true, false, true, false, false},
 	} {
-		t.Run(tc.Name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			Sandbox(t)
 			repo, _ := attachRepo(t)
 			if tc.withDB {
@@ -364,7 +364,7 @@ func TestAddAttachStaleOnlyWhenSkippedWithCopiedIndex(t *testing.T) {
 			}
 			var res addResult
 			errOut := CaptureStderr(t, func() {
-				res = addResultOf(t, &globals{Root: repo}, args...)
+				res = addResultOf(t, &core.Globals{Root: repo}, args...)
 			})
 			if res.Indexed != tc.wantIndexed {
 				t.Fatalf("indexed = %v, want %v", res.Indexed, tc.wantIndexed)
@@ -401,7 +401,7 @@ func TestAddAttachEqualTreeDoesNotClaimStaleIndex(t *testing.T) {
 
 	var res addResult
 	errOut := CaptureStderr(t, func() {
-		res = addResultOf(t, &globals{Root: repo}, "feature/equal", "--no-index")
+		res = addResultOf(t, &core.Globals{Root: repo}, "feature/equal", "--no-index")
 	})
 	if !res.Attached {
 		t.Fatalf("attach = %+v, want attached", res)
@@ -423,7 +423,7 @@ func TestWarnSeedSourceText(t *testing.T) {
 	attach := "branch refs/heads/x is not checked out; seeding from " + CanonicalPath(src)
 	stale := "; the copied ChunkHound index is stale: indexing was skipped"
 	cases := []struct {
-		Name    string
+		name    string
 		source  seedSource
 		attach  bool
 		noIndex bool
@@ -442,7 +442,7 @@ func TestWarnSeedSourceText(t *testing.T) {
 		{"skipped without copied index", seedSource{path: src, fallback: true, note: fallback, differs: true}, false, true, false, fallback},
 	}
 	for _, tc := range cases {
-		t.Run(tc.Name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			out := CaptureStderr(t, func() {
 				warnSeedSource(tc.source, "refs/heads/x", tc.attach, tc.noIndex, tc.hadDB)
 			})
@@ -488,7 +488,7 @@ func TestAddFromMissing(t *testing.T) {
 	repo := addTestRepo(t)
 	missing := filepath.Join(filepath.Dir(repo), "missing-src")
 	target := addTarget(repo, "wt-missing")
-	err := addWorktree(&globals{Root: repo}, "wt-missing", addOptions{from: missing, noIndex: true})
+	err := addWorktree(&core.Globals{Root: repo}, "wt-missing", addOptions{from: missing, noIndex: true})
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("add --from missing = %v, want not-found error", err)
 	}
@@ -515,7 +515,7 @@ func TestAddExistingPathFails(t *testing.T) {
 	repo := addTestRepo(t)
 	target := CanonicalPath(filepath.Join(filepath.Dir(repo), "taken"))
 	WriteFile(t, filepath.Join(target, "keep.txt"), "keep", 0o644)
-	err := addWorktree(&globals{Root: repo}, "taken", addOptions{path: target, noIndex: true})
+	err := addWorktree(&core.Globals{Root: repo}, "taken", addOptions{path: target, noIndex: true})
 	if err == nil {
 		t.Fatal("add into an existing non-empty path must fail")
 	}
@@ -537,7 +537,7 @@ func TestAddPathOverride(t *testing.T) {
 	Sandbox(t)
 	repo := addTestRepo(t)
 	target := CanonicalPath(filepath.Join(filepath.Dir(repo), "custom-dir"))
-	res := addResultOf(t, &globals{Root: repo}, "feature/override", "--path", target, "--no-index")
+	res := addResultOf(t, &core.Globals{Root: repo}, "feature/override", "--path", target, "--no-index")
 	if res.Path != target || res.Branch != "feature/override" {
 		t.Fatalf("path/branch = (%q,%q), want (%q,feature/override)", res.Path, res.Branch, target)
 	}
@@ -549,7 +549,7 @@ func TestAddRefusesNestedPath(t *testing.T) {
 	Sandbox(t)
 	repo := addTestRepo(t)
 	nested := filepath.Join(repo, "nested")
-	err := addWorktree(&globals{Root: repo}, "nested", addOptions{path: nested, noIndex: true})
+	err := addWorktree(&core.Globals{Root: repo}, "nested", addOptions{path: nested, noIndex: true})
 	if err == nil || !strings.Contains(err.Error(), "refusing to create a worktree inside") {
 		t.Fatalf("nested add = %v, want refusal", err)
 	}
@@ -579,7 +579,7 @@ func TestAddAttachesExistingBranch(t *testing.T) {
 	WriteFile(t, filepath.Join(repo, ".mcp.json"), `{"mcpServers":{}}`, 0o644)
 	target := addTarget(repo, "feature/attach")
 
-	res := addResultOf(t, &globals{Root: repo}, "feature/attach", "--no-index")
+	res := addResultOf(t, &core.Globals{Root: repo}, "feature/attach", "--no-index")
 	if !res.Attached || res.Branch != "feature/attach" || res.Path != target {
 		t.Fatalf("attach = %+v, want feature/attach at %s", res, target)
 	}
@@ -618,11 +618,11 @@ func TestAddAttachRejectsCheckedOutBranch(t *testing.T) {
 	busy := CanonicalPath(filepath.Join(filepath.Dir(repo), "busy"))
 	GitWorktreeAdd(t, repo, busy, "feature/busy", "refs/heads/main")
 
-	err := addWorktree(&globals{Root: repo}, "feature/busy", addOptions{noIndex: true})
+	err := addWorktree(&core.Globals{Root: repo}, "feature/busy", addOptions{noIndex: true})
 	if err == nil || isUsage(err) || !strings.Contains(err.Error(), "already checked out") || !strings.Contains(err.Error(), busy) {
 		t.Fatalf("add on a checked-out branch = %v, want a non-usage refusal naming %s", err, busy)
 	}
-	if err := addWorktree(&globals{Root: repo}, "main", addOptions{noIndex: true}); err == nil || isUsage(err) || !strings.Contains(err.Error(), "at the main worktree") {
+	if err := addWorktree(&core.Globals{Root: repo}, "main", addOptions{noIndex: true}); err == nil || isUsage(err) || !strings.Contains(err.Error(), "at the main worktree") {
 		t.Fatalf("add on the main worktree's branch = %v, want non-usage main-worktree guidance", err)
 	}
 	if fs.Exists(addTarget(repo, "feature/busy")) {
@@ -635,7 +635,7 @@ func TestAddAttachRejectsCheckedOutBranch(t *testing.T) {
 func TestAddAttachStartPoint(t *testing.T) {
 	Sandbox(t)
 	cases := []struct {
-		Name    string
+		name    string
 		start   string // "tip" resolves to the branch commit
 		refusal bool
 		usage   bool
@@ -647,13 +647,13 @@ func TestAddAttachStartPoint(t *testing.T) {
 		{"invalid", "no-such-ref", true, true, "is not a commit"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.Name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			repo, tip := attachRepo(t)
 			start := tc.start
 			if start == "tip" {
 				start = tip
 			}
-			err := addWorktree(&globals{Root: repo}, "feature/attach", addOptions{start: start, noIndex: true})
+			err := addWorktree(&core.Globals{Root: repo}, "feature/attach", addOptions{start: start, noIndex: true})
 			if !tc.refusal {
 				if err != nil {
 					t.Fatalf("attach via %s: %v", start, err)
@@ -687,7 +687,7 @@ func TestAddAttachRejectsOccupiedPath(t *testing.T) {
 	target := CanonicalPath(filepath.Join(filepath.Dir(repo), "taken-attach"))
 	WriteFile(t, filepath.Join(target, "keep.txt"), "keep", 0o644)
 
-	if err := addWorktree(&globals{Root: repo}, "feature/attach", addOptions{path: target, noIndex: true}); err == nil {
+	if err := addWorktree(&core.Globals{Root: repo}, "feature/attach", addOptions{path: target, noIndex: true}); err == nil {
 		t.Fatal("attach into an occupied path must fail")
 	}
 	if !fs.Exists(filepath.Join(target, "keep.txt")) {
@@ -707,7 +707,7 @@ func TestAddAttachFailedSeedKeepsBranch(t *testing.T) {
 	repo, tip := attachRepo(t)
 	WriteFile(t, filepath.Join(harness.ChunkhoundDBDir(repo), harness.RootGuardName), "{not json", 0o644)
 
-	err := addWorktree(&globals{Root: repo}, "feature/attach", addOptions{noIndex: true})
+	err := addWorktree(&core.Globals{Root: repo}, "feature/attach", addOptions{noIndex: true})
 	if err == nil || !strings.Contains(err.Error(), "existing branch was left untouched") {
 		t.Fatalf("seed failure = %v, want the branch-untouched note", err)
 	}
@@ -720,14 +720,14 @@ func TestAddAttachFailedSeedKeepsBranch(t *testing.T) {
 func TestRollbackAddBranchOwnership(t *testing.T) {
 	Sandbox(t)
 	cases := []struct {
-		Name     string
+		name     string
 		attached bool
 	}{
 		{"attached branch survives", true},
 		{"created branch removed", false},
 	}
 	for _, tc := range cases {
-		t.Run(tc.Name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			repo := addTestRepo(t)
 			path := CanonicalPath(filepath.Join(filepath.Dir(repo), "wt"))
 			GitWorktreeAdd(t, repo, path, "feature/keep", "refs/heads/main")
@@ -770,7 +770,7 @@ func TestAddAttachKeepsStoredSpelling(t *testing.T) {
 			target := addTarget(repo, tc.branch)
 
 			var res addResult
-			if warn := CaptureStderr(t, func() { res = addResultOf(t, &globals{Root: repo}, tc.request, "--no-index") }); warn != "" {
+			if warn := CaptureStderr(t, func() { res = addResultOf(t, &core.Globals{Root: repo}, tc.request, "--no-index") }); warn != "" {
 				t.Fatalf("attaching %q must not warn, got %q", tc.branch, warn)
 			}
 			if !res.Attached || res.Branch != tc.branch || res.Path != target {
@@ -816,7 +816,7 @@ func TestAddTempRefusesExistingBranch(t *testing.T) {
 		{"tmp/keep", "--temp", "--no-index"},
 		{"tmp/keep", "--ttl", "30m", "--no-index"},
 	} {
-		err := cmdAdd(&globals{Root: repo}, args)
+		err := cmdAdd(&core.Globals{Root: repo}, args)
 		if err == nil || isUsage(err) || !strings.Contains(err.Error(), "refusing --temp for existing branch") {
 			t.Fatalf("cmdAdd(%v) = %v, want a non-usage temp refusal", args, err)
 		}
@@ -835,7 +835,7 @@ func TestAttachedTempBranchIsPermanent(t *testing.T) {
 	repo := addTestRepo(t)
 	GitTestBranch(t, repo, "tmp/keep")
 
-	res := addResultOf(t, &globals{Root: repo}, "tmp/keep", "--no-index")
+	res := addResultOf(t, &core.Globals{Root: repo}, "tmp/keep", "--no-index")
 	if !res.Attached || res.Temp || res.TTL != "" || res.ExpiresAt != nil {
 		t.Fatalf("attach = %+v, want an attached permanent checkout", res)
 	}
@@ -901,8 +901,8 @@ func TestResolveLocalBranch(t *testing.T) {
 	refs := map[string]bool{"Feature/X": true, "Feature/under_score": true, "Feature/C++": true}
 	cases := []struct {
 		raw, want string
-		mode      branchLookupMode
-		Exists    bool
+		mode      core.BranchLookupMode
+		exists    bool
 	}{
 		{"Feature/X", "Feature/X", core.BranchForAdd, true},
 		{"feature/x", "Feature/X", core.BranchForAdd, true},
@@ -914,15 +914,15 @@ func TestResolveLocalBranch(t *testing.T) {
 	}
 	for _, tc := range cases {
 		got, err := core.ResolveLocalBranch(refs, tc.raw, tc.mode)
-		if err != nil || got.Name != tc.want || got.Exists != tc.Exists {
-			t.Fatalf("core.ResolveLocalBranch(%q,%v) = (%+v,%v), want %q exists=%v", tc.raw, tc.mode, got, err, tc.want, tc.Exists)
+		if err != nil || got.Name != tc.want || got.Exists != tc.exists {
+			t.Fatalf("core.ResolveLocalBranch(%q,%v) = (%+v,%v), want %q exists=%v", tc.raw, tc.mode, got, err, tc.want, tc.exists)
 		}
 	}
 
 	addressRefs := map[string]bool{"Feature/under_score": true, "review-x": true, "tmp/keep": true}
 	for _, tc := range []struct {
 		raw, want string
-		Exists    bool
+		exists    bool
 	}{
 		{"feature/under_score", "Feature/under_score", true},
 		{"Review X", "review-x", true},
@@ -930,8 +930,8 @@ func TestResolveLocalBranch(t *testing.T) {
 		{"missing", "missing", false},
 	} {
 		got, err := core.ResolveLocalBranch(addressRefs, tc.raw, core.BranchForAddress)
-		if err != nil || got.Name != tc.want || got.Exists != tc.Exists {
-			t.Fatalf("core.ResolveLocalBranch(%q,address) = (%+v,%v), want %q exists=%v", tc.raw, got, err, tc.want, tc.Exists)
+		if err != nil || got.Name != tc.want || got.Exists != tc.exists {
+			t.Fatalf("core.ResolveLocalBranch(%q,address) = (%+v,%v), want %q exists=%v", tc.raw, got, err, tc.want, tc.exists)
 		}
 	}
 
@@ -947,8 +947,8 @@ func TestResolveLocalBranch(t *testing.T) {
 func TestAddMissingBranchUsage(t *testing.T) {
 	Sandbox(t)
 	repo := addTestRepo(t)
-	err := cmdAdd(&globals{Root: repo}, nil)
-	var ue usageError
+	err := cmdAdd(&core.Globals{Root: repo}, nil)
+	var ue core.UsageError
 	if !errors.As(err, &ue) {
 		t.Fatalf("missing branch = %v, want usageError", err)
 	}
@@ -963,7 +963,7 @@ func TestSeedBadRootGuardKeepsPartialWorktree(t *testing.T) {
 	repo := addTestRepo(t)
 	WriteFile(t, filepath.Join(harness.ChunkhoundDBDir(repo), harness.RootGuardName), "{not json", 0o644)
 	target := addTarget(repo, "wt-badguard")
-	err := addWorktree(&globals{Root: repo}, "wt-badguard", addOptions{noIndex: true})
+	err := addWorktree(&core.Globals{Root: repo}, "wt-badguard", addOptions{noIndex: true})
 	if err == nil {
 		t.Fatal("malformed root guard must surface an error")
 	}
@@ -983,7 +983,7 @@ func TestAddHumanOutputAnnotatesOrigin(t *testing.T) {
 	t.Run("local base", func(t *testing.T) {
 		repo := addTestRepo(t)
 		var err error
-		out := CaptureStdout(t, func() { err = cmdAdd(&globals{Root: repo}, []string{"wt-local", "--no-index"}) })
+		out := CaptureStdout(t, func() { err = cmdAdd(&core.Globals{Root: repo}, []string{"wt-local", "--no-index"}) })
 		if err != nil {
 			t.Fatalf("cmdAdd: %v", err)
 		}
@@ -995,14 +995,14 @@ func TestAddHumanOutputAnnotatesOrigin(t *testing.T) {
 		repo := addTestRepo(t)
 		GitTestRemoteHead(t, repo, "origin", "main")
 		var err error
-		out := CaptureStdout(t, func() { err = cmdAdd(&globals{Root: repo}, []string{"wt-remote", "--no-index"}) })
+		out := CaptureStdout(t, func() { err = cmdAdd(&core.Globals{Root: repo}, []string{"wt-remote", "--no-index"}) })
 		if err != nil {
 			t.Fatalf("cmdAdd: %v", err)
 		}
 		if !strings.Contains(out, "refs/remotes/origin/main (remote)") {
 			t.Fatalf("human output must annotate remote base: %q", out)
 		}
-		res := addResultOf(t, &globals{Root: repo}, "wt-remote-json", "--no-index")
+		res := addResultOf(t, &core.Globals{Root: repo}, "wt-remote-json", "--no-index")
 		if res.Base != "refs/remotes/origin/main" {
 			t.Fatalf("--json must keep the raw base ref, got %q", res.Base)
 		}
@@ -1013,7 +1013,7 @@ func TestAddHumanOutputAnnotatesOrigin(t *testing.T) {
 		WriteFile(t, filepath.Join(repo, "next.txt"), "next\n", 0o644)
 		GitCommit(t, repo, "next", "next.txt") // commit B on main
 		GitTestRemoteHead(t, repo, "origin", "main")
-		res := addResultOf(t, &globals{Root: repo}, "wt-remote-order", "--no-index")
+		res := addResultOf(t, &core.Globals{Root: repo}, "wt-remote-order", "--no-index")
 		if res.Base != "refs/remotes/origin/main" {
 			t.Fatalf("base = %q, want refs/remotes/origin/main", res.Base)
 		}
@@ -1052,7 +1052,7 @@ func TestAddDerivedTargetRefusesNesting(t *testing.T) {
 func TestAddTTLImpliesTemp(t *testing.T) {
 	Sandbox(t)
 	repo := addTestRepo(t)
-	res := addResultOf(t, &globals{Root: repo}, "wt-ttl", "--no-index", "--ttl", "30m")
+	res := addResultOf(t, &core.Globals{Root: repo}, "wt-ttl", "--no-index", "--ttl", "30m")
 	if !res.Temp || res.Branch != "tmp/wt-ttl" || res.TTL != "30m0s" {
 		t.Fatalf("--ttl add = %+v, want tmp/wt-ttl with 30m", res)
 	}
@@ -1093,7 +1093,7 @@ func assertAddSeed(t *testing.T, res addResult, base, src, marker string) {
 func addCapturingStderr(t *testing.T, repo string, args ...string) (addResult, string) {
 	t.Helper()
 	var res addResult
-	errOut := CaptureStderr(t, func() { res = addResultOf(t, &globals{Root: repo}, args...) })
+	errOut := CaptureStderr(t, func() { res = addResultOf(t, &core.Globals{Root: repo}, args...) })
 	return res, errOut
 }
 
@@ -1261,7 +1261,7 @@ func TestTempBranchPrefix(t *testing.T) {
 func TestAddTempBranchIdempotent(t *testing.T) {
 	Sandbox(t)
 	repo := addTestRepo(t)
-	res := addResultOf(t, &globals{Root: repo}, "tmp/already", "--temp", "--no-index")
+	res := addResultOf(t, &core.Globals{Root: repo}, "tmp/already", "--temp", "--no-index")
 	if res.Branch != "tmp/already" {
 		t.Fatalf("branch = %q, want tmp/already (no double prefix)", res.Branch)
 	}
@@ -1273,7 +1273,7 @@ func TestAddTempWritesRecord(t *testing.T) {
 	Sandbox(t)
 	repo := addTestRepo(t)
 	target := addTarget(repo, "tmp/wt-rec")
-	res := addResultOf(t, &globals{Root: repo}, "wt-rec", "--temp", "--no-index")
+	res := addResultOf(t, &core.Globals{Root: repo}, "wt-rec", "--temp", "--no-index")
 	if !res.Temp || res.Path != target {
 		t.Fatalf("add = %+v, want temp at %s", res, target)
 	}
@@ -1296,7 +1296,7 @@ func TestAddTempFailedSeedLeavesNoRecord(t *testing.T) {
 	repo := addTestRepo(t)
 	WriteFile(t, filepath.Join(harness.ChunkhoundDBDir(repo), harness.RootGuardName), "{not json", 0o644)
 	target := addTarget(repo, "tmp/wt-badtemp")
-	err := addWorktree(&globals{Root: repo}, "wt-badtemp", addOptions{temp: true, ttl: "30m", noIndex: true})
+	err := addWorktree(&core.Globals{Root: repo}, "wt-badtemp", addOptions{temp: true, ttl: "30m", noIndex: true})
 	if err == nil {
 		t.Fatal("malformed root guard must fail the temp add")
 	}

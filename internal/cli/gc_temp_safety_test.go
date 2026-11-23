@@ -5,13 +5,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	"wtm/internal/temp"
 	. "wtm/internal/testutil"
 )
 
-func tempSafetyFixture(t *testing.T) (string, string, worktree) {
+func tempSafetyFixture(t *testing.T) (string, string, core.Worktree) {
 	t.Helper()
 	Sandbox(t)
 	repo := InitRepo(t, "main")
@@ -27,7 +28,7 @@ func TestGCRejectsChangedTempIdentity(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			repo, linked, w := tempSafetyFixture(t)
 			changeTempCheckout(t, repo, linked, change)
-			res, err := gcRunRemove(t, &globals{JSON: true}, repo, []worktree{w}, false, true)
+			res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{w}, false, true)
 			if err != nil || len(res.Removed) != 0 {
 				t.Fatalf("changed identity removal: result=%+v error=%v", res, err)
 			}
@@ -55,7 +56,7 @@ func TestGCTempBranchDeletionFailure(t *testing.T) {
 	repo, linked, w := tempSafetyFixture(t)
 	other := filepath.Join(filepath.Dir(repo), "other")
 	MustGit(t, repo, "worktree", "add", "--force", other, w.Branch)
-	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []worktree{w}, false, true)
+	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{w}, false, true)
 	if err == nil || len(res.Failed) != 1 || !strings.Contains(res.Failed[0].Error, "delete branch tmp/safety") {
 		t.Fatalf("branch failure: result=%+v error=%v", res, err)
 	}
@@ -95,7 +96,7 @@ func runTempCleanupFailure(t *testing.T, command, repo, linked string) gcResult 
 	t.Helper()
 	var runErr error
 	out := CaptureStdout(t, func() {
-		g := &globals{Root: repo, JSON: true, Yes: true}
+		g := &core.Globals{Root: repo, JSON: true, Yes: true}
 		if command == "delete" {
 			runErr = cmdDelete(g, []string{"feat"})
 		} else {
@@ -110,7 +111,7 @@ func runTempCleanupFailure(t *testing.T, command, repo, linked string) gcResult 
 }
 
 func TestGCTempConsentNamesLocalBranches(t *testing.T) {
-	selected := []worktree{{Temp: true, Branch: "tmp/one"}, {Branch: "permanent"}, {Temp: true, Branch: "tmp/two"}}
+	selected := []core.Worktree{{Temp: true, Branch: "tmp/one"}, {Branch: "permanent"}, {Temp: true, Branch: "tmp/two"}}
 	for _, keep := range []bool{false, true} {
 		title := gcConsentTitle(selected, remotePlan{keep: keep})
 		if !strings.Contains(title, "force-delete temp LOCAL branches: tmp/one, tmp/two") || strings.Contains(title, "permanent") {
@@ -130,7 +131,7 @@ func TestGCTempPromotedBeforeRemovalSkips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("promote: %v", err)
 	}
-	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []worktree{w}, false, true)
+	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{w}, false, true)
 	if err != nil {
 		t.Fatalf("gc after promote: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestGCTempPromotedBeforeRemovalSkips(t *testing.T) {
 }
 
 func TestGCConsentTitleNoTempBranches(t *testing.T) {
-	selected := []worktree{{Branch: "feature/a"}, {Branch: "feature/b"}}
+	selected := []core.Worktree{{Branch: "feature/a"}, {Branch: "feature/b"}}
 	title := gcConsentTitle(selected, remotePlan{})
 	if strings.Contains(title, "temp LOCAL") || strings.Contains(title, "force-delete") {
 		t.Fatalf("permanent-only title must not mention temp branches: %s", title)

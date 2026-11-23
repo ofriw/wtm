@@ -157,7 +157,7 @@ func TestPromotionUnreadableRegistry(t *testing.T) {
 func TestPromotionJSONAndIdentityRemoval(t *testing.T) {
 	repo, path, w := identityCheckout(t)
 	out := CaptureStdout(t, func() {
-		if err := promoteWorktree(&globals{Root: repo, JSON: true}, w.Branch); err != nil {
+		if err := promoteWorktree(&core.Globals{Root: repo, JSON: true}, w.Branch); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -176,7 +176,7 @@ func TestPromotionJSONAndIdentityRemoval(t *testing.T) {
 func TestPromoteMatchesTempPrefix(t *testing.T) {
 	repo, path, w := identityCheckout(t)
 	out := CaptureStdout(t, func() {
-		if err := promoteWorktree(&globals{Root: repo, JSON: true}, "test"); err != nil {
+		if err := promoteWorktree(&core.Globals{Root: repo, JSON: true}, "test"); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -239,7 +239,7 @@ func TestPromotionCommandRejectsCorruptTargetRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	CaptureStderr(t, func() {
-		if err := promoteWorktree(&globals{Root: repo, JSON: true}, w.Branch); err == nil {
+		if err := promoteWorktree(&core.Globals{Root: repo, JSON: true}, w.Branch); err == nil {
 			t.Fatal("corrupt target record was silently reported permanent")
 		}
 	})
@@ -259,7 +259,7 @@ func TestClearTempRecordWriteFailure(t *testing.T) {
 func TestTempRecordWriteFailure(t *testing.T) {
 	_, path, old := identityCheckout(t)
 	restrictRegistryWrites(t)
-	_, err := temp.AddTempRecord(path, tempRecord{CreatedAt: TempNow, TTL: "1h", Branch: old.Branch})
+	_, err := temp.AddTempRecord(path, temp.Record{CreatedAt: TempNow, TTL: "1h", Branch: old.Branch})
 	if err == nil {
 		t.Fatal("record write failure reported success")
 	}
@@ -273,7 +273,7 @@ func TestTempRecordWriteFailure(t *testing.T) {
 
 func TestTempRecordInvalidIdentityRejected(t *testing.T) {
 	_, path, old := identityCheckout(t)
-	_, err := temp.AddTempRecord(path, tempRecord{CreatedAt: TempNow, TTL: "1h", Branch: old.Branch, Identity: "invalid"})
+	_, err := temp.AddTempRecord(path, temp.Record{CreatedAt: TempNow, TTL: "1h", Branch: old.Branch, Identity: "invalid"})
 	if err == nil {
 		t.Fatal("invalid supplied identity accepted")
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	"wtm/internal/harness"
@@ -29,12 +30,12 @@ func hiddenSessionDirectory(t *testing.T) string {
 	return link
 }
 
-func cleanupHiddenSession(t *testing.T, repo string, w worktree, idx sessionIndex) (gcResult, []string, error) {
+func cleanupHiddenSession(t *testing.T, repo string, w core.Worktree, idx core.SessionIndex) (gcResult, []string, error) {
 	t.Helper()
 	var res gcResult
 	events := make(chan ui.ProgressEvent, 64)
 	p := ui.NewProgress(context.Background(), events)
-	res, err := gcCleanup(repo, []worktree{w}, remotePlan{keep: true}, false, idx, gcMode{deleteTemp: true, idleOnly: true}, TempNow, p)
+	res, err := gcCleanup(repo, []core.Worktree{w}, remotePlan{keep: true}, false, idx, gcMode{deleteTemp: true, idleOnly: true}, TempNow, p)
 	close(events)
 	var notices []string
 	for ev := range events {

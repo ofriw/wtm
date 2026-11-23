@@ -6,12 +6,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	. "wtm/internal/testutil"
+	"wtm/internal/ui"
 )
 
-func sharedIdleTemps(t *testing.T) (string, string, []worktree, []string) {
+func sharedIdleTemps(t *testing.T) (string, string, []core.Worktree, []string) {
 	t.Helper()
 	Sandbox(t)
 	t.Setenv("GIT_COMMITTER_DATE", TempTestTime.Format(time.RFC3339))
@@ -20,7 +22,7 @@ func sharedIdleTemps(t *testing.T) (string, string, []worktree, []string) {
 	second := CanonicalPath(filepath.Join(filepath.Dir(repo), "linked2"))
 	GitWorktreeAdd(t, repo, second, "feat2", "refs/heads/main")
 	MustGit(t, repo, "branch", "--set-upstream-to=origin/feat", "feat2")
-	var selected []worktree
+	var selected []core.Worktree
 	var sessions []string
 	for i, path := range []string{first, second} {
 		w, session := seedSharedIdleTemp(t, repo, path, strconv.Itoa(i))
@@ -30,7 +32,7 @@ func sharedIdleTemps(t *testing.T) (string, string, []worktree, []string) {
 	return repo, origin, selected, sessions
 }
 
-func seedSharedIdleTemp(t *testing.T, repo, path, sessionName string) (worktree, string) {
+func seedSharedIdleTemp(t *testing.T, repo, path, sessionName string) (core.Worktree, string) {
 	t.Helper()
 	seedTempRecord(t, path, discovered(t, repo, path).Branch, "1h", TempTestTime)
 	session := MkSession(t, path, sessionName, TempTestTime)
@@ -71,11 +73,11 @@ func testSharedTempActivity(t *testing.T, activeFirst bool) {
 	assertSharedIdleRemoved(t, repo, idle, sessions[1], res)
 }
 
-func cleanupSharedIdleTemps(t *testing.T, repo string, selected []worktree, plan remotePlan, idx sessionIndex) (gcResult, string) {
+func cleanupSharedIdleTemps(t *testing.T, repo string, selected []core.Worktree, plan remotePlan, idx core.SessionIndex) (gcResult, string) {
 	t.Helper()
 	var res gcResult
 	warnings := CaptureStderr(t, func() {
-		err := withProgress(&globals{JSON: true}, true, func(p *progress) error {
+		err := withProgress(&core.Globals{JSON: true}, true, func(p *ui.Progress) error {
 			var err error
 			res, err = gcCleanup(repo, selected, plan, false, idx, gcMode{deleteTemp: true, idleOnly: true}, TempNow, p)
 			return err
@@ -87,7 +89,7 @@ func cleanupSharedIdleTemps(t *testing.T, repo string, selected []worktree, plan
 	return res, warnings
 }
 
-func assertSharedActiveSurvives(t *testing.T, repo, origin string, active worktree, sessions []string, warnings string) {
+func assertSharedActiveSurvives(t *testing.T, repo, origin string, active core.Worktree, sessions []string, warnings string) {
 	t.Helper()
 	if !fs.Exists(active.Path) || !git.RefExists(repo, "refs/heads/"+active.Branch) {
 		t.Fatal("ACTIVE checkout or local branch was removed")
@@ -105,7 +107,7 @@ func assertSharedActiveSurvives(t *testing.T, repo, origin string, active worktr
 	}
 }
 
-func assertSharedIdleRemoved(t *testing.T, repo string, idle worktree, session string, res gcResult) {
+func assertSharedIdleRemoved(t *testing.T, repo string, idle core.Worktree, session string, res gcResult) {
 	t.Helper()
 	assertTempCleanupSucceeded(t, repo, idle, res)
 	if fs.Exists(session) {
