@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestScanWorktreesWarningOrder pins the diagnostic contract: workers may run
@@ -24,7 +25,7 @@ func TestScanWorktreesWarningOrder(t *testing.T) {
 	for run := range runs {
 		events := make(chan progressEvent, 4*worktrees+8)
 		p := &progress{ctx: context.Background(), events: events}
-		if _, err := scanWorktrees(in, p); err != nil {
+		if _, err := scanWorktrees(in, p, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		close(events)

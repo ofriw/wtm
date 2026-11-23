@@ -78,8 +78,8 @@ type workspace struct {
 // span discovery, pricing and parsing. A nil p is a no-op handle. Discovery
 // reads but never reconciles the temp registry. Explicit removal passes
 // failClosed to reject unreadable sessions before any destructive action.
-func loadWorkspace(g *globals, p *progress, failClosed bool) (workspace, error) {
-	return loadWorkspaceWithSessions(g, p, discoverySessions(failClosed))
+func loadWorkspace(g *globals, p *progress, failClosed bool, now time.Time) (workspace, error) {
+	return loadWorkspaceWithSessions(g, p, discoverySessions(failClosed), now)
 }
 
 // loadWorkspaceProgress opens a discovery-only progress session. Commands whose
@@ -89,7 +89,7 @@ func loadWorkspaceProgress(g *globals, failClosed bool) (workspace, error) {
 	var ws workspace
 	err := withProgress(g, progressOptions{}, func(p *progress) error {
 		var derr error
-		ws, derr = loadWorkspace(g, p, failClosed)
+		ws, derr = loadWorkspace(g, p, failClosed, nowFunc())
 		return derr
 	})
 	return ws, err
@@ -106,7 +106,7 @@ func loadGCWorkspace(g *globals, paths []string) (workspace, error) {
 	var ws workspace
 	err := withProgress(g, progressOptions{}, func(p *progress) error {
 		var derr error
-		ws, derr = loadWorkspaceWithSessions(g, p, sessions)
+		ws, derr = loadWorkspaceWithSessions(g, p, sessions, nowFunc())
 		return derr
 	})
 	return ws, err
@@ -114,7 +114,7 @@ func loadGCWorkspace(g *globals, paths []string) (workspace, error) {
 
 type sessionDiscovery func(*progress) (sessionIndex, []unverifiedSession, error)
 
-func loadWorkspaceWithSessions(g *globals, p *progress, sessions sessionDiscovery) (workspace, error) {
+func loadWorkspaceWithSessions(g *globals, p *progress, sessions sessionDiscovery, now time.Time) (workspace, error) {
 	var ws workspace
 	root, err := resolveRoot(g)
 	if err != nil {
@@ -124,24 +124,24 @@ func loadWorkspaceWithSessions(g *globals, p *progress, sessions sessionDiscover
 	if err != nil {
 		return ws, err
 	}
-	ws.wts, ws.idx, err = discoverWithSessions(root, p, sessions)
+	ws.wts, ws.idx, err = discoverWithSessions(root, p, sessions, now)
 	ws.root, ws.ttl = root, ttl
 	return ws, err
 }
 
-func buildWorktree(g gworktree, idx sessionIndex, ups map[string]upstream, temps tempStore, p *progress) worktree {
-	w := worktreeInventory(g, idx, ups, p)
+func buildWorktree(g gworktree, idx sessionIndex, ups map[string]upstream, temps tempStore, p *progress, now time.Time) worktree {
+	w := worktreeInventory(g, idx, ups, p, now)
 	applyTempRecord(&w, temps, p)
 	return w
 }
 
-func worktreeInventory(g gworktree, idx sessionIndex, ups map[string]upstream, p *progress) worktree {
+func worktreeInventory(g gworktree, idx sessionIndex, ups map[string]upstream, p *progress, now time.Time) worktree {
 	pth := canonical(g.Path)
 	configs := mcpConfigs(pth, p)
 	return worktree{
 		Path: pth, Branch: g.Branch, Upstream: ups[g.Branch], Main: g.Main,
 		// Dirty is set lazily by the gc picker; status does not use it.
-		LastUsed: worktreeLastUsed(pth, idx, p),
+		LastUsed: worktreeLastUsed(pth, idx, p, now),
 		Caps:     capabilityStates(capInput{root: pth, mcp: configs}),
 		Created:  worktreeCreated(pth),
 	}
@@ -182,20 +182,23 @@ func applyTempRecord(w *worktree, temps tempStore, p *progress) {
 
 // discover inventories every worktree of the repo rooted at root, reporting
 // each slow step to p. The returned session index is reused by reclamation.
-func discover(root string, p *progress, failClosed bool) ([]worktree, sessionIndex, error) {
-	return discoverWithSessions(root, p, discoverySessions(failClosed))
+// now is the single report instant the caller already read: a status run
+// clamps every derived time (LastUsed, ACTIVE, cache freshness) to the same
+// clock, so a future filesystem timestamp cannot split the run.
+func discover(root string, p *progress, failClosed bool, now time.Time) ([]worktree, sessionIndex, error) {
+	return discoverWithSessions(root, p, discoverySessions(failClosed), now)
 }
 
-func discoverWithSessions(root string, p *progress, sessions sessionDiscovery) ([]worktree, sessionIndex, error) {
+func discoverWithSessions(root string, p *progress, sessions sessionDiscovery, now time.Time) ([]worktree, sessionIndex, error) {
 	in, err := discoverInputs(root, p, sessions)
 	if err != nil {
 		return nil, nil, err
 	}
-	wts, err := scanWorktrees(in, p)
+	wts, err := scanWorktrees(in, p, now)
 	if err != nil {
 		return nil, nil, err
 	}
-	guardPermanentActivity(wts, in.unknown, nowFunc(), p)
+	guardPermanentActivity(wts, in.unknown, now, p)
 	sortWorktrees(wts)
 	return wts, in.idx, nil
 }
@@ -293,7 +296,7 @@ type inventoryResult struct {
 // independent. The label follows the worktree a worker picked up, which is the
 // live "what is being processed" answer; results stay in git's order, and so do
 // the warnings they carry.
-func scanWorktrees(in discoveryInputs, p *progress) ([]worktree, error) {
+func scanWorktrees(in discoveryInputs, p *progress, now time.Time) ([]worktree, error) {
 	p.phase("scanning worktrees", len(in.raw))
 	results := mapParallel(len(in.raw), scanWorkers, func(i int) inventoryResult {
 		if err := p.abort(); err != nil {
@@ -302,7 +305,7 @@ func scanWorktrees(in discoveryInputs, p *progress) ([]worktree, error) {
 		g := in.raw[i]
 		p.detail(displayPath(g.Path))
 		var warnings []string
-		w := buildWorktree(g, in.idx, in.ups, in.temps, p.worker(&warnings))
+		w := buildWorktree(g, in.idx, in.ups, in.temps, p.worker(&warnings), now)
 		p.advance(1)
 		return inventoryResult{w: w, warnings: warnings}
 	})

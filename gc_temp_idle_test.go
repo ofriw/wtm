@@ -50,7 +50,7 @@ func activateTemp(t *testing.T, w worktree, activity string) {
 // Cleanup reuses discovery's real ownership index, independent of idle refresh.
 func cleanupSessionIndex(t *testing.T, repo string) sessionIndex {
 	t.Helper()
-	_, idx, err := discover(repo, nil, false)
+	_, idx, err := discover(repo, nil, false, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

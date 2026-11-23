@@ -104,9 +104,9 @@ func TestExplicitBudgetSurvivesCapture(t *testing.T) {
 	wts := []worktree{{Path: "/with", Usage: estimatedUsage()}}
 	cols := statusSchema(false, wts)
 	withStdout(t, slave, func() {
-		before := costLegendNeeded(cols, wts, "/elsewhere", at(0), 10*time.Hour, 0)
+		before := costLegendNeeded(cols, wts, at(0), 10*time.Hour, 0)
 		captureStdout(t, func() {
-			after := costLegendNeeded(cols, wts, "/elsewhere", at(0), 10*time.Hour, 0)
+			after := costLegendNeeded(cols, wts, at(0), 10*time.Hour, 0)
 			if before != after || !after.tableReasons.any() {
 				t.Fatalf("capture changed explicit unbounded layout: before=%+v after=%+v", before, after)
 			}

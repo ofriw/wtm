@@ -87,7 +87,7 @@ func TestIndexSessionsIndependentOfWorkers(t *testing.T) {
 					indexPaths(serial), indexPaths(pooled))
 			}
 			for _, path := range []string{wtA, wtB} {
-				if got, want := worktreeLastUsed(path, pooled, nil), worktreeLastUsed(path, serial, nil); !got.Equal(want) {
+				if got, want := worktreeLastUsed(path, pooled, nil, time.Now()), worktreeLastUsed(path, serial, nil, time.Now()); !got.Equal(want) {
 					t.Errorf("LAST USED for %s = %s, want %s (workers=%d)", path, got, want, workers)
 				}
 			}

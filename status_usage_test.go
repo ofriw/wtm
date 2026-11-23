@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"math"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -194,10 +195,10 @@ func TestStatusCostLegend(t *testing.T) {
 func TestCostLegendNeededFollowsRenderedCells(t *testing.T) {
 	with := worktree{Path: "/with", Usage: estimatedUsage()}
 	cols := statusSchema(false, []worktree{with})
-	if r := costLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour, 0); !r.tableReasons.any() {
+	if r := costLegendNeeded(cols, []worktree{with}, at(0), 10*time.Hour, 0); !r.tableReasons.any() {
 		t.Fatal("an estimated table total must ask for the legend")
 	}
-	if r := costLegendNeeded(cols, []worktree{with}, "/elsewhere", at(0), 10*time.Hour, 5); r.tableReasons.any() {
+	if r := costLegendNeeded(cols, []worktree{with}, at(0), 10*time.Hour, 5); r.tableReasons.any() {
 		t.Fatal("a dropped COST column must not ask for the legend")
 	}
 }
@@ -237,7 +238,7 @@ func TestCostLegendSelectivity(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := worktree{Path: "/with", Usage: pairUsage(tc.pair)}
-			r := costLegendNeeded(cols, []worktree{w}, "/elsewhere", at(0), 10*time.Hour, 0).tableReasons
+			r := costLegendNeeded(cols, []worktree{w}, at(0), 10*time.Hour, 0).tableReasons
 			if r.cache != tc.wantCache || r.overage != tc.wantOver {
 				t.Fatalf("reasons = %+v, want cache=%v overage=%v", r, tc.wantCache, tc.wantOver)
 			}
@@ -258,7 +259,7 @@ func TestCostLegendSelectivity(t *testing.T) {
 		both := overageEst
 		both.list = cacheEst
 		w := worktree{Path: "/with", Usage: pairUsage(both)}
-		r := costLegendNeeded(cols, []worktree{w}, "/elsewhere", at(0), 10*time.Hour, 0).tableReasons
+		r := costLegendNeeded(cols, []worktree{w}, at(0), 10*time.Hour, 0).tableReasons
 		if !r.cache || !r.overage {
 			t.Fatalf("reasons = %+v, want both", r)
 		}
@@ -531,7 +532,7 @@ func TestCostLegendSplitsTableAndDetail(t *testing.T) {
 	env := sandbox(t)
 	tableWT := worktree{Path: filepath.Join(env.Home, "wt-table"), Usage: estimatedUsage()}
 	cols := statusSchema(false, []worktree{tableWT})
-	l := costLegendNeeded(cols, []worktree{tableWT}, "/elsewhere", now, 10*time.Hour, 0)
+	l := costLegendNeeded(cols, []worktree{tableWT}, now, 10*time.Hour, 0)
 	if !l.tableReasons.any() {
 		t.Fatal("estimated table total must set tableReasons")
 	}
@@ -655,7 +656,7 @@ func TestLoadUsageKeepsAllUnreadable(t *testing.T) {
 	ws := workspace{wts: []worktree{{Path: dir}}, idx: sessionIndex{canonical(dir): {
 		{path: filepath.Join(dir, "missing.jsonl"), harness: "pi"},
 	}}}
-	captureStderr(t, func() { _ = ws.loadUsage(nil) })
+	captureStderr(t, func() { _ = ws.loadUsage(nil, nowFunc()) })
 	u := ws.wts[0].Usage
 	if u == nil {
 		t.Fatal("partial usage dropped: total loss reads as no usage")
@@ -899,7 +900,7 @@ func TestStatusPartialLegendNeedsRenderedMarker(t *testing.T) {
 	}
 	lostWts := []worktree{lost}
 	lostCols := statusSchema(false, lostWts)
-	lostLegend := costLegendNeeded(lostCols, lostWts, "", at(0), 0, 0)
+	lostLegend := costLegendNeeded(lostCols, lostWts, at(0), 0, 0)
 	if lostLegend.partial {
 		t.Error("table legend must not print a partial clause without a marker")
 	}
@@ -930,7 +931,7 @@ func TestStatusPartialLegendNeedsRenderedMarker(t *testing.T) {
 		t.Error("a readable partial span must claim the ACTIVE marker")
 	}
 	mixedCols := statusSchema(false, mixedWts)
-	mixedLegend := costLegendNeeded(mixedCols, mixedWts, "", at(0), 0, 0)
+	mixedLegend := costLegendNeeded(mixedCols, mixedWts, at(0), 0, 0)
 	if !mixedLegend.partial {
 		t.Error("table legend must explain the rendered partial marker")
 	}
@@ -1003,7 +1004,7 @@ func TestStatusPartialZeroSecondsJSONStaysQualified(t *testing.T) {
 // breakdown without parsing the table.
 func TestStatusJSONTiers(t *testing.T) {
 	var u worktreeUsage
-	price := usagePricer(agent{name: "pi"}, nil, subscriptions{})
+	price := usagePricer(agent{name: "pi"}, nil, subscriptions{}, nil)
 	u.addSession("pi", []usageEvent{{
 		at: at(0), model: "m", cost: fptr(0.30),
 		tokens:   promptTokens{input: 1000, output: 500, cacheRead: 2000, cacheWrite5m: 100},
@@ -1023,14 +1024,14 @@ func TestStatusJSONTiers(t *testing.T) {
 	if len(tiers) != int(numTiers) {
 		t.Fatalf("tiers = %d keys, want %d\n%s", len(tiers), numTiers, out)
 	}
-	if in := tiers["input"]; in.Tokens != 1000 || in.Cost == nil || *in.Cost != 0.10 {
+	if in := tiers["input"]; in.Tokens == nil || *in.Tokens != 1000 || in.Cost == nil || *in.Cost != 0.10 {
 		t.Errorf("input tier = %+v, want 1000 tokens @ 0.10", in)
 	}
-	if cw := tiers["cacheWrite"]; cw.Tokens != 100 {
+	if cw := tiers["cacheWrite"]; cw.Tokens == nil || *cw.Tokens != 100 {
 		t.Errorf("cacheWrite tier = %+v, want 100 tokens", cw)
 	}
-	if got := tiers["cacheRead"].Tokens; got != 2000 {
-		t.Errorf("cacheRead tokens = %d, want 2000", got)
+	if got := tiers["cacheRead"].Tokens; got == nil || *got != 2000 {
+		t.Errorf("cacheRead tokens = %v, want 2000", got)
 	}
 	m := got[0].Usage["pi"].Models["m"]
 	if m.CacheMissTokens == nil || *m.CacheMissTokens != 1100 {
@@ -1046,7 +1047,7 @@ func TestStatusJSONTiers(t *testing.T) {
 // recorded build omits only the rate, so the contract never carries a 100%.
 func TestStatusJSONCacheMetricsOmitted(t *testing.T) {
 	var u worktreeUsage
-	price := usagePricer(agent{name: "pi"}, nil, subscriptions{})
+	price := usagePricer(agent{name: "pi"}, nil, subscriptions{}, nil)
 	u.addSession("pi", []usageEvent{
 		{at: at(0), model: "notokens", cost: fptr(0.10)},
 		{at: at(0), model: "outputonly", cost: fptr(0.10), tokens: promptTokens{output: 500}},
@@ -1079,7 +1080,7 @@ func TestStatusJSONCacheMetricsOmitted(t *testing.T) {
 // count but omit the rate, so no consumer ever reads a false 100%.
 func TestStatusJSONCacheKeysConsumer(t *testing.T) {
 	var u worktreeUsage
-	price := usagePricer(agent{name: "pi"}, nil, subscriptions{})
+	price := usagePricer(agent{name: "pi"}, nil, subscriptions{}, nil)
 	u.addSession("pi", []usageEvent{
 		{at: at(0), model: "withtokens", cost: fptr(0.30), tokens: promptTokens{input: 1000, cacheRead: 2000}},
 		{at: at(0), model: "notokens", cost: fptr(0.10)},
@@ -1250,5 +1251,407 @@ func TestStatusDetailTokenLegendOnlyWithTokens(t *testing.T) {
 	})
 	if !strings.Contains(tokOut, tokenLegendTitle) {
 		t.Errorf("token-bearing detail must print the token legend:\n%s", tokOut)
+	}
+}
+
+// TestCorruptCauseWarnsOnceAcrossSessions pins the once-per-cause contract: the
+// same corrupt count repeated across separate worktrees warns once, not once
+// per worktree, while a distinct cause keeps its own line. Only the report-level
+// dedupe can collapse identical causes from different worktrees, so removing it
+// floods stderr here.
+func TestCorruptCauseWarnsOnceAcrossSessions(t *testing.T) {
+	sandbox(t)
+	pinRates(t)
+	repo := nativeRepo(t)
+	cause := `{"input_tokens":-5,"output_tokens":10}`
+	for _, branch := range []string{"wt-a", "wt-b"} {
+		wt := filepath.Join(filepath.Dir(repo), branch)
+		gitWorktreeAdd(t, repo, wt, branch, "main")
+		seedSubscriptionSession(t, wt, "corrupt-"+branch, cause)
+	}
+	distinct := filepath.Join(filepath.Dir(repo), "wt-distinct")
+	gitWorktreeAdd(t, repo, distinct, "wt-distinct", "main")
+	seedSubscriptionSession(t, distinct, "corrupt-distinct",
+		`{"input_tokens":1000,"output_tokens":10,"server_tool_use":{"web_search_requests":-3}}`)
+
+	out, stderr, rc := runWTM(t, repo, nil, "status")
+	if rc != 0 {
+		t.Fatalf("status exit %d: %s", rc, stderr)
+	}
+	for causeText, want := range map[string]int{"token input: negative": 1, "webSearch: negative": 1} {
+		if n := strings.Count(stderr, causeText); n != want {
+			t.Errorf("warnings for %q = %d, want %d\n%s", causeText, n, want, stderr)
+		}
+	}
+	if !strings.Contains(out, "unknown") {
+		t.Errorf("corrupt count must read unknown:\n%s", out)
+	}
+}
+
+// detailModelCells returns the detail grid row's cells for one model, in
+// display order: MODEL TIME COST, then the token group (in, out, hit, write,
+// miss, hit%). Unbounded output (no COLUMNS, no TTY) renders the full grid and
+// no LIST column for an unproven fixture, so the row shape is stable here.
+func detailModelCells(t *testing.T, out, model string) []string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == model {
+			return fields
+		}
+	}
+	t.Fatalf("detail model row missing for %q:\n%s", model, out)
+	return nil
+}
+
+// TestClaudeCorruptCounts pins the corrupt-count contract: a rejected class
+// never renders or serializes, only its tier reads unknown, and the derived
+// cost and ratios go unknown rather than understated. The fixture lists
+// above-200k rates, so a corrupt prompt class also hides the context that
+// selects them: every tier cost reads unknown while its valid token count stays.
+func TestClaudeCorruptCounts(t *testing.T) {
+	for _, tc := range []struct {
+		name, usage, cause string
+		input              any
+		cacheRead, write   bool
+	}{
+		{"input", `{"input_tokens":1000000000001,"output_tokens":10}`, "above", nil, false, false},
+		{"cache", `{"input_tokens":1000,"output_tokens":10,"cache_read_input_tokens":-5}`, "negative", float64(1000), true, false},
+		{"write", `{"input_tokens":1000,"output_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":-1,"ephemeral_1h_input_tokens":1000}}`, "negative", float64(1000), false, true},
+		{"flatWrite", `{"input_tokens":1000,"output_tokens":10,"cache_creation_input_tokens":-5}`, "negative", float64(1000), false, true},
+		{"flatWriteTotal", `{"input_tokens":1000,"output_tokens":10,"cache_creation_input_tokens":1000000000001,"cache_creation":{"ephemeral_5m_input_tokens":600000000000,"ephemeral_1h_input_tokens":400000000001}}`, "above", float64(1000), false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox(t)
+			pinRates(t)
+			repo := nativeRepo(t)
+			seedSubscriptionSession(t, repo, "corrupt-"+tc.name, tc.usage)
+
+			out, stderr, rc := runWTM(t, repo, nil, "status")
+			if rc != 0 {
+				t.Fatalf("status exit %d: %s", rc, stderr)
+			}
+			cells := detailModelCells(t, out, "claude-sonnet-4-6")
+			// The affected class reads unknown in its own grid cells, independent
+			// of the cost cell, so a rejected count can neither render exactly nor
+			// hide behind an unrelated "unknown".
+			if cells[2] != "unknown" {
+				t.Errorf("model cost cell = %q, want unknown\n%s", cells[2], out)
+			}
+			if cells[3] != "unknown" || cells[4] != "10" {
+				t.Errorf("model token cells = %#v, want in=unknown out=10", cells[3:5])
+			}
+			if tc.cacheRead && cells[5] != "unknown" {
+				t.Errorf("cache-hit cell = %q, want unknown", cells[5])
+			}
+			if tc.write && cells[6] != "unknown" {
+				t.Errorf("cache-write cell = %q, want unknown", cells[6])
+			}
+			if !strings.Contains(stderr, "token") || !strings.Contains(stderr, tc.cause) {
+				t.Errorf("stderr misses the count cause:\n%s", stderr)
+			}
+
+			rows := subscriptionStatus(t, repo)
+			model := subscriptionObject(t, subscriptionObject(t, subscriptionObject(t, subscriptionObject(t, rows[0]["usage"])["claude"])["models"])["claude-sonnet-4-6"])
+			if v, present := model["cost"]; !present || v != nil {
+				t.Errorf("model cost = %#v (present %v), want explicit null", v, present)
+			}
+			tiers := subscriptionObject(t, model["tiers"])
+			checkTier := func(name string, tokens any) {
+				t.Helper()
+				got := subscriptionObject(t, tiers[name])
+				if v, present := got["tokens"]; !present || v != tokens {
+					t.Errorf("%s tier tokens = %#v (present %v), want %#v", name, v, present, tokens)
+				}
+				if v, present := got["cost"]; !present || v != nil {
+					t.Errorf("%s tier cost = %#v (present %v), want explicit null", name, v, present)
+				}
+			}
+			checkTier("input", tc.input)
+			checkTier("output", float64(10))
+			for _, c := range []struct {
+				check bool
+				tier  string
+			}{{tc.cacheRead, "cacheRead"}, {tc.write, "cacheWrite"}} {
+				if c.check {
+					checkTier(c.tier, nil)
+				}
+			}
+			if _, present := model["cacheMissTokens"]; present {
+				t.Errorf("cacheMissTokens = %v, want omitted for a corrupt prompt side", model["cacheMissTokens"])
+			}
+			if _, present := rows[0]["inputOutputRatio"]; present {
+				t.Error("inputOutputRatio must be omitted when a token class is corrupt")
+			}
+		})
+	}
+}
+
+// TestStatusJSONInvalidCatalogWarns: the shipped binary in --json mode must warn
+// on stderr for a corrupt catalog and never price it into the JSON.
+func TestStatusJSONInvalidCatalogWarns(t *testing.T) {
+	rates := filepath.Join(sandbox(t).Home, "rates.json")
+	writeFile(t, rates, invalidRates, 0o644)
+	writeClaudeAccount(t, "stripe_subscription", "2025-01-01T00:00:00Z")
+	repo := nativeRepo(t)
+	seedSubscriptionSession(t, repo, "session", `{"input_tokens":100000}`)
+	stdout, stderr, rc := runWTM(t, repo, []string{ratesEnv + "=" + rates}, "status", "--json")
+	if rc != 0 {
+		t.Fatalf("status exit %d: %s", rc, stderr)
+	}
+	if !strings.Contains(stderr, "claude-sonnet-4-6.standard.input") || !strings.Contains(stderr, "negative") {
+		t.Errorf("stderr misses the catalog cause:\n%s", stderr)
+	}
+	if v, present := statusRows(t, stdout)[0]["listCost"]; !present || v != nil {
+		t.Errorf("listCost = %v (present %v), want explicit null: corrupt rates cannot price", v, present)
+	}
+}
+
+// TestStatusJSONMalformedExactRateStaysUnknown pins the exact-row contract: a
+// malformed figure in an exact catalog row must read unknown and warn, never be
+// priced from that row's alias name, while the row's valid sibling figures keep
+// pricing exactly. Both malformed shapes count: a wrong JSON type, and a number
+// this build cannot hold.
+func TestStatusJSONMalformedExactRateStaysUnknown(t *testing.T) {
+	for _, tc := range []struct{ name, figure, cause string }{
+		{"wrong JSON type", `"oops"`, "not a number"},
+		{"number out of range", "1e400", "number out of range"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rates := filepath.Join(sandbox(t).Home, "rates.json")
+			// The alias row m prices input at 0.001, so a borrowed alias price
+			// would show as 0.10 for 100 input tokens.
+			body := `{"vendor/m":{"input_cost_per_token":` + tc.figure +
+				`,"output_cost_per_token":0.001},"m":{"input_cost_per_token":0.001,"output_cost_per_token":0.001}}`
+			writeFile(t, rates, body, 0o644)
+			writeClaudeAccount(t, "stripe_subscription", "2025-01-01T00:00:00Z")
+			repo := nativeRepo(t)
+			seedClaudeModelSession(t, repo, "session", "vendor/m", `{"input_tokens":100,"output_tokens":10}`)
+			stdout, stderr, rc := runWTM(t, repo, []string{ratesEnv + "=" + rates}, "status", "--json")
+			if rc != 0 {
+				t.Fatalf("status exit %d: %s", rc, stderr)
+			}
+			if !strings.Contains(stderr, "vendor/m.input_cost_per_token") || !strings.Contains(stderr, tc.cause) {
+				t.Errorf("stderr must name the malformed field and %q:\n%s", tc.cause, stderr)
+			}
+			row := statusRows(t, stdout)[0]
+			if v, present := row["listCost"]; !present || v != nil {
+				t.Errorf("listCost = %v (present %v), want explicit null: a malformed rate cannot be exact", v, present)
+			}
+			model := subscriptionObject(t, subscriptionObject(t, subscriptionObject(t,
+				subscriptionObject(t, row["usage"])["claude"])["models"])["vendor/m"])
+			if v, present := model["listCost"]; !present || v != nil {
+				t.Errorf("model listCost = %v (present %v), want explicit null: the alias must not substitute", v, present)
+			}
+			tiers := subscriptionObject(t, model["tiers"])
+			if in := subscriptionObject(t, tiers["input"]); in["tokens"] != float64(100) || in["listCost"] != nil {
+				t.Errorf("input tier = %+v, want 100 tokens and an unknown list price, not the alias 0.10", in)
+			}
+			if out := subscriptionObject(t, tiers["output"]); out["listCost"] != 0.01 {
+				t.Errorf("output tier = %+v, want the valid sibling to keep its exact list price 0.01", out)
+			}
+		})
+	}
+}
+
+// TestStatusJSONAllMalformedExactRateStaysUnknown pins the no-sibling shape of
+// the exact-row contract: a vendor-qualified exact row whose stated figures are
+// all unreadable must stay an exact model with unknown classes, so an alias row
+// cannot silently supply its price. The alias m prices input at 0.001, so a
+// silent substitution would show 0.10 for 100 input tokens.
+func TestStatusJSONAllMalformedExactRateStaysUnknown(t *testing.T) {
+	rates := filepath.Join(sandbox(t).Home, "rates.json")
+	body := `{"vendor/m":{"input_cost_per_token":"oops"},"m":{"input_cost_per_token":0.001,"output_cost_per_token":0.001}}`
+	writeFile(t, rates, body, 0o644)
+	writeClaudeAccount(t, "stripe_subscription", "2025-01-01T00:00:00Z")
+	repo := nativeRepo(t)
+	seedClaudeModelSession(t, repo, "session", "vendor/m", `{"input_tokens":100,"output_tokens":10}`)
+	stdout, stderr, rc := runWTM(t, repo, []string{ratesEnv + "=" + rates}, "status", "--json")
+	if rc != 0 {
+		t.Fatalf("status exit %d: %s", rc, stderr)
+	}
+	if !strings.Contains(stderr, "vendor/m.input_cost_per_token") || !strings.Contains(stderr, "not a number") {
+		t.Errorf("stderr must name the malformed field and its cause:\n%s", stderr)
+	}
+	row := statusRows(t, stdout)[0]
+	if v, present := row["listCost"]; !present || v != nil {
+		t.Errorf("listCost = %v (present %v), want explicit null: the corrupt exact row must block alias pricing", v, present)
+	}
+	model := subscriptionObject(t, subscriptionObject(t, subscriptionObject(t,
+		subscriptionObject(t, row["usage"])["claude"])["models"])["vendor/m"])
+	if v, present := model["listCost"]; !present || v != nil {
+		t.Errorf("model listCost = %v (present %v), want explicit null: the alias must not substitute", v, present)
+	}
+	in := subscriptionObject(t, subscriptionObject(t, model["tiers"])["input"])
+	if in["tokens"] != float64(100) || in["listCost"] != nil {
+		t.Errorf("input tier = %+v, want 100 tokens and an unknown list price, not the alias 0.10", in)
+	}
+}
+
+// caller passes the report instant, so usage clamping and every renderer share
+// it even when a slow step runs between the clock read and the render. The
+// pinned env clock is an hour behind, so a stray nowFunc() read inside
+// loadUsage would see both stamps as future and drop the span.
+func TestLoadUsageUsesReportInstant(t *testing.T) {
+	dir := t.TempDir()
+	report := at(120)
+	t.Setenv("WTM_NOW", at(60).Format(time.RFC3339))
+	session := filepath.Join(dir, "s.jsonl")
+	writeFile(t, session, `{"type":"message","timestamp":"2026-01-01T00:01:50Z","message":{"role":"assistant","model":"m","usage":{"input":10,"output":1,"cost":{"total":1}}}}
+{"type":"message","timestamp":"2026-01-01T00:02:00Z","message":{"role":"assistant","model":"m","usage":{"input":10,"output":1,"cost":{"total":1}}}}
+`, 0o644)
+	ws := workspace{
+		wts: []worktree{{Path: dir}},
+		idx: sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}},
+	}
+	if err := ws.loadUsage(nil, report); err != nil {
+		t.Fatalf("loadUsage: %v", err)
+	}
+	if got := cellActive(ws.wts[0], columnContext{now: report}); got != "10s" {
+		t.Fatalf("active = %q, want 10s from the report instant", got)
+	}
+	var j jsonWorktree
+	applyUsageJSON(&j, ws.wts[0].Usage)
+	if j.ActiveSeconds == nil || *j.ActiveSeconds != 10 {
+		t.Fatalf("activeSeconds = %v, want 10: the table and the JSON must agree", j.ActiveSeconds)
+	}
+}
+
+// TestClaudeCorruptSearchWarnsWhenRatesCannotResolve pins the combined cause: a
+// rejected prompt class leaves a long-context model's rate set unresolvable, so
+// the price is never computed and the corrupt web-search count used to go
+// undisclosed with it. Both causes surface, each named once per run.
+func TestClaudeCorruptSearchWarnsWhenRatesCannotResolve(t *testing.T) {
+	sandbox(t)
+	pinRates(t)
+	repo := nativeRepo(t)
+	seedSubscriptionSession(t, repo, "search-and-input",
+		`{"input_tokens":-5,"output_tokens":10,"server_tool_use":{"web_search_requests":-3}}`)
+	out, stderr, rc := runWTM(t, repo, nil, "status", "--json")
+	if rc != 0 {
+		t.Fatalf("status exit %d: %s", rc, stderr)
+	}
+	for _, want := range []string{"token input: negative", "webSearch: negative"} {
+		if n := strings.Count(stderr, want); n != 1 {
+			t.Errorf("warnings for %q = %d, want 1:\n%s", want, n, stderr)
+		}
+	}
+	rows := statusRows(t, out)
+	if rows[0]["cost"] != nil {
+		t.Errorf("cost = %v, want null: two rejected figures cannot price an exact total", rows[0]["cost"])
+	}
+	if model := statusModel(t, rows[0], claudeAgent.name, "claude-sonnet-4-6"); model["cost"] != nil {
+		t.Errorf("model cost = %v, want null", model["cost"])
+	}
+}
+
+// TestHostileModelNameStaysSingleLine pins that a model name carrying newlines
+// and tabs interpolates into warnings, so the display text must normalize
+// control characters and keep every warning on one line. JSON keeps the raw ID,
+// because machines parse it and never render it.
+func TestHostileModelNameStaysSingleLine(t *testing.T) {
+	sandbox(t)
+	hostile := "a\nBREAK\tEND"
+	rates := filepath.Join(t.TempDir(), "rates.json")
+	writeFile(t, rates, `{`+
+		`"a\nBREAK\tEND": {"input_cost_per_token": -3, "output_cost_per_token": 1e-05}`+`
+}`+"\n", 0o644)
+	t.Setenv(ratesEnv, rates)
+	repo := nativeRepo(t)
+	seedClaudeModelSession(t, repo, "hostile", hostile, `{"input_tokens":-5,"output_tokens":10}`)
+
+	_, stderr, rc := runWTM(t, repo, nil, "status")
+	if rc != 0 {
+		t.Fatalf("status exit %d: %s", rc, stderr)
+	}
+	if !strings.Contains(stderr, "a BREAK END") || strings.ContainsAny(stderr, "\t\r") ||
+		strings.Contains(stderr, "\nBREAK") {
+		t.Errorf("warnings must stay single-line with controls normalized, raw name kept readable:\n%s", stderr)
+	}
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, warnPrefix) && strings.Contains(line, "BREAK") && strings.Contains(line, "\t") {
+			t.Errorf("warning line carries a raw tab: %q", line)
+		}
+	}
+
+	out, stderr, rc := runWTM(t, repo, nil, "status", "--json")
+	if rc != 0 {
+		t.Fatalf("status --json exit %d: %s", rc, stderr)
+	}
+	models := subscriptionObject(t, subscriptionObject(t, subscriptionObject(t, statusRows(t, out)[0]["usage"])["claude"])["models"])
+	if _, ok := models[hostile]; !ok {
+		t.Errorf("JSON must keep the raw model ID %q, got keys %v", hostile, models)
+	}
+}
+
+// TestSettingsRefusalWarnsOncePerRun pins that a refused settings file met from
+// two session cwds of one worktree is one cause, so emitUsageWarning — the
+// single per-run dedupe owner — emits one line.
+func TestSettingsRefusalWarnsOncePerRun(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	wt := filepath.Join(filepath.Dir(repo), "wt")
+	gitWorktreeAdd(t, repo, wt, "wt", "main")
+	mkClaudeSession(t, wt, "rooted", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	// A second session whose cwd is a subdirectory reaches the same refused
+	// settings file through the ancestor walk, so its cause text is identical.
+	sub := filepath.Join(wt, "sub")
+	mkClaudeSession(t, sub, "nested", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	writeClaudeAccount(t, "stripe_subscription", "2020-01-01T00:00:00Z")
+	pinRates(t)
+	if err := os.MkdirAll(filepath.Join(wt, claudeSettingsFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, rc := runWTM(t, repo, nil, "status")
+	if rc != 0 {
+		t.Fatalf("status exit %d: %s", rc, stderr)
+	}
+	if n := strings.Count(stderr, "not a regular file"); n != 1 {
+		t.Errorf("settings-refusal warnings = %d, want 1\n%s", n, stderr)
+	}
+}
+
+// TestStatusUsageSingleReportInstant pins the one-clock-per-run contract: the
+// status command reads the report clock exactly once, so usage clamping, ages,
+// cache freshness and every renderer agree on one instant. The seam is the
+// injectable nowFunc variable.
+func TestStatusUsageSingleReportInstant(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	orig := nowFunc
+	reads := 0
+	nowFunc = func() time.Time {
+		reads++
+		return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	}
+	t.Cleanup(func() { nowFunc = orig })
+	if err := dispatch("status", &globals{root: repo, json: true}, nil); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if reads != 1 {
+		t.Errorf("clock reads = %d, want exactly 1 per status run", reads)
+	}
+}
+
+// TestStatusUsageNonStatusUnchanged pins that the report clock belongs to status
+// alone: a non-status command never reads it, and a pinned clock must not break
+// the command.
+func TestStatusUsageNonStatusUnchanged(t *testing.T) {
+	sandbox(t)
+	repo := nativeRepo(t)
+	t.Setenv("WTM_NOW", "2026-01-01T12:00:00Z")
+	orig := nowFunc
+	reads := 0
+	nowFunc = func() time.Time {
+		reads++
+		return time.Now()
+	}
+	t.Cleanup(func() { nowFunc = orig })
+	if err := dispatch("config", &globals{root: repo}, nil); err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	if reads != 0 {
+		t.Errorf("clock reads = %d, want 0 for a non-status command", reads)
 	}
 }

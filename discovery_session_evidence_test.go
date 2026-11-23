@@ -160,7 +160,7 @@ func TestExplicitGCPathFailsClosedOnUnreadableSession(t *testing.T) {
 			if !exists(temp.Path) || !exists(permanent) || !exists(p) {
 				t.Fatal("explicit GC changed checkout or evidence despite unreadable session")
 			}
-			if _, _, err := discover(repo, nil, true); err == nil || !strings.Contains(err.Error(), p) {
+			if _, _, err := discover(repo, nil, true, time.Now()); err == nil || !strings.Contains(err.Error(), p) {
 				t.Fatalf("ordinary strict discovery must reject unreadable session: %v", err)
 			}
 		})

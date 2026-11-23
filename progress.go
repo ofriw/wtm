@@ -185,13 +185,15 @@ func noticeProgress(p *progress, format string, a ...any) {
 }
 
 // warnProgress discloses a non-fatal warning, composing the label owned by
-// warnPrefix so renderer and plain-stderr warnings cannot drift.
+// warnPrefix so renderer and plain-stderr warnings cannot drift. The text is
+// cleaned at this one seam, so TUI and plain-stderr paths cannot disagree.
 func warnProgress(p *progress, format string, a ...any) {
+	text := cleanWarningText(fmt.Sprintf(format, a...))
 	if p == nil {
-		warnf(format, a...)
+		fmt.Fprint(os.Stderr, warnPrefix+text+"\n")
 		return
 	}
-	p.notice(warnPrefix + fmt.Sprintf(format, a...))
+	p.notice(warnPrefix + text)
 }
 
 // done is the terminal event: it lets the renderer show a truthful summary even
@@ -311,11 +313,14 @@ func runPlainProgress(out io.Writer, work func(*progress) error) error {
 	return <-workErr
 }
 
-// runProgressProgram starts the renderer only after the delay window closes: a
-// run that finishes inside it writes no frame, so a fast status leaves stderr
-// clean instead of flashing a frame and a stray newline. Events emitted before
-// the window closes queue in the relay, so the delay costs memory, never work
-// time; notices still print because a disclosure must not depend on speed.
+// runProgressProgram runs the renderer and the interrupt contract in one flow:
+// a run that finishes inside the delay window writes no frame, so a fast status
+// leaves stderr clean; a run that survives it renders animated frames until the
+// work ends. Events emitted before the window closes queue in the relay, so the
+// delay costs memory, never work time; notices still print because a disclosure
+// must not depend on speed. The outcome is the work's, degraded to
+// errInterrupted when either the signal record, the renderer, or a cancelled
+// work result proves the user interrupted.
 func runProgressProgram(out io.Writer, opts progressOptions, work func(*progress) error) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	if !childCtx.CompareAndSwap(nil, &ctx) {
@@ -324,6 +329,8 @@ func runProgressProgram(out io.Writer, opts progressOptions, work func(*progress
 	defer childCtx.Store(nil)
 	defer cancel()
 	workErr, events := feedProgress(ctx, work)
+	// Silence a fast run: if the work ends inside the delay window, drop its
+	// frames (notices still print) and return its outcome directly.
 	if opts.delay > 0 {
 		select {
 		case err := <-workErr:
@@ -342,26 +349,29 @@ func runProgressProgram(out io.Writer, opts progressOptions, work func(*progress
 	// Restore the default disposition first: a second Ctrl-C must terminate.
 	signal.Stop(signals)
 	cancel()
+	// Wait for the work, bounded by the grace window so a wedged worker cannot
+	// hang the exit.
 	var err error
 	select {
 	case err = <-workErr:
 	case <-time.After(interruptGrace):
 		warnf("work did not stop within %s of the interrupt; exiting anyway", interruptGrace)
-		return errInterrupted
+		err = errInterrupted
 	}
 	// A cancelled work result is the second proof: SIGTERM may be delivered to
 	// Bubble Tea before this listener even when it shut down cleanly.
-	interrupted = interrupted || errors.Is(err, context.Canceled)
-	if interrupted {
+	if interrupted || errors.Is(err, context.Canceled) {
 		return errInterrupted
 	}
-	if err != nil {
-		if runErr != nil {
-			return fmt.Errorf("%w; renderer: %w", err, runErr)
-		}
-		return err
+	// Keep both failures visible: the renderer's cause would otherwise be hidden
+	// by the work's error.
+	if err == nil {
+		return runErr
 	}
-	return runErr
+	if runErr != nil {
+		return fmt.Errorf("%w; renderer: %w", err, runErr)
+	}
+	return err
 }
 
 // watchInterrupts records SIGINT/SIGTERM. Bubble Tea keeps its own handler so

@@ -14,18 +14,21 @@ func cmdStatus(g *globals, args []string) error {
 	if err != nil {
 		return err
 	}
+	// One clock read for the whole run: usage clamping, ages, the table and the
+	// JSON must all agree. Reading before withProgress means a slow rate-catalog
+	// fetch cannot split the report instant.
+	now := nowFunc()
 	var ws workspace
 	err = withProgress(g, statusProgressOptions(g), func(p *progress) error {
 		var lerr error
-		if ws, lerr = loadWorkspace(g, p, false); lerr != nil {
+		if ws, lerr = loadWorkspace(g, p, false, now); lerr != nil {
 			return lerr
 		}
-		return ws.loadUsage(p)
+		return ws.loadUsage(p, now)
 	})
 	if err != nil {
 		return err
 	}
-	now := nowFunc()
 	current := currentWorktreePath(ws)
 	if g.json {
 		return printStatusJSON(ws.wts, now, ws.ttl, current)
@@ -46,7 +49,7 @@ func renderStatus(ws workspace, wide bool, now time.Time, current, colorMode str
 	budget := widthBudget()
 	cols := statusSchema(wide, ws.wts)
 	printStatusTable(cols, ws.wts, now, ws.ttl, colorMode, budget)
-	printCostLegend(costLegendNeeded(cols, ws.wts, current, now, ws.ttl, budget), colorMode, budget)
+	printCostLegend(costLegendNeeded(cols, ws.wts, now, ws.ttl, budget), colorMode, budget)
 	printStatusDetail(ws.wts, current, now, colorMode, budget)
 }
 
@@ -73,8 +76,10 @@ func parseStatusFlags(g *globals, args []string) (bool, error) {
 // harness pins WTM_NOW so every clock read is deterministic in goldens: status
 // ages, worktreeLastUsed and the gc TTL decision all draw from this one seam.
 // A malformed value is a test-setup error, so warnNowEnv discloses it once
-// before any renderer starts: a raw warning inside the frame is erased.
-func nowFunc() time.Time {
+// before any renderer starts: a raw warning inside the frame is erased. As a
+// package variable it is also the injection seam that pins the one-clock-per-run
+// contract.
+var nowFunc = func() time.Time {
 	if t, ok := parseNowEnv(); ok {
 		return t
 	}
@@ -130,7 +135,7 @@ func warnCreatedAtEnv() {
 // check runs once: a Pi-only repo never reaches the network and never opens
 // Claude Code's account file. An unreadable session degrades to a warning:
 // status is read-only and must still report what it knows.
-func (ws *workspace) loadUsage(p *progress) error {
+func (ws *workspace) loadUsage(p *progress, now time.Time) error {
 	hasClaude := ws.idx.hasHarness(ws.wts, claudeAgent.name)
 	hasPi := ws.idx.hasHarness(ws.wts, piAgent.name)
 	subs := loadSubscriptions(hasClaude)
@@ -142,21 +147,22 @@ func (ws *workspace) loadUsage(p *progress) error {
 		warnProgress(p, "pi subscription unproven: %s; pi costs use list price", subs.piErr)
 	}
 	warnParentScopeDisabled(subs, p)
-	cat := ws.loadCatalog(p, hasClaude)
+	cat := ws.loadCatalog(p, hasClaude, now)
 	if err := p.abort(); err != nil {
 		return err
 	}
-	return ws.parseUsage(cat, subs, p)
+	// The caller owns the report instant, so usage and every renderer share it.
+	return ws.parseUsage(cat, subs, now, p)
 }
 
 // loadCatalog resolves the price catalog, naming its source in the progress
 // label so a network wait reads as work, not as a hang.
-func (ws *workspace) loadCatalog(p *progress, hasClaude bool) catalog {
+func (ws *workspace) loadCatalog(p *progress, hasClaude bool, now time.Time) catalog {
 	if !hasClaude {
 		return nil
 	}
 	p.phase("loading rate catalog", 0)
-	cat, err := loadCatalogReporting(p, nowFunc())
+	cat, err := loadCatalogReporting(p, now)
 	if err != nil {
 		warnProgress(p, "claude cost unavailable: %s", err)
 		// A nil catalog makes every harness report unknown, which is the honest
@@ -179,25 +185,40 @@ type usageResult struct {
 // independent. The label follows the worktree a worker picked up; results
 // attach by index after the join, keeping the render order tied to git's order,
 // not to completion order.
-func (ws *workspace) parseUsage(cat catalog, subs subscriptions, p *progress) error {
+func (ws *workspace) parseUsage(cat catalog, subs subscriptions, now time.Time, p *progress) error {
 	p.phase("parsing sessions", len(ws.wts))
 	if len(ws.wts) == 0 {
 		return nil
 	}
 	usages := mapParallel(len(ws.wts), scanWorkers, func(i int) usageResult {
-		if err := p.abort(); err != nil {
-			return usageResult{err: err}
-		}
-		path := ws.wts[i].Path
-		p.detail(displayPath(path))
-		u, warnings, err := buildUsageForReportAt(path, ws.wts, ws.idx, cat, subs, nowFunc())
-		p.advance(1)
-		// Keep a total loss so the loss reads as unknown, never as no usage.
-		if u.hasEvents() || u.partial {
-			return usageResult{usage: &u, err: err, warnings: warnings}
-		}
-		return usageResult{err: err, warnings: warnings}
+		return ws.usageResultFor(i, cat, subs, now, p)
 	})
+	return ws.emitUsageResults(usages, p)
+}
+
+// usageResultFor prices one worktree. A worker never writes stderr
+// (parallel.go), so warnings travel in the result and the parent emits them
+// after the join.
+func (ws *workspace) usageResultFor(i int, cat catalog, subs subscriptions, now time.Time, p *progress) usageResult {
+	if err := p.abort(); err != nil {
+		return usageResult{err: err}
+	}
+	path := ws.wts[i].Path
+	p.detail(displayPath(path))
+	u, warnings, err := buildUsageForReportAt(path, ws.wts, ws.idx, cat, subs, now)
+	p.advance(1)
+	// Keep a total loss so the loss reads as unknown, never as no usage.
+	if u.hasEvents() || u.partial {
+		return usageResult{usage: &u, err: err, warnings: warnings}
+	}
+	return usageResult{err: err, warnings: warnings}
+}
+
+// emitUsageResults attaches every worker's usage and emits its warnings in
+// worktree order: results attach by index, so the render order follows git's
+// order, not completion order.
+func (ws *workspace) emitUsageResults(usages []usageResult, p *progress) error {
+	seen := map[string]bool{}
 	for i, r := range usages {
 		if err := p.abort(); err != nil {
 			return err
@@ -207,10 +228,22 @@ func (ws *workspace) parseUsage(cat catalog, subs subscriptions, p *progress) er
 			warnProgress(p, "usage for %s: %s", displayPath(ws.wts[i].Path), r.err)
 		}
 		for _, warning := range r.warnings {
-			warnProgress(p, "%s; claude costs use list price", warning)
+			emitUsageWarning(p, warning, seen)
 		}
 	}
 	return nil
+}
+
+// emitUsageWarning discloses one worker warning once per run. The cause text is
+// identical for every worktree that shares a settings file or repeats a corrupt
+// record, so a repeat would only bury the first. `usage for <wt>` lines stay
+// per-worktree because their text names the worktree.
+func emitUsageWarning(p *progress, warning error, seen map[string]bool) {
+	if seen[warning.Error()] {
+		return
+	}
+	seen[warning.Error()] = true
+	warnProgress(p, "%s", warning)
 }
 
 // cost is the worktree's price pair; empty when it has no events.

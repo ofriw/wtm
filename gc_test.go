@@ -703,7 +703,7 @@ func gcFixtureWithUpstream(t *testing.T) (repo, linked, origin string) {
 // discovered returns the one discovered worktree at path, with its upstream.
 func discovered(t *testing.T, repo, path string) worktree {
 	t.Helper()
-	wts, _, err := discover(repo, nil, false)
+	wts, _, err := discover(repo, nil, false, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

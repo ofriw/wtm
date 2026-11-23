@@ -174,7 +174,7 @@ func TestWorktreeLastUsed(t *testing.T) {
 			want := tc.setup(t, repo, now)
 			backdateActivityIndex(t, repo, now.Add(-6*time.Hour))
 			idx := mustIndexSessions(t)
-			if got := worktreeLastUsed(repo, idx, nil); !got.Equal(want) {
+			if got := worktreeLastUsed(repo, idx, nil, time.Now()); !got.Equal(want) {
 				t.Fatalf("worktreeLastUsed = %v, want %v", got, want)
 			}
 		})
@@ -184,7 +184,7 @@ func TestWorktreeLastUsed(t *testing.T) {
 		gitTestCommit(t, repo)
 		mkSession(t, repo, "future", now.Add(48*time.Hour))
 		idx := mustIndexSessions(t)
-		got := worktreeLastUsed(repo, idx, nil)
+		got := worktreeLastUsed(repo, idx, nil, time.Now())
 		if got.After(now.Add(time.Minute)) {
 			t.Fatalf("future timestamp not clamped: %v", got)
 		}
@@ -296,7 +296,7 @@ func TestDiscover(t *testing.T) {
 	setMtime(t, chunkhoundDBPath(repo), now.Add(-10*time.Hour))
 	setMtime(t, filepath.Join(linkedA, projectMCPFile), now.Add(-10*time.Hour))
 
-	wts, _, err := discover(repo, nil, false)
+	wts, _, err := discover(repo, nil, false, time.Now())
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 
 	events := make(chan progressEvent, 64)
 	p := &progress{ctx: context.Background(), events: events}
-	if _, _, err := discover(repo, p, false); err != nil {
+	if _, _, err := discover(repo, p, false, time.Now()); err != nil {
 		t.Fatalf("discover must degrade on a bad upstream query, not fail: %v", err)
 	}
 	close(events)
@@ -353,7 +353,7 @@ func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 	}
 
 	stderr := captureStderr(t, func() {
-		if _, _, err := discover(repo, nil, false); err != nil {
+		if _, _, err := discover(repo, nil, false, time.Now()); err != nil {
 			t.Fatalf("discover(nil progress): %v", err)
 		}
 	})
@@ -367,7 +367,7 @@ func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 // mcpConfigFiles as the SSOT. Pinning the exact light-up pairs catches a swap
 // that an "either capability" check would miss.
 func TestBuildWorktreeMCPFiles(t *testing.T) {
-	empty := buildWorktree(gworktree{Path: t.TempDir(), Main: true}, sessionIndex{}, nil, nil, nil)
+	empty := buildWorktree(gworktree{Path: t.TempDir(), Main: true}, sessionIndex{}, nil, nil, nil, time.Now())
 	for _, c := range capabilities() {
 		if empty.Caps[c.id] != capAbsent {
 			t.Fatalf("empty root: %s = %v, want absent", c.id, empty.Caps[c.id])
@@ -383,7 +383,7 @@ func TestBuildWorktreeMCPFiles(t *testing.T) {
 			}
 			root := t.TempDir()
 			writeFile(t, filepath.Join(root, rel), "{}", 0o644)
-			w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil, nil)
+			w := buildWorktree(gworktree{Path: root, Main: true}, sessionIndex{}, nil, nil, nil, time.Now())
 			for _, c := range []string{"mcp", "pi"} {
 				wantState := capAbsent
 				if slices.Contains(want, c) {
@@ -802,7 +802,7 @@ func TestTokenGroupDisclosurePrintsOnce(t *testing.T) {
 	wts := []worktree{cur}
 	errOut := captureStderr(t, func() {
 		captureStdout(t, func() {
-			costLegendNeeded(statusSchema(false, wts), wts, cur.Path, now, 10*time.Hour, 40)
+			costLegendNeeded(statusSchema(false, wts), wts, now, 10*time.Hour, 40)
 			printStatusDetail(wts, cur.Path, now, colorNever, 40)
 		})
 	})

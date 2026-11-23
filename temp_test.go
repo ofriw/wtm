@@ -271,7 +271,7 @@ func TestDiscoveryLenientOnCorruptStore(t *testing.T) {
 	writeFile(t, p, "{not json", 0o600)
 	var wts []worktree
 	var derr error
-	warnings := captureStderr(t, func() { wts, _, derr = discover(repo, nil, false) })
+	warnings := captureStderr(t, func() { wts, _, derr = discover(repo, nil, false, time.Now()) })
 	if derr != nil {
 		t.Fatalf("discover on corrupt store: %v", derr)
 	}

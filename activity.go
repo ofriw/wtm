@@ -190,11 +190,11 @@ func freshWorktreeActivity(path string, now time.Time) (time.Time, []unverifiedS
 
 // worktreeLastUsed includes creation and Git changes so a new or actively
 // edited worktree cannot be classified as abandoned before its first agent session.
-// nowFunc() is the WTM_NOW test seam: in the container harness it is pinned to a
-// fixed time so goldens stay byte-stable. Future mtimes are clamped to that same
-// now so a session newer than the test clock cannot break determinism.
-func worktreeLastUsed(path string, idx sessionIndex, p *progress) time.Time {
-	newest, _ := readWorktreeActivityLenient(path, idx, nowFunc(), p)
+// clock is the caller's report instant (the same now the status run read once):
+// future mtimes are clamped to it, so a session newer than the report clock
+// cannot break determinism.
+func worktreeLastUsed(path string, idx sessionIndex, p *progress, clock time.Time) time.Time {
+	newest, _ := readWorktreeActivityLenient(path, idx, clock, p)
 	return newest
 }
 

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
@@ -21,11 +22,24 @@ import (
 // warnPrefix labels every non-fatal disclosure line, wherever it is emitted.
 const warnPrefix = "warning: "
 
-// warnf writes a `warning:` line to stderr. stdout stays machine-clean, so
-// every non-fatal disclosure goes through here.
-func warnf(format string, a ...any) {
-	fmt.Fprint(os.Stderr, warnPrefix+fmt.Sprintf(format, a...)+"\n")
+// cleanWarningText makes one warning single-line: control characters collapse
+// to spaces and whitespace runs to one space. A hostile cause (a model name
+// carrying newlines or tabs) interpolates into warnings, so only display text
+// is cleaned; raw values stay in JSON.
+func cleanWarningText(s string) string {
+	clean := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(clean), " ")
 }
+
+// warnf writes a `warning:` line to stderr. stdout stays machine-clean, so
+// every non-fatal disclosure goes through here. It is warnProgress's nil-
+// progress case, so the two cannot drift.
+func warnf(format string, a ...any) { warnProgress(nil, format, a...) }
 
 // pickerOptionPrefixWidth is how far huh's MultiSelect indents an option key:
 // the selector ("> " / "  ") plus the toggle prefix ("• " / "✓ ").
@@ -575,10 +589,7 @@ func dropZeroColumns(headers []string, rows [][]string, widths []int) ([]string,
 	if len(keep) == len(widths) {
 		return headers, rows, widths
 	}
-	hidden := hiddenHeaders(headers, widths)
-	if len(hidden) > 0 {
-		warnf("terminal too narrow; hid %s; widen the terminal or use --json", strings.Join(hidden, ", "))
-	}
+	warnHiddenColumns(hiddenHeaders(headers, widths))
 	out := make([][]string, len(rows))
 	for r, row := range rows {
 		out[r] = selectStrings(row, keep)

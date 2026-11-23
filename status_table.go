@@ -377,7 +377,7 @@ type costLegend struct {
 // a legend with nothing to explain. The detail block's legend is computed by
 // printStatusDetail from the same fit it renders with, so no detail fields are
 // needed here.
-func costLegendNeeded(cols []worktreeColumn, wts []worktree, _ string, now time.Time, ttl time.Duration, budget int) costLegend {
+func costLegendNeeded(cols []worktreeColumn, wts []worktree, now time.Time, ttl time.Duration, budget int) costLegend {
 	var l costLegend
 	l.table(cols, wts, columnContext{now: now, ttl: ttl}, budget)
 	return l
