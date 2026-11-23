@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,10 @@ var (
 	wtmBuildErr error
 	wtmBuildDir string
 	buildOnce   sync.Once
+	// buildEnvErr retains the cause when `go env` fails, so a binary build
+	// needing the cache overrides fails loudly instead of writing into a
+	// sandboxed HOME.
+	buildEnvErr error
 )
 
 // canonical resolves symlinks on the deepest existing ancestor, mirroring the
@@ -56,14 +61,22 @@ func gitCmd(dir string, args ...string) (string, error) {
 var buildEnv []string
 
 func init() {
-	out, err := exec.Command("go", "env", "GOCACHE", "GOMODCACHE").Output()
+	// -json keeps the paths intact when a cache dir contains a space; the
+	// space-split form silently dropped the overrides in that case.
+	out, err := exec.Command("go", "env", "-json", "GOCACHE", "GOMODCACHE").Output()
 	if err != nil {
+		buildEnvErr = fmt.Errorf("go env: %w", err)
 		return
 	}
-	fields := strings.Fields(string(out))
-	if len(fields) == 2 {
-		buildEnv = append(os.Environ(), "GOCACHE="+fields[0], "GOMODCACHE="+fields[1])
+	var env struct {
+		GOCACHE    string `json:"GOCACHE"`
+		GOMODCACHE string `json:"GOMODCACHE"`
 	}
+	if json.Unmarshal(out, &env) != nil || env.GOCACHE == "" || env.GOMODCACHE == "" {
+		buildEnvErr = fmt.Errorf("go env returned no GOCACHE/GOMODCACHE")
+		return
+	}
+	buildEnv = append(os.Environ(), "GOCACHE="+env.GOCACHE, "GOMODCACHE="+env.GOMODCACHE)
 }
 
 // BuildWTM returns the prebuilt wtm binary path, failing if the build failed.
@@ -77,6 +90,10 @@ func BuildWTM(t *testing.T) string {
 }
 
 func buildWTMOnce() {
+	if buildEnvErr != nil {
+		wtmBuildErr = buildEnvErr
+		return
+	}
 	wtmBuildDir, wtmBuildErr = os.MkdirTemp("", "wtm-bin-")
 	if wtmBuildErr != nil {
 		return
@@ -411,9 +428,10 @@ func SetMtime(t *testing.T, path string, when time.Time) {
 	}
 }
 
-// agentConfigDir mirrors the harness's config-dir resolution (env override,
-// else home + rel) without importing the harness package.
-func agentConfigDir(env string, rel ...string) string {
+// AgentConfigDir mirrors the harness's config-dir resolution (env override,
+// else home + rel) without importing the harness package. A harness-side test
+// pins that it stays equal to the agents' ConfigDir.
+func AgentConfigDir(env string, rel ...string) string {
 	if d := os.Getenv(env); d != "" {
 		return d
 	}
@@ -428,17 +446,18 @@ func agentConfigDir(env string, rel ...string) string {
 // MkSession writes a Pi session header pointing at wtPath and pins its mtime.
 func MkSession(t *testing.T, wtPath, dirName string, mtime time.Time) string {
 	t.Helper()
-	return MkAgentSession(t, agentConfigDir("PI_CODING_AGENT_DIR", ".pi", "agent"), "sessions", wtPath, dirName, mtime)
+	return MkAgentSession(t, AgentConfigDir("PI_CODING_AGENT_DIR", ".pi", "agent"), "sessions", wtPath, dirName, mtime)
 }
 
 // MkClaudeSession writes Claude metadata before the cwd-bearing conversation
 // record, matching transcripts where the first record cannot identify an owner.
 func MkClaudeSession(t *testing.T, wtPath, dirName string, mtime time.Time) string {
 	t.Helper()
-	return MkAgentSession(t, agentConfigDir("CLAUDE_CONFIG_DIR", ".claude"), "projects", wtPath, dirName, mtime)
+	return MkAgentSession(t, AgentConfigDir("CLAUDE_CONFIG_DIR", ".claude"), "projects", wtPath, dirName, mtime)
 }
 
-// GitPrivateDir resolves the per-worktree private admin dir ($GIT_DIR).
+// GitAdminDir resolves the per-worktree private admin dir ($GIT_DIR), mirroring
+// the production git.PrivateDir.
 func GitAdminDir(t *testing.T, dir string) string {
 	t.Helper()
 	out, err := gitCmd(dir, "rev-parse", "--absolute-git-dir")

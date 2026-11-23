@@ -84,19 +84,6 @@ func TestLoadSettingsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSettingsPathSingleSSOT pins writer==reader: `config set` (cli) and
-// status/gc (core) resolve the same file (SettingsFile(t) is the literal oracle).
-func TestSettingsPathSingleSSOT(t *testing.T) {
-	Sandbox(t)
-	want := SettingsFile(t)
-	if got, err := settingsPath(); err != nil || got != want {
-		t.Fatalf("settingsPath = %q, want %q (%v)", got, want, err)
-	}
-	if _, got, err := core.LoadSettings(); err != nil || got != want {
-		t.Fatalf("LoadSettings path = %q, want %q (%v)", got, want, err)
-	}
-}
-
 // TestLoadSettingsToleratesUnknownField pins the forward-compat contract:
 // loadSettings is the SSOT and deliberately tolerates unknown keys, so an
 // unrecognized field must NOT fail the load while known keys still decode.

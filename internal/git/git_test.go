@@ -540,3 +540,17 @@ func TestRemoteDefaultBranchRef(t *testing.T) {
 		t.Fatalf("origin HEAD = %q, want refs/heads/main", got)
 	}
 }
+
+// TestGitAdminDirMatchesTestutil pins that testutil.GitAdminDir mirrors the
+// production git.PrivateDir resolution ($GIT_DIR).
+func TestGitAdminDirMatchesTestutil(t *testing.T) {
+	repo := InitRepo(t, "main")
+	GitTestCommit(t, repo)
+	want, err := PrivateDir(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := GitAdminDir(t, repo); got != want {
+		t.Fatalf("GitAdminDir = %q, want %q", got, want)
+	}
+}

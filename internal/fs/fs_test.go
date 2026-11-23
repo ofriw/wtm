@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	. "wtm/internal/testutil"
 )
 
 // fs_test.go — unit tests for the atomic write and file lock primitives.
@@ -279,4 +280,24 @@ func runLockCallbacks(t *testing.T, path string, count int, callback func() erro
 		}()
 	}
 	wg.Wait()
+}
+
+// TestCanonicalPathMatchesTestutil pins that testutil.CanonicalPath (the
+// hermetic-fixture helper, kept leaf) matches the production fs.Canonical.
+func TestCanonicalPathMatchesTestutil(t *testing.T) {
+	for _, p := range []string{t.TempDir(), "/no/such/path", "."} {
+		if got, want := Canonical(p), CanonicalPath(p); got != want {
+			t.Fatalf("Canonical(%q) = %q, want %q", p, got, want)
+		}
+	}
+	// A missing leaf under a symlinked ancestor exercises the recursive
+	// canonicalizer's fallback on both sides.
+	base := t.TempDir()
+	link := filepath.Join(t.TempDir(), "lnk")
+	MustSymlink(t, base, link)
+	for _, p := range []string{filepath.Join(link, "missing"), filepath.Join(link, "a", "b")} {
+		if got, want := Canonical(p), CanonicalPath(p); got != want {
+			t.Fatalf("Canonical(%q) = %q, want %q", p, got, want)
+		}
+	}
 }
