@@ -18,7 +18,7 @@ func settingsLockPath() (string, error) { return fs.WtmFilePath(fs.SettingsLockF
 func cmdConfigSet(val string) error {
 	// Invalid TTL is user input, so it is a usage error (exit 2), not a write
 	// failure: nothing on disk should change for a rejected value.
-	if _, err := core.TtlDays(val); err != nil {
+	if _, err := core.TTLDays(val); err != nil {
 		return core.Usagef("%v", err)
 	}
 	p, err := settingsPath()
@@ -55,7 +55,7 @@ func writeSettingsLocked(p, val string) error {
 	if err != nil {
 		return err
 	}
-	m["unusedTTL"] = raw
+	m[core.UnusedTTLKey] = raw
 	// Map keys marshal sorted, so output is byte-stable even with unknown keys.
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {

@@ -45,7 +45,7 @@ func TestTTLDays(t *testing.T) {
 		{"99999999999999999999d", 0, false},
 	}
 	for _, tc := range cases {
-		got, err := core.TtlDays(tc.in)
+		got, err := core.TTLDays(tc.in)
 		switch {
 		case tc.ok && (err != nil || got != tc.want):
 			t.Fatalf("ttlDays(%q) = (%d,%v), want (%d,nil)", tc.in, got, err, tc.want)

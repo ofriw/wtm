@@ -20,6 +20,11 @@ import (
 // DefaultUnusedDays is the TTL when no settings file exists.
 const DefaultUnusedDays = 90
 
+// UnusedTTLKey is the json key for the unused TTL — the single owner of the
+// spelling, shared by the read tag above and the cli writer (config command),
+// so schema and writer cannot drift.
+const UnusedTTLKey = "unusedTTL"
+
 // Settings is the persisted settings file model.
 type Settings struct {
 	UnusedTTL string `json:"unusedTTL"`
@@ -30,9 +35,9 @@ func DefaultSettings() Settings {
 	return Settings{UnusedTTL: fmt.Sprintf("%dd", DefaultUnusedDays)}
 }
 
-// TtlDays parses a "Nd" TTL string, enforcing the positive-whole-days and
+// TTLDays parses a "Nd" TTL string, enforcing the positive-whole-days and
 // overflow bounds.
-func TtlDays(s string) (int, error) {
+func TTLDays(s string) (int, error) {
 	if !strings.HasSuffix(s, "d") || len(s) < 2 {
 		return 0, fmt.Errorf("unusedTTL must be positive whole days (e.g. 90d)")
 	}
@@ -60,7 +65,7 @@ func decodeSettings(data []byte, p string) (Settings, error) {
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return s, fmt.Errorf("%s: trailing JSON data", p)
 	}
-	if _, err := TtlDays(s.UnusedTTL); err != nil {
+	if _, err := TTLDays(s.UnusedTTL); err != nil {
 		return s, fmt.Errorf("%s: %w", p, err)
 	}
 	return s, nil
@@ -91,6 +96,6 @@ func UnusedDuration() (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
-	days, err := TtlDays(s.UnusedTTL)
+	days, err := TTLDays(s.UnusedTTL)
 	return time.Duration(days) * 24 * time.Hour, err
 }
