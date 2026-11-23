@@ -2,43 +2,11 @@
 
 package cli
 
-import "encoding/json"
-import "fmt"
-import "path/filepath"
-import "reflect"
-import "testing"
-
-// TestTempRegistryWindowsReaderSnapshotsWithoutBlocking pins the shared-reader
-// contract on Windows: a reader concurrent with an in-flight mutation returns a
-// complete pre-commit snapshot instead of waiting for the registry lock. A
-// reader-lock regression would make the snapshot process time out here.
-func TestTempRegistryWindowsReaderSnapshotsWithoutBlocking(t *testing.T) {
-	sandboxTempProcesses(t)
-	path := filepath.Join(t.TempDir(), "pending")
-	// Seed the registry so the reader sees committed state, then start a holder
-	// that mutates only in memory until released.
-	mustProcessError(t, storeTempFixture(path, fixtureRecord("tmp/seed")))
-	holder := startTempProcess(t, "hold-add", path)
-	holder.expect(t, "locked")
-	reader := startTempProcess(t, "read-snapshot", path)
-	reader.expect(t, "ready")
-	if !reader.output.Scan() {
-		t.Fatalf("reader blocked or failed before its snapshot (read error: %v)", reader.output.Err())
-	}
-	assertTempSnapshot(t, reader.output.Text(), tempStore{path: fixtureRecord("tmp/seed")})
-	reader.expect(t, "done")
-	reader.finish(t)
-	releaseTempProcess(t, holder)
-}
-
-func assertTempSnapshot(t *testing.T, line string, want tempStore) {
-	t.Helper()
-	var got tempStore
-	mustProcessError(t, json.Unmarshal([]byte(line), &got))
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("reader snapshot = %#v, want %#v", got, want)
-	}
-}
+import (
+	"fmt"
+	"path/filepath"
+	"testing"
+)
 
 func TestTempRegistryWindowsConcurrentReadersAndWriters(t *testing.T) {
 	sandboxTempProcesses(t)

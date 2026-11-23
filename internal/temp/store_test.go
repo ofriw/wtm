@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"wtm/internal/fs"
 	. "wtm/internal/testutil"
@@ -187,6 +189,98 @@ func TestRemoveTempWorktreeIfNilProbeLeavesRecord(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("checkout removed: %v", err)
+	}
+}
+
+// TestTempStoreReaderSnapshotsWhileWriterHoldsLock pins the shared-reader
+// contract: a reader concurrent with an exclusive-lock holder must not wait on
+// the lock and must always observe a complete, valid store — exactly one of the
+// committed states, never a torn mix. The writer keeps the lock and rewrites the
+// whole store atomically until the reader has finished, so a reader that tried
+// to take the lock would deadlock and trip the timeout guard here.
+func TestTempStoreReaderSnapshotsWhileWriterHoldsLock(t *testing.T) {
+	Sandbox(t)
+	base := t.TempDir()
+	storeA := Store{
+		fs.Canonical(filepath.Join(base, "a")): fixtureStoreRecord("tmp/a"),
+	}
+	storeB := Store{
+		fs.Canonical(filepath.Join(base, "a")): fixtureStoreRecord("tmp/a"),
+		fs.Canonical(filepath.Join(base, "b")): fixtureStoreRecord("tmp/b"),
+	}
+	lock, err := LockPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerDone := make(chan struct{})
+	writerInside := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p, err := tempPath()
+		if err != nil {
+			t.Errorf("tempPath: %v", err)
+			return
+		}
+		// Single lock acquisition for the whole writer lifetime: nesting
+		// WithFileLock would re-lock the same inode on a second descriptor,
+		// which blocks (flock) even within one process.
+		err = fs.WithFileLock(lock, func() error {
+			for i := 0; ; i++ {
+				s := storeA
+				if i%2 == 1 {
+					s = storeB
+				}
+				if err := writeTempStore(p, s); err != nil {
+					return err
+				}
+				if i == 0 {
+					close(writerInside)
+				}
+				select {
+				case <-readerDone:
+					return nil
+				default:
+				}
+				time.Sleep(100 * time.Microsecond)
+			}
+		})
+		if err != nil {
+			t.Errorf("writer: %v", err)
+		}
+	}()
+
+	<-writerInside
+	snapshotsOk := make(chan struct{})
+	go func() {
+		defer close(snapshotsOk)
+		for range 25 {
+			store, err := ReadTempStoreUnlocked()
+			if err != nil {
+				t.Errorf("reader snapshot: %v", err)
+				return
+			}
+			if !reflect.DeepEqual(store, storeA) && !reflect.DeepEqual(store, storeB) {
+				t.Errorf("reader saw a torn/incomplete snapshot: %#v", store)
+				return
+			}
+		}
+	}()
+	select {
+	case <-snapshotsOk:
+	case <-time.After(15 * time.Second):
+		t.Fatal("reader blocked on the exclusive registry lock")
+	}
+	close(readerDone)
+	wg.Wait()
+
+	final, err := ReadTempStoreUnlocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(final, storeA) && !reflect.DeepEqual(final, storeB) {
+		t.Fatalf("final store = %#v, want one committed state", final)
 	}
 }
 
