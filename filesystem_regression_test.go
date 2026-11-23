@@ -372,3 +372,26 @@ func TestExists(t *testing.T) {
 		t.Fatal("missing path must report false")
 	}
 }
+
+// TestWriteJSONStatFailureReturnsError pins the privacy boundary: when the
+// existing mode cannot be read, writeJSON must fail instead of defaulting to
+// 0644 and widening a private file. A self-referential link makes stat fail
+// with a cause other than "missing", which a plain existence check hides.
+func TestWriteJSONStatFailureReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink loops need privileges on Windows")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "secret.json")
+	if err := os.Symlink(filepath.Base(p), p); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := writeJSON(p, map[string]any{"token": "x"}); err == nil {
+		t.Fatal("writeJSON must surface the stat failure instead of defaulting to 0644")
+	}
+	info, err := os.Lstat(p)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("private path was replaced: info=%v err=%v", info, err)
+	}
+	assertAtomicDirectory(t, dir, filepath.Base(p), false)
+}

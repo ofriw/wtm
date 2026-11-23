@@ -323,13 +323,27 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	mode := os.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	mode, err := fileModeOrDefault(path)
+	if err != nil {
 		return err
 	}
 	return writeFileAtomic(path, append(b, '\n'), mode)
+}
+
+// fileModeOrDefault resolves the mode for a rewritten file. An existing file
+// keeps its permission bits, so a copied 0600 secret config stays private; a new
+// file gets world-readable 0644. A stat failure is an error, never a silent
+// 0644: every writer shares this one policy, so a rewritten JSON never widens
+// or narrows permissions by accident.
+func fileModeOrDefault(path string) (os.FileMode, error) {
+	info, err := os.Stat(path)
+	if err == nil {
+		return info.Mode().Perm(), nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0o644, nil
+	}
+	return 0, err
 }
 
 // printJSON writes indented JSON to stdout (machine output contract).

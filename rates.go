@@ -306,12 +306,20 @@ type modelRate struct {
 	above     tokenRates
 	hasAbove  bool
 	webSearch *float64
+	// brokenAbove marks the above-200k fields the row stated but could not
+	// decode. They read unknown instead of borrowing the standard rate, so a
+	// malformed long-context figure never prices a long prompt at the cheaper
+	// standard rate while the warning claims the class stays unknown.
+	brokenAbove tokenRates
 }
 
 // ratesFor picks the tier and context set. nil means the pair is unpriced, so
 // the record reads unknown rather than silently mispriced.
-func (r modelRate) ratesFor(tier string, context int64) *tokenRates {
-	above := r.hasAbove && context > longContextThreshold
+func (r modelRate) ratesFor(tier string, t promptTokens) *tokenRates {
+	above, ok := r.aboveContext(t)
+	if !ok {
+		return nil
+	}
 	switch tier {
 	case "", "standard", "default":
 		return r.standardRates(above)
@@ -622,67 +630,176 @@ func allLetters(s string) bool {
 }
 
 // litellmEntry is the catalog subset wtm reads. Every price is a pointer so an
-// absent field stays distinguishable from a listed zero.
+// absent field stays distinguishable from a listed zero. The long-context block
+// keeps its broken siblings separately: a stated-but-undecodable figure marks
+// its sibling slot, so that class reads unknown instead of borrowing the
+// standard rate.
 type litellmEntry struct {
-	Input        *float64           `json:"input_cost_per_token"`
-	Output       *float64           `json:"output_cost_per_token"`
-	CacheRead    *float64           `json:"cache_read_input_token_cost"`
-	CacheWrite5m *float64           `json:"cache_creation_input_token_cost"`
-	CacheWrite1h *float64           `json:"cache_creation_input_token_cost_above_1hr"`
-	InAbove      *float64           `json:"input_cost_per_token_above_200k_tokens"`
-	OutAbove     *float64           `json:"output_cost_per_token_above_200k_tokens"`
-	CrAbove      *float64           `json:"cache_read_input_token_cost_above_200k_tokens"`
-	Cw5Above     *float64           `json:"cache_creation_input_token_cost_above_200k_tokens"`
-	Cw1Above     *float64           `json:"cache_creation_input_token_cost_above_1hr_above_200k_tokens"`
-	InBatch      *float64           `json:"input_cost_per_token_batches"`
-	OutBatch     *float64           `json:"output_cost_per_token_batches"`
-	CrBatch      *float64           `json:"cache_read_input_token_cost_batches"`
-	Cw5Batch     *float64           `json:"cache_creation_input_token_cost_batches"`
-	Search       map[string]float64 `json:"search_context_cost_per_query"`
+	standard    tokenRates
+	batch       tokenRates
+	above       tokenRates
+	aboveBroken tokenRates
+	Search      map[string]json.RawMessage
 }
 
-func (e litellmEntry) toRate() modelRate {
+func (e litellmEntry) toRate(name string, warn warnSink) modelRate {
 	return modelRate{
-		standard: tokenRates{
-			input: e.Input, output: e.Output, cacheRead: e.CacheRead,
-			cacheWrite5m: e.CacheWrite5m, cacheWrite1h: e.CacheWrite1h,
-		},
-		batch: tokenRates{
-			input: e.InBatch, output: e.OutBatch, cacheRead: e.CrBatch,
-			cacheWrite5m: e.Cw5Batch,
-		},
-		above: tokenRates{
-			input: e.InAbove, output: e.OutAbove, cacheRead: e.CrAbove,
-			cacheWrite5m: e.Cw5Above, cacheWrite1h: e.Cw1Above,
-		},
-		hasAbove:  e.InAbove != nil || e.OutAbove != nil || e.CrAbove != nil || e.Cw5Above != nil || e.Cw1Above != nil,
-		webSearch: searchRate(e.Search),
+		standard:    e.standard,
+		batch:       e.batch,
+		above:       e.above,
+		hasAbove:    e.above.any(),
+		brokenAbove: e.aboveBroken,
+		webSearch:   searchRate(e.Search, name, warn),
 	}
 }
 
 // searchRate picks a per-query price. Anthropic lists one price for every
 // context size, so a split catalog resolves in a fixed order (medium, low,
-// high) and returns nil when none is listed, which reads as unknown.
-func searchRate(m map[string]float64) *float64 {
+// high). The first stated size is authoritative: a stated but malformed figure
+// is rejected with one warning and never borrows a lower-priority price, so the
+// class reads unknown. Every other stated size stays subject to the same
+// validation, so a malformed non-authoritative figure still warns even when the
+// authoritative size is broken.
+func searchRate(m map[string]json.RawMessage, model string, warn warnSink) *float64 {
+	var first *float64
+	authoritativeBroken := false
 	for _, key := range []string{"search_context_size_medium", "search_context_size_low", "search_context_size_high"} {
-		if v, ok := m[key]; ok {
-			return &v
+		raw, ok := m[key]
+		if !ok || !statesValue(raw) {
+			continue // absent and null both mean no price
 		}
+		v, valid := decodeSearchRate(raw, key, model, warn)
+		if first == nil {
+			if valid {
+				first = v
+			} else {
+				authoritativeBroken = true
+			}
+		}
+	}
+	if authoritativeBroken {
+		return nil
+	}
+	return first
+}
+
+// decodeSearchRate reads one stated search size. A value that is not a JSON
+// number, or that falls outside the money bound, warns once and is rejected; a
+// valid one returns its value. The raw value is unmarshaled exactly once.
+func decodeSearchRate(raw json.RawMessage, key, model string, warn warnSink) (*float64, bool) {
+	var v float64
+	if json.Unmarshal(raw, &v) != nil {
+		doWarnSink(warn, rateCatalogError(model, "webSearch."+key, malformedCause(raw, true)))
+		return nil, false
+	}
+	if cause := invalidAmount(v, maxCatalogRate, "USD/query"); cause != "" {
+		doWarnSink(warn, rateCatalogError(model, "webSearch."+key, cause))
+		return nil, false
+	}
+	return &v, true
+}
+
+// catalogFigures is the per-figure decode seam for one catalog row. It mirrors
+// rawFields' individual-field pardon: a malformed figure stays unknown (nil)
+// and is reported, never voiding its siblings. Only a JSON number claims a
+// price, so the catalog's prose sample_spec row stays a non-model.
+type catalogFigures struct {
+	f      rawFields
+	priced bool
+	bad    []badFigure
+}
+
+// amount decodes one optional price figure. A JSON number claims a price even
+// when this build cannot read it; prose claims nothing. A malformed figure
+// stays nil so its class reads unknown.
+func (c *catalogFigures) amount(key string) *float64 {
+	raw, ok := c.f.value(key)
+	if !ok {
+		return nil
+	}
+	if isJSONNumber(raw) {
+		c.priced = true
+	}
+	if v, ok := c.decodeNumber(raw, key); ok {
+		return v
 	}
 	return nil
 }
 
+// decodeNumber decodes one stated number figure. A figure this build cannot
+// hold — an overflow, or a negative-zero underflow like -1e-999 that rounds to
+// -0 — records a bad figure and reports false, so the class reads unknown. An
+// explicit numeric zero is a valid, exact free class.
+func (c *catalogFigures) decodeNumber(raw json.RawMessage, key string) (*float64, bool) {
+	v := new(float64)
+	if json.Unmarshal(raw, v) != nil || (*v == 0 && math.Signbit(*v)) {
+		c.bad = append(c.bad, badFigure{key: key, cause: malformedCause(raw, true)})
+		return nil, false
+	}
+	return v, true
+}
+
+// search decodes the optional search-price object, keeping its members raw so
+// searchRate can validate each stated size. A non-object is a malformed figure.
+func (c *catalogFigures) search(key string) map[string]json.RawMessage {
+	raw, ok := c.f.value(key)
+	if !ok {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		c.bad = append(c.bad, badFigure{key: key, cause: malformedCause(raw, false)})
+		return nil
+	}
+	return m
+}
+
+// statesValue reports whether an object member states a figure at all: an absent
+// key and a JSON null both mean no value. It backs the catalog's per-figure
+// decode and the transcript decoders that share rawFields.
+func statesValue(v json.RawMessage) bool { return len(v) > 0 && string(v) != "null" }
+
+// isJSONNumber reports whether a figure is written as a JSON number. A number
+// claims a price even when this build cannot use it; prose ("float", in the
+// catalog's sample_spec row) claims nothing.
+func isJSONNumber(v json.RawMessage) bool {
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; c {
+		case ' ', '\t', '\n', '\r':
+		default:
+			return c == '-' || ('0' <= c && c <= '9')
+		}
+	}
+	return false
+}
+
+// malformedCause names why one figure cannot be read, in the unit the field
+// expects, so stderr never carries a Go type name.
+func malformedCause(v json.RawMessage, price bool) string {
+	switch {
+	case !price:
+		return "not a price table" // search_context_cost_per_query holds an object
+	case isJSONNumber(v):
+		return "number out of range"
+	default:
+		return "not a number"
+	}
+}
+
+// badFigure names one catalog key whose figure could not be read, and why.
+type badFigure struct{ key, cause string }
+
 // parseCatalog reads the catalog object. Entries that are not priced models
 // (the sample spec, comment rows) are skipped instead of failing the parse.
-func parseCatalog(r io.Reader) (catalog, error) {
+func parseCatalog(r io.Reader, warn warnSink) (catalog, error) {
 	var raw map[string]json.RawMessage
 	if err := json.NewDecoder(r).Decode(&raw); err != nil {
 		return nil, err
 	}
 	c := catalog{}
 	for name, v := range raw {
-		if rate, ok := pricedEntry(v); ok {
-			c[name] = rate
+		if rate, ok := pricedEntry(name, v, warn); ok {
+			c[name] = validateEntry(name, rate, warn)
 		}
 	}
 	if len(c) == 0 {
@@ -691,17 +808,130 @@ func parseCatalog(r io.Reader) (catalog, error) {
 	return c, nil
 }
 
-// pricedEntry decodes one catalog value, reporting false for non-model rows.
-func pricedEntry(raw json.RawMessage) (modelRate, bool) {
-	var e litellmEntry
-	if err := json.Unmarshal(raw, &e); err != nil {
-		return modelRate{}, false
+// pricedEntry decodes one catalog row figure by figure, reporting false for rows
+// that claim no price. A malformed figure keeps its siblings and leaves its
+// class unknown, so the exact row stays the match and no alias row supplies its
+// price.
+func pricedEntry(name string, raw json.RawMessage, warn warnSink) (modelRate, bool) {
+	f, err := rawObject(raw)
+	if err != nil {
+		return modelRate{}, false // not an object: a spec or comment row
 	}
-	if e.Input == nil && e.Output == nil {
-		return modelRate{}, false
+	if isDocName(name) {
+		return modelRate{}, false // documentation row: prose claims no price
 	}
-	return e.toRate(), true
+	e, c := decodeLitellm(f)
+	return finishEntry(name, e, c, warn)
 }
+
+// decodeLitellm reads one catalog row figure by figure (see catalogFigures).
+func decodeLitellm(f rawFields) (litellmEntry, catalogFigures) {
+	c := catalogFigures{f: f}
+	var above, aboveBroken tokenRates
+	for i := range aboveFieldKeys {
+		c.above(i, &above, &aboveBroken)
+	}
+	return litellmEntry{
+		standard: tokenRates{
+			input: c.amount("input_cost_per_token"), output: c.amount("output_cost_per_token"),
+			cacheRead:    c.amount("cache_read_input_token_cost"),
+			cacheWrite5m: c.amount("cache_creation_input_token_cost"),
+			cacheWrite1h: c.amount("cache_creation_input_token_cost_above_1hr"),
+		},
+		batch: tokenRates{
+			input: c.amount("input_cost_per_token_batches"), output: c.amount("output_cost_per_token_batches"),
+			cacheRead:    c.amount("cache_read_input_token_cost_batches"),
+			cacheWrite5m: c.amount("cache_creation_input_token_cost_batches"),
+		},
+		above:       above,
+		aboveBroken: aboveBroken,
+		Search:      c.search("search_context_cost_per_query"),
+	}, c
+}
+
+// aboveFieldKeys names the long-context catalog keys in slot order. It is the
+// single place the key-to-set mapping lives: the decode drives both the value
+// slot and its broken sibling off the same index.
+var aboveFieldKeys = [...]string{
+	"input_cost_per_token_above_200k_tokens",
+	"output_cost_per_token_above_200k_tokens",
+	"cache_read_input_token_cost_above_200k_tokens",
+	"cache_creation_input_token_cost_above_200k_tokens",
+	"cache_creation_input_token_cost_above_1hr_above_200k_tokens",
+}
+
+// slot returns a pointer to the tokenRates slot at aboveFieldKeys index i.
+func (r *tokenRates) slot(i int) **float64 {
+	switch i {
+	case 0:
+		return &r.input
+	case 1:
+		return &r.output
+	case 2:
+		return &r.cacheRead
+	case 3:
+		return &r.cacheWrite5m
+	case 4:
+		return &r.cacheWrite1h
+	}
+	panic("aboveFieldKeys index out of range")
+}
+
+// above decodes one stated long-context figure into its slot and marks the
+// sibling broken slot when the figure cannot be decoded: both destinations are
+// set from one decode of the same raw value. An absent or null figure is
+// unstated, so nothing is set.
+func (c *catalogFigures) above(i int, value, broken *tokenRates) {
+	key := aboveFieldKeys[i]
+	raw, ok := c.f.value(key)
+	if !ok {
+		return
+	}
+	if isJSONNumber(raw) {
+		c.priced = true
+	}
+	if v, ok := c.decodeNumber(raw, key); ok {
+		*value.slot(i) = v
+		return
+	}
+	*broken.slot(i) = &brokenAboveMarker
+}
+
+// finishEntry classifies a decoded row: prose stays a silent non-model, a
+// corrupt exact entry stays a model with unknown classes, and a priced row
+// warns per malformed figure.
+func finishEntry(name string, e litellmEntry, c catalogFigures, warn warnSink) (modelRate, bool) {
+	rate := e.toRate(name, warn)
+	rate.brokenAbove = e.aboveBroken
+	rate.hasAbove = rate.hasAbove || rate.brokenAbove.any()
+	if !c.priced {
+		if len(c.bad) > 0 && !isDocName(name) {
+			warnBad(name, c.bad, warn)
+			return rate, true
+		}
+		return modelRate{}, false
+	}
+	warnBad(name, c.bad, warn)
+	return rate, true
+}
+
+// warnBad reports each undecodable figure of one catalog row.
+func warnBad(name string, bad []badFigure, warn warnSink) {
+	for _, b := range bad {
+		doWarnSink(warn, rateCatalogError(name, b.key, b.cause))
+	}
+}
+
+// isDocName reports whether a catalog key is documentation rather than a model:
+// the sample spec row and comment rows. Their prose values claim no price, so
+// they stay silent non-models even when their figures cannot be decoded.
+func isDocName(name string) bool {
+	return name == "sample_spec" || strings.HasPrefix(name, "#")
+}
+
+// brokenAboveMarker is the shared non-nil token stored in brokenAbove slots to
+// mark a stated-but-undecodable above-200k field; only nil-ness is ever used.
+var brokenAboveMarker float64
 
 // catalogSource names where a resolved catalog came from, so progress can say
 // whether the run waited on the network. It is a label, not a decision input.
@@ -723,54 +953,59 @@ func loadCatalog() (catalog, error) { return loadCatalogFrom(ratesURL) }
 // loadCatalogReporting is loadCatalog that announces each resolution point, so
 // a long network fetch is visible instead of looking like a hang. The handle is
 // also the warning sink: fetch failures inside the renderer must ride it.
-func loadCatalogReporting(p *progress) (catalog, error) {
-	return loadCatalogFromNotify(ratesURL, p)
+func loadCatalogReporting(p *progress, now time.Time) (catalog, error) {
+	return loadCatalogFromNotify(ratesURL, p, now)
 }
 
 // loadCatalogFrom is loadCatalog with an injectable source URL, so tests drive
 // the real fetch chain against a local server instead of the network.
-func loadCatalogFrom(url string) (catalog, error) { return loadCatalogFromNotify(url, nil) }
+func loadCatalogFrom(url string) (catalog, error) { return loadCatalogFromNotify(url, nil, nowFunc()) }
 
-func loadCatalogFromNotify(url string, p *progress) (catalog, error) {
+func loadCatalogFromNotify(url string, p *progress, now time.Time) (catalog, error) {
 	if path := os.Getenv(ratesEnv); path != "" {
 		p.detail(string(catalogEnv))
-		return parseCatalogFile(path)
+		return parseCatalogFile(path, progressWarn(p))
 	}
 	path, err := ratesCachePath()
 	if err != nil {
 		return nil, err
 	}
-	return loadFromCachePath(path, url, p)
+	return loadFromCachePath(path, url, p, now)
 }
 
 // loadFromCachePath resolves a fresh cache, then a fetch, then the stale cache
-// as the last resort.
-func loadFromCachePath(path, url string, p *progress) (catalog, error) {
-	if c, ok := readFreshCache(path); ok {
+// as the last resort. One deduplicated sink is shared by every parse of the
+// same cache file, so a retry cannot repeat a warning.
+func loadFromCachePath(path, url string, p *progress, now time.Time) (catalog, error) {
+	warn := dedupeWarn(progressWarn(p))
+	c, fresh, cacheUnusable := readFreshCache(path, warn, now)
+	if fresh {
 		p.detail(string(catalogCache))
 		return c, nil
 	}
 	if err := p.abort(); err != nil {
 		return nil, err
 	}
-	c, fetchErr := tryFetch(path, url, p)
+	c, fetchErr := tryFetch(path, url, p, cacheUnusable, warn, now)
 	if fetchErr == nil {
 		return c, nil
 	}
-	return staleCatalog(path, p, fetchErr)
+	return staleCatalog(path, warn, p, fetchErr, now)
 }
 
 // tryFetch refreshes the cache or reports why it could not. A failed fetch
-// starts a cooldown to avoid repeated stalls.
-func tryFetch(path, url string, p *progress) (catalog, error) {
-	if cooling, cause := fetchCoolingDown(path); cooling {
+// starts a cooldown to avoid repeated stalls. cacheUnusable is a cache path
+// whose stat already failed, so the write step stays silent: readFreshCache
+// disclosed that cause once, with its net effect.
+func tryFetch(path, url string, p *progress, cacheUnusable bool, warn warnSink, now time.Time) (catalog, error) {
+	if cooling, cause := fetchCoolingDownAt(path, now); cooling {
 		if errors.Is(cause, errRateCatalogCoolingDown) {
 			return nil, cause
 		}
 		return nil, fmt.Errorf("%w: %w", errRateCatalogCoolingDown, cause)
 	}
 	p.detail(string(catalogFetching))
-	c, err := fetchAndCache(path, url, p)
+	c, err := fetchAndCache(path, url, p, cacheUnusable, warn)
 	if err == nil {
 		p.detail(string(catalogFetched))
 		return c, nil
@@ -781,17 +1016,25 @@ func tryFetch(path, url string, p *progress) (catalog, error) {
 	return nil, err
 }
 
-// staleCatalog serves the last good catalog when the refresh failed. The fetch
-// cause wins over the read error: it names the real failure (status, size,
-// network), where a missing cache would only report ENOENT. Serving old prices
-// is a disclosure, not a silent degradation: one persistent warning names the
-// cause and the cache age so the user can judge the numbers.
-func staleCatalog(path string, p *progress, fetchErr error) (catalog, error) {
-	c, err := parseCatalogFile(path)
+// staleCatalog serves the last good catalog when the refresh failed. Serving old
+// prices is a disclosure, not a silent degradation: one persistent warning names
+// the fetch cause and the cache age so the user can judge the numbers. When the
+// cached copy itself fails to parse, both distinct causes are reported once (f6,
+// f15). warn is the run's deduplicated sink, so re-parsing the same cache file
+// cannot repeat corrupt-figure warnings.
+func staleCatalog(path string, warn warnSink, p *progress, fetchErr error, now time.Time) (catalog, error) {
+	c, err := parseCatalogFile(path, warn)
 	if err == nil {
 		p.detail(string(catalogStale))
-		warnProgress(p, "rate catalog refresh failed: %s; using the cached copy (%s)", fetchErr, cacheAgeLabel(path))
+		warnProgress(p, "rate catalog refresh failed: %s; using the cached copy (%s)", fetchErr, cacheAgeLabel(path, now))
 		return c, nil
+	}
+	// A missing cache is the normal cold start: stay silent, since the fetch
+	// cause is the real failure. Any other parse failure names the cache once —
+	// the same deduplicated text readFreshCache uses, so a fresh-corrupt cache
+	// that was already disclosed stays a single report.
+	if !errors.Is(err, os.ErrNotExist) {
+		doWarnSink(warn, fmt.Errorf("%s: %w; refetching", path, err))
 	}
 	if fetchErr != nil {
 		return nil, fetchErr
@@ -799,12 +1042,8 @@ func staleCatalog(path string, p *progress, fetchErr error) (catalog, error) {
 	return nil, err
 }
 
-// fetchCoolingDown reports a recent failed fetch and its recorded cause. Both
-// marker locations count: the primary beside the cache and the fallback for a
-// run whose cache directory is unwritable. ensureFallbackDir validates the
-// fallback directory before its marker is read.
-func fetchCoolingDown(path string) (bool, error) {
-	if cooling, cause := recentAttemptCause(attemptPath(path)); cooling {
+func fetchCoolingDownAt(path string, now time.Time) (bool, error) {
+	if cooling, cause := recentAttemptCause(attemptPath(path), now); cooling {
 		return true, cause
 	}
 	fallback := fallbackAttemptPath(path)
@@ -817,13 +1056,13 @@ func fetchCoolingDown(path string) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	return recentAttemptCause(filepath.Join(dir, fallbackAttemptName(path)))
+	return recentAttemptCause(filepath.Join(dir, fallbackAttemptName(path)), now)
 }
 
 // recentAttemptCause reports a fresh marker and its cause. A future mtime is
 // invalid, not a long cooldown; a non-regular file is never opened. Expired or
 // invalid markers are removed so they cannot leak forever.
-func recentAttemptCause(path string) (bool, error) {
+func recentAttemptCause(path string, now time.Time) (bool, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return false, nil
@@ -832,7 +1071,7 @@ func recentAttemptCause(path string) (bool, error) {
 		_ = os.Remove(path)
 		return false, nil
 	}
-	age := nowFunc().Sub(info.ModTime())
+	age := now.Sub(info.ModTime())
 	if age < 0 || age >= ratesRetryCooldown {
 		_ = os.Remove(path)
 		return false, nil
@@ -975,28 +1214,56 @@ func clearAttemptMarkers(path string) {
 	_ = os.Remove(filepath.Join(dir, fallbackAttemptName(path)))
 }
 
-func readFreshCache(path string) (catalog, bool) {
-	fresh, err := cacheFresh(path)
-	if err != nil || !fresh {
-		return nil, false
+// readFreshCache serves the cache when it is inside its TTL and parses cleanly.
+// A missing cache is silent: the first run refetches. Any other stat or parse
+// failure names the path and cause and returns false, so the caller refetches
+// instead of serving a corrupt copy in silence. Both failures stay visible
+// beside the fetch cause, which staleCatalog reports later. A stat failure also
+// blocks the cache write, so it is disclosed once, with both effects, and the
+// path is reported unusable to keep fetchAndCache silent.
+func readFreshCache(path string, warn warnSink, now time.Time) (catalog, bool, bool) {
+	fresh, err := cacheFresh(path, now)
+	if err != nil {
+		// A missing cache is the normal cold start, not corruption. Every other
+		// stat failure (permissions, I/O, a link loop) means the path cannot be
+		// read or written.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, false
+		}
+		doWarnSink(warn, fmt.Errorf("%s: %w; refetching and skipping the rate cache write", path, err))
+		return nil, false, true
 	}
-	c, err := parseCatalogFile(path)
-	return c, err == nil
+	if !fresh {
+		return nil, false, false
+	}
+	c, err := parseCatalogFile(path, warn)
+	if err != nil {
+		doWarnSink(warn, fmt.Errorf("%s: %w; refetching", path, err))
+		return nil, false, false
+	}
+	return c, true, false
 }
 
-func fetchAndCache(path, url string, p *progress) (catalog, error) {
+func fetchAndCache(path, url string, p *progress, cacheUnusable bool, warn warnSink) (catalog, error) {
 	raw, err := fetchRates(p.context(), url)
 	if err != nil {
 		return nil, err
 	}
-	c, err := parseCatalog(bytes.NewReader(raw))
+	c, err := parseCatalog(bytes.NewReader(raw), warn)
 	if err != nil {
 		return nil, err
 	}
 	// A failed cache write must not hide prices: keep the fetched catalog for
 	// this run and retry the fetch next run instead of serving unknown costs.
-	if err := writeFileAtomic(path, raw, 0o644); err != nil {
-		warnProgress(p, "rate cache write failed: %s; prices will be fetched again next run", err)
+	// An unreadable mode is not a licence to widen it: skip the write. An
+	// already-disclosed unusable path skips it without a second warning.
+	if !cacheUnusable {
+		mode, err := fileModeOrDefault(path)
+		if err != nil {
+			warnProgress(p, "rate cache mode %s: %s; skipping the cache write", path, err)
+		} else if err := writeFileAtomic(path, raw, mode); err != nil {
+			warnProgress(p, "rate cache write failed: %s; prices will be fetched again next run", err)
+		}
 	}
 	// The fetch succeeded, so any prior failure marker is obsolete even when the
 	// cache write failed.
@@ -1017,7 +1284,7 @@ func ratesCachePath() (string, error) {
 // device or directory before reading, so a hostile cache path cannot hang
 // status. openNoBlock still shares delete, so the Windows atomic replace
 // (open_windows.go, rename_windows.go) keeps working.
-func parseCatalogFile(path string) (catalog, error) {
+func parseCatalogFile(path string, warn warnSink) (catalog, error) {
 	data, err := readFileLimited(path, ratesMaxBytes)
 	if errors.Is(err, errFileTooLarge) {
 		// Keep a size failure distinct from a parse failure, so the caller and
@@ -1027,19 +1294,19 @@ func parseCatalogFile(path string) (catalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseCatalog(bytes.NewReader(data))
+	return parseCatalog(bytes.NewReader(data), warn)
 }
 
 // cacheFresh reports whether the cache is inside its TTL. A future mtime is
 // invalid, not an exceptionally long-lived cache: report stale so clock skew or
 // a bad copy cannot pin old prices forever. The file stays for the stale
 // fallback.
-func cacheFresh(path string) (bool, error) {
+func cacheFresh(path string, now time.Time) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false, err
 	}
-	age := nowFunc().Sub(info.ModTime())
+	age := now.Sub(info.ModTime())
 	if age < 0 {
 		return false, nil
 	}
@@ -1049,12 +1316,12 @@ func cacheFresh(path string) (bool, error) {
 // cacheAgeLabel names how old the cached copy is. A failed stat or a future
 // mtime yields a reason instead of a plausible duration, so the warning never
 // states a false age.
-func cacheAgeLabel(path string) string {
+func cacheAgeLabel(path string, now time.Time) string {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "age unknown"
 	}
-	age := nowFunc().Sub(info.ModTime())
+	age := now.Sub(info.ModTime())
 	if age < 0 {
 		return "age unknown (mtime in the future)"
 	}

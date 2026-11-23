@@ -156,7 +156,7 @@ func (ws *workspace) loadCatalog(p *progress, hasClaude bool) catalog {
 		return nil
 	}
 	p.phase("loading rate catalog", 0)
-	cat, err := loadCatalogReporting(p)
+	cat, err := loadCatalogReporting(p, nowFunc())
 	if err != nil {
 		warnProgress(p, "claude cost unavailable: %s", err)
 		// A nil catalog makes every harness report unknown, which is the honest

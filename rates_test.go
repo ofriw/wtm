@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -43,7 +44,7 @@ const testCatalog = `{
 
 func testRates(t *testing.T) catalog {
 	t.Helper()
-	c, err := parseCatalog(strings.NewReader(testCatalog))
+	c, err := parseCatalog(strings.NewReader(testCatalog), nil)
 	if err != nil {
 		t.Fatalf("parseCatalog: %v", err)
 	}
@@ -75,9 +76,27 @@ func TestParseCatalogSkipsUnpricedEntries(t *testing.T) {
 // with only the sample spec and comment rows is a recognised failure, not a
 // generic parse error.
 func TestParseCatalogNoPricedModels(t *testing.T) {
-	_, err := parseCatalog(strings.NewReader(`{"sample_spec":{"input_cost_per_token":"float"},"#comment":{"note":"ignore"}}`))
+	_, err := parseCatalog(strings.NewReader(`{"sample_spec":{"input_cost_per_token":"float"},"#comment":{"note":"ignore"}}`), nil)
 	if !errors.Is(err, errNoPricedModels) {
 		t.Fatalf("err = %v, want errNoPricedModels", err)
+	}
+}
+
+// TestSpecRowStaysSilent pins that the catalog's prose rows claim no price: no
+// catalog entry and no warning, so loading the public catalog stays clean even
+// though a malformed figure in a priced row must warn.
+func TestSpecRowStaysSilent(t *testing.T) {
+	var warns []string
+	c, err := parseCatalog(strings.NewReader(`{"sample_spec":{"input_cost_per_token":"float","search_context_cost_per_query":"prose"},"m":{"input_cost_per_token":0.000001}}`),
+		func(err error) { warns = append(warns, err.Error()) })
+	if err != nil {
+		t.Fatalf("parseCatalog: %v", err)
+	}
+	if len(c) != 1 {
+		t.Fatalf("catalog = %v, want only the priced row", c)
+	}
+	if len(warns) != 0 {
+		t.Errorf("warnings = %q, want none: prose is not a malformed price", warns)
 	}
 }
 
@@ -85,7 +104,7 @@ func TestParseCatalogNoPricedModels(t *testing.T) {
 // query the model entry cannot price taints the total instead of adding zero.
 func TestPriceWebSearchWithoutSearchRateIsUnknown(t *testing.T) {
 	c := catalog{"m": {standard: tokenRates{input: fptr(0.000001)}}}
-	p := c.price(usageEvent{model: "m", tier: "standard", tokens: promptTokens{input: 1}, webSearch: 1})
+	p := c.priceWith(usageEvent{model: "m", tier: "standard", tokens: promptTokens{input: 1}, webSearch: 1}, nil)
 	if !p.total.bothUnpriced() {
 		t.Fatalf("price = %+v, want both sides unknown: the search rate is absent", p.total)
 	}
@@ -105,7 +124,7 @@ func TestPriceTokenClasses(t *testing.T) {
 	e := usageEvent{model: "m1", tier: "standard", tokens: promptTokens{
 		input: 80_000, output: 100_000, cacheRead: 10_000, cacheWrite5m: 10_000, cacheWrite1h: 10_000,
 	}}
-	assertCost(t, c.price(e), 0.08+0.2+0.001+0.0125+0.02, true)
+	assertCost(t, c.priceWith(e, nil), 0.08+0.2+0.001+0.0125+0.02, true)
 }
 
 func TestPriceBatchTier(t *testing.T) {
@@ -114,14 +133,14 @@ func TestPriceBatchTier(t *testing.T) {
 		input: 80_000, output: 100_000, cacheRead: 10_000, cacheWrite5m: 10_000,
 	}}
 	// The batch 1-hour class is absent in the fixture and unused here.
-	assertCost(t, c.price(e), 0.04+0.1+0.0005+0.00625, true)
+	assertCost(t, c.priceWith(e, nil), 0.04+0.1+0.0005+0.00625, true)
 }
 
 func TestPriceLongContext(t *testing.T) {
 	c := testRates(t)
 	e := usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 250_000, output: 1_000_000}}
 	// Context exceeds 200k, so the above-200k rates apply.
-	assertCost(t, c.price(e), 0.5+4, true)
+	assertCost(t, c.priceWith(e, nil), 0.5+4, true)
 }
 
 // TestPriceLongContextBoundary pins the threshold: context at exactly 200k
@@ -129,9 +148,9 @@ func TestPriceLongContext(t *testing.T) {
 func TestPriceLongContextBoundary(t *testing.T) {
 	c := testRates(t)
 	atThreshold := usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 200_000}}
-	assertCost(t, c.price(atThreshold), 0.2, true)
+	assertCost(t, c.priceWith(atThreshold, nil), 0.2, true)
 	above := usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 200_001}}
-	assertCost(t, c.price(above), 200_001*0.000002, true)
+	assertCost(t, c.priceWith(above, nil), 200_001*0.000002, true)
 }
 
 // TestPriceLongContextOneHourCacheWrite pins C1: a 1-hour cache write above
@@ -139,12 +158,12 @@ func TestPriceLongContextBoundary(t *testing.T) {
 func TestPriceLongContextOneHourCacheWrite(t *testing.T) {
 	c := testRates(t)
 	e := usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 250_000, cacheWrite1h: 10_000}}
-	assertCost(t, c.price(e), 250_000*0.000002+10_000*0.000003, true)
+	assertCost(t, c.priceWith(e, nil), 250_000*0.000002+10_000*0.000003, true)
 }
 
 func TestPriceWebSearch(t *testing.T) {
 	c := testRates(t)
-	assertCost(t, c.price(usageEvent{model: "m1", tier: "standard", webSearch: 3}), 0.03, true)
+	assertCost(t, c.priceWith(usageEvent{model: "m1", tier: "standard", webSearch: 3}, nil), 0.03, true)
 }
 
 // TestPriceUnknown pins every unpriced path: missing model, unknown tier, and a
@@ -160,7 +179,7 @@ func TestPriceUnknown(t *testing.T) {
 	}
 	for name, e := range cases {
 		t.Run(name, func(t *testing.T) {
-			if p := c.price(e); p.total.list.known() {
+			if p := c.priceWith(e, nil); p.total.list.known() {
 				t.Fatalf("price = %+v, want unknown", p)
 			}
 		})
@@ -172,7 +191,7 @@ func TestPriceUnknown(t *testing.T) {
 // estimated, because a 1-hour write would cost more.
 func TestPriceUnclassifiedCacheWriteIsEstimated(t *testing.T) {
 	c := testRates(t)
-	m := c.price(usageEvent{model: "m1", tier: "standard", tokens: promptTokens{unclassifiedCacheWrite: 100}})
+	m := c.priceWith(usageEvent{model: "m1", tier: "standard", tokens: promptTokens{unclassifiedCacheWrite: 100}}, nil)
 	assertCost(t, m, 100*0.00000125, true)
 	if !m.total.list.isEstimated() {
 		t.Fatalf("price = %+v, want estimated", m)
@@ -194,16 +213,48 @@ func TestResolveModelCandidates(t *testing.T) {
 // TestParseCatalogMissingVsZero pins the pointer distinction: an absent rate is
 // unknown, while a listed zero is priced at zero.
 func TestParseCatalogMissingVsZero(t *testing.T) {
-	c, err := parseCatalog(strings.NewReader(`{"z": {"input_cost_per_token": 0, "output_cost_per_token": 0}}`))
+	c, err := parseCatalog(strings.NewReader(`{"z": {"input_cost_per_token": 0, "output_cost_per_token": 0}}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertCost(t, c.price(usageEvent{model: "z", tier: "standard", tokens: promptTokens{input: 500}}), 0, true)
+	assertCost(t, c.priceWith(usageEvent{model: "z", tier: "standard", tokens: promptTokens{input: 500}}, nil), 0, true)
 	// An absent output rate with nonzero output tokens is unknown.
-	c2, _ := parseCatalog(strings.NewReader(`{"z": {"input_cost_per_token": 0.001}}`))
-	if p := c2.price(usageEvent{model: "z", tier: "standard", tokens: promptTokens{output: 5}}); p.total.list.known() {
+	c2, _ := parseCatalog(strings.NewReader(`{"z": {"input_cost_per_token": 0.001}}`), nil)
+	if p := c2.priceWith(usageEvent{model: "z", tier: "standard", tokens: promptTokens{output: 5}}, nil); p.total.list.known() {
 		t.Fatalf("absent rate must be unknown, got %+v", p)
 	}
+}
+
+// TestCatalogNegativeZeroAmountRejected pins f5 at the catalog boundary: a
+// negative underflow (-1e-999) rounds to negative zero and must read unknown
+// with an out-of-range disclosure, never as an exact free figure; an explicit
+// numeric zero stays a valid, exact free class.
+func TestCatalogNegativeZeroAmountRejected(t *testing.T) {
+	var warns []string
+	sink := func(err error) { warns = append(warns, err.Error()) }
+	c, err := parseCatalog(strings.NewReader(`{"z": {"input_cost_per_token": -1e-999, "output_cost_per_token": 0.001}}`), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := c.priceWith(usageEvent{model: "z", tier: "standard", tokens: promptTokens{input: 500}}, nil)
+	if p.total.list.known() {
+		t.Fatalf("negative-zero input rate must read unknown, got %+v", p.total.list)
+	}
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "number out of range") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %q, want an out-of-range disclosure for the rejected figure", warns)
+	}
+	// An explicit numeric zero stays exact and silent.
+	c2, err := parseCatalog(strings.NewReader(`{"z": {"input_cost_per_token": 0, "output_cost_per_token": 0.001}}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCost(t, c2.priceWith(usageEvent{model: "z", tier: "standard", tokens: promptTokens{input: 500}}, nil), 0, true)
 }
 
 func TestLoadCatalogEnvOverride(t *testing.T) {
@@ -243,10 +294,10 @@ func TestFreshCacheTooLargeIsRefused(t *testing.T) {
 	t.Setenv("WTM_NOW", "")
 	path := filepath.Join(t.TempDir(), "rates.json")
 	writeFile(t, path, strings.Repeat("x", ratesMaxBytes+1), 0o644)
-	if _, ok := readFreshCache(path); ok {
+	if _, ok, _ := readFreshCache(path, nil, nowFunc()); ok {
 		t.Fatal("an oversized fresh cache must not be served")
 	}
-	if _, err := parseCatalogFile(path); !errors.Is(err, errRateCatalogTooLarge) {
+	if _, err := parseCatalogFile(path, nil); !errors.Is(err, errRateCatalogTooLarge) {
 		t.Fatalf("parseCatalogFile err = %v, want errRateCatalogTooLarge", err)
 	}
 }
@@ -260,14 +311,14 @@ func TestCacheFreshness(t *testing.T) {
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
-	if fresh, err := cacheFresh(path); err != nil || fresh {
+	if fresh, err := cacheFresh(path, pinned); err != nil || fresh {
 		t.Fatalf("stale cache fresh=%v err=%v, want false", fresh, err)
 	}
 	now := pinned.Add(-ratesCacheTTL + time.Hour)
 	if err := os.Chtimes(path, now, now); err != nil {
 		t.Fatal(err)
 	}
-	if fresh, err := cacheFresh(path); err != nil || !fresh {
+	if fresh, err := cacheFresh(path, pinned); err != nil || !fresh {
 		t.Fatalf("new cache fresh=%v err=%v, want true", fresh, err)
 	}
 }
@@ -501,7 +552,7 @@ func TestStaleCatalogWarningSurvivesRenderer(t *testing.T) {
 	g.progress = progressAlways
 	var out strings.Builder
 	err := withProgressTo(&out, &g, progressOptions{}, func(p *progress) error {
-		_, err := loadCatalogFromNotify(url, p)
+		_, err := loadCatalogFromNotify(url, p, nowFunc())
 		return err
 	})
 	if err != nil {
@@ -520,7 +571,7 @@ func TestStaleCatalogWarningSurvivesRenderer(t *testing.T) {
 // keeps the file for the stale fallback.
 func TestFutureCacheMtimeIsStale(t *testing.T) {
 	path := pinFutureCatalog(t)
-	if fresh, err := cacheFresh(path); err != nil || fresh {
+	if fresh, err := cacheFresh(path, nowFunc()); err != nil || fresh {
 		t.Fatalf("future mtime fresh=%v err=%v, want stale", fresh, err)
 	}
 	url, hits := serveRatesCounting(t, http.StatusInternalServerError, "boom")
@@ -593,7 +644,7 @@ func TestFixtureRatesParity(t *testing.T) {
 		t.Fatalf("open fixture: %v", err)
 	}
 	defer func() { _ = f.Close() }()
-	c, err := parseCatalog(f)
+	c, err := parseCatalog(f, nil)
 	if err != nil {
 		t.Fatalf("parseCatalog fixture: %v", err)
 	}
@@ -603,21 +654,42 @@ func TestFixtureRatesParity(t *testing.T) {
 	// 100k input at 3e-6 plus 10k output at 1.5e-5.
 	claude := usageEvent{model: "claude-sonnet-4-6", tier: "standard",
 		tokens: promptTokens{input: 100_000, output: 10_000}}
-	assertCost(t, c.price(claude), 0.45, true)
+	assertCost(t, c.priceWith(claude, nil), 0.45, true)
 	pi := usageEvent{at: at(0), model: "m", cost: fptr(1.5)}
-	p := usagePricer(agent{name: "pi"}, c, subscriptions{})(pi)
+	p := usagePricer(agent{name: "pi"}, c, subscriptions{}, nil)(pi)
 	if !p.total.list.known() || !p.total.billed.known() {
 		t.Fatalf("pi self-priced event must stay known: %+v", p.total)
 	}
 }
 
-// TestPriceLongContextPartialAboveFallsBack pins the per-class merge: a catalog
-// entry with only the 1h-write above rate still prices other classes above
-// 200k context at their standard rates, not unknown.
+// TestPriceLongContextPartialAboveFallsBack pins the validation-time fallback:
+// an unlisted above-200k class inherits its standard rate.
 func TestPriceLongContextPartialAboveFallsBack(t *testing.T) {
-	c := catalog{"mx": {standard: tokenRates{input: fptr(0.000001)}, above: tokenRates{cacheWrite1h: fptr(0.000003)}, hasAbove: true}}
+	c, err := parseCatalog(strings.NewReader(`{"mx":{"input_cost_per_token":0.000001,"cache_creation_input_token_cost_above_1hr_above_200k_tokens":0.000003}}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	e := usageEvent{model: "mx", tier: "standard", tokens: promptTokens{input: 250_000, cacheWrite1h: 10_000}}
-	assertCost(t, c.price(e), 250_000*0.000001+10_000*0.000003, true)
+	assertCost(t, c.priceWith(e, nil), 250_000*0.000001+10_000*0.000003, true)
+}
+
+// TestRejectedAboveRateStaysUnknown pins that a listed but corrupt above-200k
+// figure reads unknown instead of borrowing the cheaper standard rate.
+func TestRejectedAboveRateStaysUnknown(t *testing.T) {
+	var warns []string
+	c, err := parseCatalog(strings.NewReader(`{"mx":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000002,"cache_creation_input_token_cost_above_1hr_above_200k_tokens":-1}}`),
+		func(err error) { warns = append(warns, err.Error()) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := usageEvent{model: "mx", tokens: promptTokens{input: 250_000, cacheWrite1h: 10_000}}
+	assertCost(t, c.priceWith(bad, nil), 0, false)
+	long := usageEvent{model: "mx", tokens: promptTokens{input: 250_000, output: 1_000}}
+	assertCost(t, c.priceWith(long, nil), 250_000*0.000001+1_000*0.000002, true)
+	assertCost(t, c.priceWith(usageEvent{model: "mx", tokens: promptTokens{input: 1_000}}, nil), 0.001, true)
+	if len(warns) != 1 || !strings.Contains(warns[0], "mx.above_200k.cacheWrite1h") {
+		t.Errorf("warnings = %q, want one above-200k cause", warns)
+	}
 }
 
 func assertFetchedCatalog(t *testing.T, c catalog, err error) {
@@ -625,7 +697,7 @@ func assertFetchedCatalog(t *testing.T, c catalog, err error) {
 	if err != nil {
 		t.Fatalf("loadCatalogFrom: %v", err)
 	}
-	assertCost(t, c.price(usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 1000}}), 0.001, true)
+	assertCost(t, c.priceWith(usageEvent{model: "m1", tier: "standard", tokens: promptTokens{input: 1000}}, nil), 0.001, true)
 }
 
 func assertCatalogBytes(t *testing.T, r io.Reader, want string) {
@@ -718,7 +790,7 @@ func TestRatesCacheWriteFailureRidesProgressHandle(t *testing.T) {
 	events := make(chan progressEvent, 16)
 	p := &progress{ctx: context.Background(), events: events}
 	errOut := captureStderr(t, func() {
-		c, err := fetchAndCache(path, url, p)
+		c, err := fetchAndCache(path, url, p, false, progressWarn(p))
 		assertFetchedCatalog(t, c, err)
 	})
 	if errOut != "" {
@@ -753,8 +825,12 @@ func TestRatesCacheWriteFailureRefetchesEveryRun(t *testing.T) {
 					c, err := loadCatalogFrom(url)
 					assertFetchedCatalog(t, c, err)
 				})
-				if !strings.Contains(errOut, "rate cache write failed") {
-					t.Errorf("run %d stderr must disclose the cache-write failure:\n%s", i, errOut)
+				want := "rate cache write failed"
+				if blockedParent {
+					want = "skipping the rate cache write"
+				}
+				if !strings.Contains(errOut, want) {
+					t.Errorf("run %d stderr must name the cache-write failure (%q):\n%s", i, want, errOut)
 				}
 				assertRatesFetchCount(t, hits, i)
 				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -812,6 +888,11 @@ func TestMarkFetchAttemptFallsBackWhenCacheDirUnwritable(t *testing.T) {
 		t.Errorf("fetches = %d, want 1: the fallback marker must arm the cooldown", hits.Load())
 	}
 }
+
+// fetchCoolingDown reports a recent failed fetch via the wall clock, for tests
+// outside the status path; the catalog path uses fetchCoolingDownAt with the
+// captured report clock.
+func fetchCoolingDown(path string) (bool, error) { return fetchCoolingDownAt(path, nowFunc()) }
 
 // TestFetchCoolingDownIgnoresFutureMarker pins the clock guard: a marker with a
 // future mtime is invalid, not an arbitrarily long cooldown.
@@ -1042,7 +1123,7 @@ func assertOneServedCatalog(t *testing.T, result catalogLoadResult, payloads []s
 	}
 	for i := range payloads {
 		model := fmt.Sprintf("m%d", i)
-		priced := result.catalog.price(usageEvent{model: model, tier: "standard", tokens: promptTokens{input: 1000, output: 1000}})
+		priced := result.catalog.priceWith(usageEvent{model: model, tier: "standard", tokens: promptTokens{input: 1000, output: 1000}}, nil)
 		if priced.total.list.known() {
 			assertCost(t, priced, float64(i+1)*0.011, true)
 			return
@@ -1066,4 +1147,507 @@ func assertOneServedCache(t *testing.T, path string, payloads []string) {
 		}
 	}
 	t.Fatalf("cache is not one complete served payload: %q", got)
+}
+
+// invalidRates mirrors the fixture's shape: one negative figure and one figure
+// far above any real per-token price.
+const invalidRates = `{"claude-sonnet-4-6":{"input_cost_per_token":-0.001,"output_cost_per_token":2}}`
+
+// runCatalogProgress loads the catalog through a real progress handle, so the
+// test observes the disclosure seam a user sees.
+func runCatalogProgress(t *testing.T, work func(*progress) error) (string, error) {
+	t.Helper()
+	var g globals
+	g.progress = progressAlways
+	var out strings.Builder
+	err := withProgressTo(&out, &g, progressOptions{}, work)
+	return out.String(), err
+}
+
+// TestCatalogInvalidRateWarns pins that a corrupt figure is never money and
+// always disclosed: a rejected class stays unknown and one warning names the
+// model, field and cause, whether the progress renderer runs or not.
+func TestCatalogInvalidRateWarns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rates.json")
+	writeFile(t, path, invalidRates, 0o644)
+	t.Setenv(ratesEnv, path)
+	want := []string{"claude-sonnet-4-6.standard.input", "negative", "claude-sonnet-4-6.standard.output", "above 1 USD/token"}
+	for _, tc := range []struct {
+		name     string
+		renderer bool
+	}{
+		{"with-renderer", true},
+		{"without-renderer", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var c catalog
+			if tc.renderer {
+				out, err := runCatalogProgress(t, func(p *progress) error {
+					var lerr error
+					c, lerr = loadCatalogFromNotify(ratesURL, p, nowFunc())
+					return lerr
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, w := range want {
+					if !strings.Contains(out, w) {
+						t.Errorf("warnings = %q, want %q", out, w)
+					}
+				}
+			} else {
+				c = warnNoRenderer(t, ratesURL, want...)
+			}
+			assertCost(t, c.priceWith(usageEvent{model: "claude-sonnet-4-6", tokens: promptTokens{input: 10}}, nil), 0, false)
+		})
+	}
+}
+
+// warnNoRenderer loads the catalog with no progress handle, as --json and every
+// non-TTY run do, and pins that each want string reaches stderr.
+func warnNoRenderer(t *testing.T, url string, want ...string) catalog {
+	t.Helper()
+	var c catalog
+	var err error
+	out := captureStderr(t, func() { c, err = loadCatalogFromNotify(url, nil, nowFunc()) })
+	if err != nil {
+		t.Fatalf("loadCatalogFromNotify: %v", err)
+	}
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Errorf("warnings = %q, want %q", out, w)
+		}
+	}
+	return c
+}
+
+// TestCorruptTokenCountsPriceUnknown pins the stable price boundary: a negative
+// or absurd count taints the price instead of producing negative or overflowing
+// money that reads as real.
+func TestCorruptTokenCountsPriceUnknown(t *testing.T) {
+	rate, search := 0.000001, 0.01
+	c := catalog{"m": {standard: tokenRates{input: &rate}, webSearch: &search}}
+	for name, e := range map[string]usageEvent{
+		"negative count":    {model: "m", tokens: promptTokens{input: -5}},
+		"absurd count":      {model: "m", tokens: promptTokens{input: int64(maxTokenCount) + 1}},
+		"absurd estimate":   {model: "m", tokens: promptTokens{unclassifiedCacheWrite: int64(maxTokenCount) + 1}},
+		"negative requests": {model: "m", webSearch: -3},
+		"absurd requests":   {model: "m", webSearch: int64(maxTokenCount) + 1},
+	} {
+		if p := c.priceWith(e, nil); p.total.list.known() {
+			t.Errorf("%s = %+v, want unknown", name, p.total.list)
+		}
+	}
+}
+
+// TestDerivedPriceCeiling pins the product ceiling: a count inside maxTokenCount
+// times a rate inside maxCatalogRate can exceed maxSessionCost, so the bill reads
+// unknown, not exact money.
+func TestDerivedPriceCeiling(t *testing.T) {
+	over, edge, full := 0.000003, 0.000001, int64(maxTokenCount)
+	c := catalog{"m": {standard: tokenRates{input: &over, cacheWrite5m: &over}, webSearch: &over}}
+	for _, e := range []usageEvent{
+		{model: "m", tokens: promptTokens{input: full}},
+		{model: "m", tokens: promptTokens{unclassifiedCacheWrite: full}},
+		{model: "m", webSearch: full},
+	} {
+		var warns []string
+		assertCost(t, c.priceWith(e, func(err error) { warns = append(warns, err.Error()) }), 0, false)
+		if len(warns) != 1 || !strings.Contains(warns[0], "price: above 1e+06 USD") {
+			t.Errorf("%+v: warnings = %q, want one ceiling warning", e, warns)
+		}
+	}
+	// Independent valid tiers can exceed the event ceiling when summed.
+	both := catalog{"m": {standard: tokenRates{input: &over, output: &over}}}
+	var warns []string
+	p := both.priceWith(usageEvent{model: "m", tokens: promptTokens{input: 300_000_000_000, output: 300_000_000_000}}, func(err error) { warns = append(warns, err.Error()) })
+	assertCost(t, p, 0, false)
+	if !p.tiers[tierInput].list.known() || !p.tiers[tierOutput].list.known() || len(warns) != 1 {
+		t.Errorf("event=%+v warnings=%q; want valid tiers and one total warning", p, warns)
+	}
+	// 1e-6 USD/token × 1e12 tokens is exactly maxSessionCost: still exact money.
+	edgeCat := catalog{"m": {standard: tokenRates{input: &edge}}}
+	assertCost(t, edgeCat.priceWith(usageEvent{model: "m", tokens: promptTokens{input: full}}, nil), maxSessionCost, true)
+}
+
+// TestColdStartDoesNotWarnAboutMissingCache pins that a first run is a normal
+// fetch: only a real cache failure may warn.
+func TestColdStartDoesNotWarnAboutMissingCache(t *testing.T) {
+	path := isolatedRatesCache(t)
+	url, hits := serveRatesCounting(t, http.StatusOK, testCatalog)
+	out, err := runCatalogProgress(t, func(p *progress) error {
+		_, err := loadCatalogFromNotify(url, p, nowFunc())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("fetches = %d, want 1", hits.Load())
+	}
+	if strings.Contains(out, path) || strings.Contains(out, "refetching") {
+		t.Errorf("cold start must not warn about a missing cache: %q", out)
+	}
+}
+
+// TestCorruptCacheWarnsAndRefetches pins the corrupt-cache disclosure and
+// fallback: a corrupt fresh cache names its path and refetches, whether the
+// progress renderer runs or not, and the fetched copy still prices.
+func TestCorruptCacheWarnsAndRefetches(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		renderer bool
+	}{
+		{"with-renderer", true},
+		{"without-renderer", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := isolatedRatesCache(t)
+			url, hits := serveRatesCounting(t, http.StatusOK, testCatalog)
+			writeFile(t, path, `{corrupt`, 0o644)
+			if tc.renderer {
+				out, err := runCatalogProgress(t, func(p *progress) error {
+					_, err := loadCatalogFromNotify(url, p, nowFunc())
+					return err
+				})
+				if err != nil {
+					t.Fatalf("load: %v", err)
+				}
+				if hits.Load() != 1 {
+					t.Errorf("fetches = %d, want 1: a corrupt cache must not be served", hits.Load())
+				}
+				for _, want := range []string{path, "refetching"} {
+					if !strings.Contains(out, want) {
+						t.Errorf("warnings = %q, want %q", out, want)
+					}
+				}
+				return
+			}
+			if c := warnNoRenderer(t, url, path, "refetching"); len(c) == 0 {
+				t.Errorf("catalog = %v, want the fetched copy", c)
+			}
+			if err := os.RemoveAll(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			warnNoRenderer(t, url, path, "refetching")
+		})
+	}
+}
+
+// TestCorruptFreshCacheAndFailedFetchShowBothCauses pins that neither failure
+// hides the other: the cache cause is a warning and the fetch cause is the
+// returned error the caller reports.
+func TestCorruptFreshCacheAndFailedFetchShowBothCauses(t *testing.T) {
+	path := isolatedRatesCache(t)
+	writeFile(t, path, `{corrupt`, 0o644)
+	url := serveRates(t, http.StatusInternalServerError, "boom")
+	out, err := runCatalogProgress(t, func(p *progress) error {
+		_, err := loadCatalogFromNotify(url, p, nowFunc())
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("err = %v, want the fetch cause", err)
+	}
+	if !strings.Contains(out, path) || !strings.Contains(out, "refetching") {
+		t.Errorf("warnings = %q, want the cache cause naming %s", out, path)
+	}
+}
+
+// TestReviewRepeatedCatalogWarning pins f6: a corrupt-rate cause is disclosed
+// once per run, even when the retry path re-parses the same cache file after a
+// failed refresh.
+func TestReviewRepeatedCatalogWarning(t *testing.T) {
+	pinStaleCatalog(t, invalidRates)
+	url := serveRates(t, http.StatusInternalServerError, "boom")
+	out, _ := runCatalogProgress(t, func(p *progress) error {
+		_, err := loadCatalogFromNotify(url, p, nowFunc())
+		return err
+	})
+	if !strings.Contains(out, "refresh failed") {
+		t.Fatalf("stale fallback disclosure missing:\n%s", out)
+	}
+	for _, want := range []string{"claude-sonnet-4-6.standard.input", "claude-sonnet-4-6.standard.output"} {
+		if n := strings.Count(out, want); n != 1 {
+			t.Errorf("warnings for %q = %d, want 1 per cause across the retry:\n%s", want, n, out)
+		}
+	}
+}
+
+// TestReviewSecondarySearch pins f12: every stated search size is validated and
+// warned, even when the authoritative (first stated) size is broken and the
+// class must stay unknown.
+func TestReviewSecondarySearch(t *testing.T) {
+	m := map[string]json.RawMessage{
+		"search_context_size_medium": json.RawMessage(`"not-a-number"`),
+		"search_context_size_low":    json.RawMessage(`[1]`),
+		"search_context_size_high":   json.RawMessage(`{"x":1}`),
+	}
+	var warns []string
+	if got := searchRate(m, "m", func(err error) { warns = append(warns, err.Error()) }); got != nil {
+		t.Errorf("searchRate = %v, want nil when the authoritative size is broken", got)
+	}
+	if len(warns) != 3 {
+		t.Errorf("warnings = %q, want one per stated size (medium/low/high)", warns)
+	}
+}
+
+// TestArchitectureProbeSpec pins f18: documentation rows (sample_spec and
+// comment rows) are recognised before any price decode, so their prose values
+// never warn and never become catalog entries.
+func TestArchitectureProbeSpec(t *testing.T) {
+	var warns []string
+	c, err := parseCatalog(strings.NewReader(`{"sample_spec":{"input_cost_per_token":"float","search_context_cost_per_query":"prose"},"#comment":{"note":"ignore"},"m":{"input_cost_per_token":0.000001}}`),
+		func(err error) { warns = append(warns, err.Error()) })
+	if err != nil {
+		t.Fatalf("parseCatalog: %v", err)
+	}
+	if len(c) != 1 {
+		t.Fatalf("catalog = %v, want only the priced row", c)
+	}
+	if len(warns) != 0 {
+		t.Errorf("warnings = %q, want none for documentation rows", warns)
+	}
+}
+
+// TestArchitectureProbeSearch pins f21: every stated search size is validated on
+// decode (negative and over-limit figures warn once each), while the first
+// stated size keeps precedence and the selected price survives.
+func TestArchitectureProbeSearch(t *testing.T) {
+	m := map[string]json.RawMessage{
+		"search_context_size_medium": json.RawMessage(`0.01`),
+		"search_context_size_low":    json.RawMessage(`-1`),
+		"search_context_size_high":   json.RawMessage(`2`),
+	}
+	var warns []string
+	got := searchRate(m, "m", func(err error) { warns = append(warns, err.Error()) })
+	if got == nil || math.Abs(*got-0.01) > 1e-12 {
+		t.Fatalf("searchRate = %v, want 0.01 (first stated size wins)", got)
+	}
+	if len(warns) != 2 {
+		t.Fatalf("warnings = %q, want one per invalid stated size (low/high)", warns)
+	}
+	for _, want := range []string{"search_context_size_low", "search_context_size_high"} {
+		found := false
+		for _, w := range warns {
+			if strings.Contains(w, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("warnings = %q, want one naming %s", warns, want)
+		}
+	}
+}
+
+// TestRateCatalogStaleMalformedReportsBothCauses pins f15: when a stale cache is
+// itself malformed and the refresh fails, both distinct causes are reported once
+// — the cache parse failure as a warning, the fetch cause as the returned error.
+func TestRateCatalogStaleMalformedReportsBothCauses(t *testing.T) {
+	path := pinStaleCatalog(t, `{corrupt`)
+	url := serveRates(t, http.StatusInternalServerError, "boom")
+	out, err := runCatalogProgress(t, func(p *progress) error {
+		_, err := loadCatalogFromNotify(url, p, nowFunc())
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("err = %v, want the fetch cause", err)
+	}
+	if n := strings.Count(out, path); n != 1 {
+		t.Errorf("cache parse cause mentioned %d times, want once:\n%s", n, out)
+	}
+}
+
+// TestRateCatalogColdStartFetchFailStaysSilent pins f15: an absent cache (cold
+// start) stays silent even when the refresh fails — the fetch cause is the only
+// report, never a spurious cache-parse warning.
+func TestRateCatalogColdStartFetchFailStaysSilent(t *testing.T) {
+	path := isolatedRatesCache(t)
+	url := serveRates(t, http.StatusInternalServerError, "boom")
+	out, err := runCatalogProgress(t, func(p *progress) error {
+		_, err := loadCatalogFromNotify(url, p, nowFunc())
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("err = %v, want the fetch cause", err)
+	}
+	if strings.Contains(out, path) || strings.Contains(out, "refetching") {
+		t.Errorf("cold start must stay silent about the missing cache: %q", out)
+	}
+}
+
+// TestRateCatalogFetchedBodySharesDedupeSink pins f19: the fetched body is
+// parsed through the run's shared deduplicated sink, so a malformed search row
+// in the fetched body is reported exactly once after a fresh-corrupt cache
+// forced the refetch.
+func TestRateCatalogFetchedBodySharesDedupeSink(t *testing.T) {
+	const body = `{"m":{"input_cost_per_token":0.000001,"search_context_cost_per_query":{"search_context_size_medium":"oops"}}}`
+	writeFile(t, isolatedRatesCache(t), `{corrupt`, 0o644) // fresh but unparseable → refetch
+	url, hits := serveRatesCounting(t, http.StatusOK, body)
+	out, err := runCatalogProgress(t, func(p *progress) error {
+		_, err := loadCatalogFromNotify(url, p, nowFunc())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("fetches = %d, want 1", hits.Load())
+	}
+	want := "m.webSearch.search_context_size_medium: not a number"
+	if n := strings.Count(out, want); n != 1 {
+		t.Errorf("search warning count = %d, want exactly 1 across cache parse + fetch:\n%s", n, out)
+	}
+}
+
+// TestRatesRefreshKeepsCacheFileMode pins that a refresh keeps a private cache
+// private. The server serves different valid data than the seeded cache, so a
+// refresh that never fetches or never replaces the file cannot pass.
+func TestRatesRefreshKeepsCacheFileMode(t *testing.T) {
+	for _, seed := range []os.FileMode{0o600, 0o666} {
+		path := pinStaleCatalog(t, testCatalog)
+		if err := os.Chmod(path, seed); err != nil {
+			t.Fatal(err)
+		}
+		// A valid payload distinct from testCatalog: only a real replacement proves
+		// the refresh wrote through to the cache file.
+		replacement := `{"m-replaced":{"input_cost_per_token":0.000003,"output_cost_per_token":0.000004}}`
+		url, hits := serveRatesCounting(t, http.StatusOK, replacement)
+		if _, err := loadCatalogFrom(url); err != nil {
+			t.Fatalf("loadCatalogFrom: %v", err)
+		}
+		if hits.Load() != 1 {
+			t.Fatalf("server hits = %d, want 1: a refresh must fetch", hits.Load())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != replacement {
+			t.Fatalf("cache bytes = %q, want the replacement payload", data)
+		}
+		// Windows does not preserve POSIX permission bits, so the mode invariant
+		// only holds where chmod does.
+		if runtime.GOOS != "windows" {
+			if info, err := os.Stat(path); err != nil || info.Mode().Perm() != seed {
+				t.Fatalf("seed %o: cache info=%v err=%v, want mode preserved (%o)", seed, info, err, seed)
+			}
+		}
+	}
+}
+
+// TestRatesRefreshStatFailureKeepsCachePath pins that an unreadable mode skips
+// the write, and that one stat failure is disclosed once: the cause with its net
+// effect, never the same error twice.
+func TestRatesRefreshStatFailureKeepsCachePath(t *testing.T) {
+	path := isolatedRatesCache(t)
+	mustSymlink(t, filepath.Base(path), path)
+	_, causeErr := os.Stat(path) // the loop the loader trips over
+	var lerr error
+	stderr := captureStderr(t, func() {
+		_, lerr = loadCatalogFrom(serveRates(t, http.StatusOK, testCatalog))
+	})
+	info, serr := os.Lstat(path)
+	if lerr != nil || serr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("load err=%v; cache path replaced: info=%v err=%v", lerr, info, serr)
+	}
+	if causeErr == nil {
+		t.Fatal("the link loop must not be statable: the fixture is wrong")
+	}
+	if want := causeErr.Error(); strings.Count(stderr, want) != 1 {
+		t.Fatalf("cause %q appears %d times, want exactly one warning: %q", want, strings.Count(stderr, want), stderr)
+	}
+	if n := strings.Count(stderr, warnPrefix); n != 1 {
+		t.Fatalf("warnings = %d, want exactly one: %q", n, stderr)
+	}
+	if !strings.Contains(stderr, "skipping the rate cache write") {
+		t.Errorf("stderr = %q, want the net effect of the stat failure", stderr)
+	}
+}
+
+// TestCorruptPromptKeepsStandardOnlyPrice pins that a rejected prompt count
+// refuses long-context selection but not a model whose rates never depend on
+// context: valid sibling tokens stay priced and the corrupt tier stays unknown.
+func TestCorruptPromptKeepsStandardOnlyPrice(t *testing.T) {
+	c := catalog{"m": {standard: tokenRates{input: fptr(0.000001), output: fptr(0.000002)}}}
+	p := c.priceWith(usageEvent{model: "m", tokens: promptTokens{
+		input: 10, output: 5, corrupt: tierMask(0).with(tierInput),
+	}}, nil)
+	assertCost(t, p, 0, false)
+	if p.tiers[tierInput].list.known() || !p.tiers[tierOutput].list.known() {
+		t.Errorf("tiers = %+v, want the corrupt input unknown and output priced", p.tiers)
+	}
+}
+
+// TestBareIDCorruptRowStaysUnknown pins the bare-id exact-row contract: a row
+// whose name is not provider-qualified but states a price that fails to decode
+// must stay a model with unknown classes, so an alias row formed by stripping
+// its suffix cannot supply an exact price, and one warning names the broken
+// figure.
+func TestBareIDCorruptRowStaysUnknown(t *testing.T) {
+	var warns []string
+	c, err := parseCatalog(strings.NewReader(`{"gpt-6-20250101":{"input_cost_per_token":"oops"},"gpt-6":{"input_cost_per_token":0.001}}`),
+		func(err error) { warns = append(warns, err.Error()) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := c.priceWith(usageEvent{model: "gpt-6-20250101", tokens: promptTokens{input: 100}}, nil)
+	assertCost(t, p, 0, false) // unknown, never 0.10 from the alias
+	if p.tiers[tierInput].list.known() {
+		t.Errorf("input tier = %+v, want unknown: the alias must not substitute", p.tiers[tierInput].list)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "gpt-6-20250101.input_cost_per_token") {
+		t.Errorf("warnings = %q, want one naming the broken figure", warns)
+	}
+}
+
+// TestMalformedAboveRateStaysUnknown pins that a stated but undecodable
+// above-200k figure rejects that class instead of silently borrowing the cheaper
+// standard rate: the total reads unknown with exactly one warning, while valid
+// above figures still price at the above rate and rows with no above figures
+// still standard-fill.
+func TestMalformedAboveRateStaysUnknown(t *testing.T) {
+	var warns []string
+	c, err := parseCatalog(strings.NewReader(`{"m":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000002,"input_cost_per_token_above_200k_tokens":"bad"}}`),
+		func(err error) { warns = append(warns, err.Error()) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCost(t, c.priceWith(usageEvent{model: "m", tokens: promptTokens{input: 300_000}}, nil), 0, false)
+	if len(warns) != 1 || !strings.Contains(warns[0], "above_200k") || !strings.Contains(warns[0], "not a number") {
+		t.Errorf("warnings = %q, want one naming the broken above-200k figure", warns)
+	}
+	valid, _ := parseCatalog(strings.NewReader(`{"m":{"input_cost_per_token":0.000001,"input_cost_per_token_above_200k_tokens":0.000002}}`), nil)
+	assertCost(t, valid.priceWith(usageEvent{model: "m", tokens: promptTokens{input: 300_000}}, nil), 0.6, true)
+	unlisted, _ := parseCatalog(strings.NewReader(`{"m":{"input_cost_per_token":0.000001}}`), nil)
+	assertCost(t, unlisted.priceWith(usageEvent{model: "m", tokens: promptTokens{input: 300_000}}, nil), 0.3, true)
+}
+
+// TestSearchRateBrokenPreferredStaysUnknown pins the search-rate precedence: the
+// first stated size is authoritative, so a malformed medium must be rejected
+// with one warning and never borrow a lower-priority (low/high) price. A valid
+// medium still wins over low, and a later malformed size still warns.
+func TestSearchRateBrokenPreferredStaysUnknown(t *testing.T) {
+	var warns []string
+	c, err := parseCatalog(strings.NewReader(`{"m":{"input_cost_per_token":0.000001,"search_context_cost_per_query":{"search_context_size_medium":"broken","search_context_size_low":0.01}}}`),
+		func(err error) { warns = append(warns, err.Error()) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCost(t, c.priceWith(usageEvent{model: "m", tokens: promptTokens{input: 10}, webSearch: 4}, nil), 0, false)
+	if len(warns) != 1 || !strings.Contains(warns[0], "search_context_size_medium") {
+		t.Errorf("warnings = %q, want one naming the broken medium", warns)
+	}
+	var warns2 []string
+	valid, err := parseCatalog(strings.NewReader(`{"m":{"input_cost_per_token":0.000001,"search_context_cost_per_query":{"search_context_size_medium":0.02,"search_context_size_low":"bad"}}}`),
+		func(err error) { warns2 = append(warns2, err.Error()) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCost(t, valid.priceWith(usageEvent{model: "m", tokens: promptTokens{input: 10}, webSearch: 4}, nil), 0.08001, true)
+	if len(warns2) != 1 || !strings.Contains(warns2[0], "search_context_size_low") {
+		t.Errorf("warnings = %q, want one naming the broken low", warns2)
+	}
 }
