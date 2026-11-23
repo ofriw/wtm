@@ -2,13 +2,16 @@
 
 package fs
 
-import "errors"
-import "io"
-import "os"
-import "path/filepath"
-import "strings"
-import "testing"
-import "golang.org/x/sys/windows"
+import (
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"golang.org/x/sys/windows"
+)
 
 // TestOpenSharedAllowsReplaceAndRemove pins the invariant behind every store
 // reader: a held reader handle must not block the writer's atomic replace or

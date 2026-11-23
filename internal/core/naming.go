@@ -173,7 +173,7 @@ func DeriveDirName(project, branch string) string {
 }
 
 // NestedIn reports the existing worktree that contains target (or equals it).
-// Worktrees must be siblings: a nested checkout makes IDE watchers, linters and
+// worktrees must be siblings: a nested checkout makes IDE watchers, linters and
 // test runners double-scan, and breaks discovery assumptions.
 func NestedIn(target string, wts []git.GWorktree) (string, bool) {
 	for _, w := range wts {

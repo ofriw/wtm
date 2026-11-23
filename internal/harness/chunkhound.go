@@ -24,10 +24,10 @@ const (
 	RootGuardName        = "chunks.db.root.json"
 )
 
-// IndexTimeout bounds a hung indexer: the offline stub finishes in ms and a
+// indexTimeout bounds a hung indexer: the offline stub finishes in ms and a
 // real embed run in minutes, so exceeding this is a stuck child, not a slow one.
 // A var, not a const, so tests can shrink the bound without sleeping for real.
-var IndexTimeout = 5 * time.Minute
+var indexTimeout = 5 * time.Minute
 
 // ErrNoChunkHound means the chunkhound binary is not on PATH: ChunkHound is
 // optional, so the index step is skipped instead of failed.
@@ -160,7 +160,7 @@ func PatchDatabasePath(srcRoot, dstRoot string) error {
 // A binary missing from PATH reports ErrNoChunkHound so the caller can skip
 // indexing; every other failure is a real error and stays fatal.
 func RunIndex(root string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), IndexTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), indexTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "chunkhound", "index", root)
 	cmd.Dir = root
@@ -175,7 +175,7 @@ func RunIndex(root string) error {
 		// "signal: killed", which looks like a crash rather than a bound. The
 		// deadline is the root cause, so it is what the chain wraps.
 		if ctx.Err() != nil {
-			return fmt.Errorf("chunkhound index %s: timed out after %s: %w", root, IndexTimeout, ctx.Err())
+			return fmt.Errorf("chunkhound index %s: timed out after %s: %w", root, indexTimeout, ctx.Err())
 		}
 		return fmt.Errorf("chunkhound index %s: %w", root, err)
 	}

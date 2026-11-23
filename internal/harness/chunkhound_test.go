@@ -302,9 +302,9 @@ func TestRunIndexTimeoutMessage(t *testing.T) {
 	// to resolve the chunkhound name.
 	WriteFile(t, filepath.Join(dir, "chunkhound"), "#!/bin/sh\nexec /bin/sleep 30\n", 0o755)
 	t.Setenv("PATH", dir)
-	old := IndexTimeout
-	IndexTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { IndexTimeout = old })
+	old := indexTimeout
+	indexTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { indexTimeout = old })
 
 	err := RunIndex(t.TempDir())
 	if err == nil {

@@ -13,12 +13,14 @@ import (
 
 const claudeAgent = "claude"
 
-// agentDirs maps a harness name to its config dir and session subdir.
+// agentDirs maps a harness name to its config dir and session subdir. The
+// subdir literals mirror the harness agents' private sessionSubdir fields
+// (agents.go); the harness intentionally does not export them.
 func agentDirs(harnessName string) (string, string) {
 	if harnessName == claudeAgent {
-		return harness.ClaudeAgent.ConfigDir(), harness.ClaudeAgent.SessionSubdir()
+		return harness.ClaudeAgent.ConfigDir(), "projects"
 	}
-	return harness.PiAgent.ConfigDir(), harness.PiAgent.SessionSubdir()
+	return harness.PiAgent.ConfigDir(), "sessions"
 }
 
 // safetySessionFor writes one session file under the harness's session root,

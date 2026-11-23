@@ -102,13 +102,38 @@ func assertStatusProgress(t *testing.T, stderr string, enabled bool) {
 	}
 }
 
+// TestDiscoverUpstreamsUnavailablePTY pins the upstream warning surviving the
+// renderer as its own persistent line, exactly once: a raw stderr write would
+// be spliced into a spinner frame and overwritten by the next redraw. A
+// corrupt packed-refs makes for-each-ref fail while `worktree list` still
+// succeeds, so the branchUpstreams error path is reachable with real git.
+func TestDiscoverUpstreamsUnavailablePTY(t *testing.T) {
+	Sandbox(t)
+	repo := InitRepo(t, "main")
+	GitTestCommit(t, repo)
+	WriteFile(t, filepath.Join(repo, ".git", "packed-refs"), "garbage\n", 0o644)
+	_, stderr, _, rc := runStatusTTY(t, repo, 80, "--progress", "always")
+	if rc != 0 {
+		t.Fatalf("rc = %d, want 0; stderr:\n%s", rc, stderr)
+	}
+	n := 0
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "warning: upstreams unavailable") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("renderer notices = %d, want 1; stderr:\n%s", n, stderr)
+	}
+}
+
 // TestWithProgressRendererPTY pins the in-process orchestration on a real
 // terminal: under an explicit --progress always, work runs against a live
 // renderer on the injected writer, the work error surfaces as withProgressTo's
 // error, and the terminal frame reports the failure.
 func TestWithProgressRendererPTY(t *testing.T) {
-	var g globals
-	g.Progress = progressAlways
+	var g core.Globals
+	g.Progress = ui.ProgressAlways
 	masterErr, slaveErr := openTTY(t, 80)
 	workErr := errors.New("boom")
 
