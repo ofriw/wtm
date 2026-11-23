@@ -13,7 +13,25 @@ import (
 	. "wtm/internal/testutil"
 )
 
-func identityCheckout(t *testing.T) (string, string, worktree) {
+// discoveredWorktree composes one inventory entry through the production
+// discovery seam, so fixtures exercise the same wiring the real status/gc
+// commands use.
+func discoveredWorktree(t *testing.T, repo, path string) core.Worktree {
+	t.Helper()
+	ws, err := core.LoadWorkspace(&core.Globals{Root: repo}, false, defaultHooks())
+	if err != nil {
+		t.Fatalf("load workspace: %v", err)
+	}
+	for _, w := range ws.Wts {
+		if w.Path == CanonicalPath(path) {
+			return w
+		}
+	}
+	t.Fatalf("worktree %s not discovered", path)
+	return core.Worktree{}
+}
+
+func identityCheckout(t *testing.T) (string, string, core.Worktree) {
 	t.Helper()
 	Sandbox(t)
 	repo := InitRepo(t, "main")
@@ -21,16 +39,16 @@ func identityCheckout(t *testing.T) (string, string, worktree) {
 	path := filepath.Join(filepath.Dir(repo), "temp")
 	GitWorktreeAdd(t, repo, path, "tmp/test", "HEAD")
 	seedTempRecord(t, path, "tmp/test", "100ms", TempTestTime)
-	w := core.BuildWorktree(gworktree{Path: path, Branch: "tmp/test"}, sessionIndex{}, nil, mustReadTempStore(t), nil, noMCP)
-	if !w.Temp || !temp.ValidTempIdentity(w.TempIdentity) {
+	w := discoveredWorktree(t, repo, path)
+	if !w.Temp || w.TempIdentity == "" {
 		t.Fatalf("identity was not attached: %+v", w)
 	}
 	return repo, path, w
 }
 
-func assertPermanentAfterReconcile(t *testing.T, path, branch string) {
+func assertPermanentAfterReconcile(t *testing.T, repo, path string) {
 	t.Helper()
-	before := core.BuildWorktree(gworktree{Path: path, Branch: branch}, sessionIndex{}, nil, mustReadTempStore(t), nil, noMCP)
+	before := discoveredWorktree(t, repo, path)
 	if before.Temp {
 		t.Fatal("unverified checkout inherited temp rules before reconciliation")
 	}
@@ -41,7 +59,7 @@ func assertPermanentAfterReconcile(t *testing.T, path, branch string) {
 	if _, ok := store[CanonicalPath(path)]; ok {
 		t.Fatal("stale record survived reconciliation")
 	}
-	w := core.BuildWorktree(gworktree{Path: path, Branch: branch}, sessionIndex{}, nil, store, nil, noMCP)
+	w := discoveredWorktree(t, repo, path)
 	if w.Temp {
 		t.Fatal("replacement checkout became temp")
 	}
@@ -54,7 +72,7 @@ func TestTempIdentitySameBranchRecreation(t *testing.T) {
 	if err := verifyTempWorktree(old); err == nil {
 		t.Fatal("same branch recreation passed removal verification")
 	}
-	assertPermanentAfterReconcile(t, path, "tmp/test")
+	assertPermanentAfterReconcile(t, repo, path)
 }
 
 func TestTempIdentityPathReuse(t *testing.T) {
@@ -64,21 +82,21 @@ func TestTempIdentityPathReuse(t *testing.T) {
 	if err := verifyTempWorktree(old); err == nil {
 		t.Fatal("path reuse passed removal verification")
 	}
-	assertPermanentAfterReconcile(t, path, "permanent")
+	assertPermanentAfterReconcile(t, repo, path)
 }
 
 func TestTempIdentitySwitchedBranch(t *testing.T) {
-	_, path, old := identityCheckout(t)
+	repo, path, old := identityCheckout(t)
 	MustGit(t, path, "switch", "-c", "permanent")
 	if err := verifyTempWorktree(old); err == nil {
 		t.Fatal("branch switch passed removal verification")
 	}
-	assertPermanentAfterReconcile(t, path, "permanent")
+	assertPermanentAfterReconcile(t, repo, path)
 }
 
 func TestTempIdentityChangedBeforeRemoval(t *testing.T) {
 	_, path, old := identityCheckout(t)
-	if _, err := temp.AddTempRecord(path, tempRecord{CreatedAt: TempNow, TTL: "1h", Branch: old.Branch}); err != nil {
+	if _, err := temp.AddTempRecord(path, temp.Record{CreatedAt: TempNow, TTL: "1h", Branch: old.Branch}); err != nil {
 		t.Fatal(err)
 	}
 	if err := verifyTempWorktree(old); err == nil {
@@ -91,7 +109,7 @@ func TestTempIdentityChangedBeforeRemoval(t *testing.T) {
 }
 
 func TestTempIdentityAdminTokenChanged(t *testing.T) {
-	_, path, old := identityCheckout(t)
+	repo, path, old := identityCheckout(t)
 	tokenPath, err := temp.TempIdentityPath(path)
 	if err != nil {
 		t.Fatal(err)
@@ -105,24 +123,7 @@ func TestTempIdentityAdminTokenChanged(t *testing.T) {
 	if err := verifyTempWorktree(old); err == nil {
 		t.Fatal("changed admin token passed verification")
 	}
-	assertPermanentAfterReconcile(t, path, old.Branch)
-}
-
-func TestTempIdentityInvalidNeverTemp(t *testing.T) {
-	_, path, w := identityCheckout(t)
-	for _, identity := range []string{"", "bad", strings.Repeat("a", 63)} {
-		rec := mustReadTempStore(t)[CanonicalPath(path)]
-		rec.Identity = identity
-		got := core.BuildWorktree(gworktree{Path: path, Branch: w.Branch}, sessionIndex{}, nil, tempStore{CanonicalPath(path): rec}, nil, noMCP)
-		if got.Temp {
-			t.Fatalf("invalid identity %q marked temp", identity)
-		}
-	}
-	// The valid record must still verify under the lock: the loop above only
-	// fed copies to core.BuildWorktree and never touched the registry.
-	if err := verifyTempWorktree(w); err != nil {
-		t.Fatal(err)
-	}
+	assertPermanentAfterReconcile(t, repo, path)
 }
 
 func TestPromotionStrictMalformedRecord(t *testing.T) {

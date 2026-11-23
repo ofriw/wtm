@@ -145,19 +145,13 @@ func loadWorkspaceWithSessions(g *Globals, showProgress bool, hooks Hooks) (Work
 	return ws, err
 }
 
-// BuildWorktree composes a single inventory entry from its raw inputs; exported
-// for tests that pin inventory composition independent of a discovery run.
-func BuildWorktree(g git.GWorktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp func(string, *ui.Progress) map[string]bool) Worktree {
-	return buildWorktree(g, idx, ups, temps, p, mcp)
-}
-
-func buildWorktree(g git.GWorktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp func(string, *ui.Progress) map[string]bool) Worktree {
+func buildWorktree(g git.GWorktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp MCPFn) Worktree {
 	w := worktreeInventory(g, idx, ups, p, mcp)
 	applyTempRecord(&w, temps, p)
 	return w
 }
 
-func worktreeInventory(g git.GWorktree, idx SessionIndex, ups map[string]git.Upstream, p *ui.Progress, mcp func(string, *ui.Progress) map[string]bool) Worktree {
+func worktreeInventory(g git.GWorktree, idx SessionIndex, ups map[string]git.Upstream, p *ui.Progress, mcp MCPFn) Worktree {
 	pth := fs.Canonical(g.Path)
 	configs := mcp(pth, p)
 	return Worktree{
@@ -171,12 +165,6 @@ func worktreeInventory(g git.GWorktree, idx SessionIndex, ups map[string]git.Ups
 // applyTempRecord marks w temporary when its record verifies. Every failure
 // falls toward permanent, never toward reclaimable: a zero TTL would reclaim
 // instantly, so an unparsable window is refused rather than defaulted.
-// ApplyTempRecord marks w temporary when its record verifies; exported for
-// tests pinning the temp-record application contract.
-func ApplyTempRecord(w *Worktree, temps temp.Store, p *ui.Progress) {
-	applyTempRecord(w, temps, p)
-}
-
 func applyTempRecord(w *Worktree, temps temp.Store, p *ui.Progress) {
 	rec, ok := temps[w.Path]
 	if !ok {
@@ -404,12 +392,6 @@ func ReadWorktreeActivityStrict(path string, idx SessionIndex, now time.Time) (t
 	return collectActivity(path, idx, now, true)
 }
 
-// WorktreeLastUsed is the non-strict activity read exposed for tests that pin
-// LastUsed composition (sessions + git activity) independent of discovery.
-func WorktreeLastUsed(path string, idx SessionIndex) time.Time {
-	return worktreeLastUsed(path, idx)
-}
-
 // worktreeLastUsed includes creation and Git changes so a new or actively
 // edited worktree cannot be classified as abandoned before its first agent session.
 func worktreeLastUsed(path string, idx SessionIndex) time.Time {
@@ -448,12 +430,6 @@ func scanIndexTime(path string, newest *time.Time) error {
 
 // sortWorktrees orders main first, then most recently used, then path — a
 // total order, so machine output never depends on git's listing order.
-// SortWorktrees is the total order used by discovery; exported for tests that
-// pin ordering independently of a full discovery run.
-func SortWorktrees(wts []Worktree) {
-	sortWorktrees(wts)
-}
-
 func sortWorktrees(wts []Worktree) {
 	sort.Slice(wts, func(i, j int) bool {
 		a, b := wts[i], wts[j]

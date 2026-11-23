@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -136,32 +137,55 @@ func TestPurgeSessionsSharedGroup(t *testing.T) {
 }
 
 // TestBuildWorktreeClaude pins the claude capability to the project or local
-// settings file.
+// settings file, through the real binary: status --json exercises production
+// discovery wiring (harness MCP inventory + core composition), not a test-only
+// seam.
 func TestBuildWorktreeClaude(t *testing.T) {
+	Sandbox(t) // a developer's real HOME settings must not fail discovery
+	statusJSON := func(t *testing.T, repo string) []core.JSONWorktree {
+		t.Helper()
+		out, errOut, rc := RunWTM(t, repo, nil, "status", "--json")
+		if rc != 0 {
+			t.Fatalf("status --json exit %d\nstdout: %s\nstderr: %s", rc, out, errOut)
+		}
+		var got []core.JSONWorktree
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("parse status JSON: %v\n%s", err, out)
+		}
+		return got
+	}
 	for _, rel := range []string{"", claudeSettingsFile, claudeLocalSettingsFile} {
 		t.Run(rel, func(t *testing.T) {
-			root := t.TempDir()
+			repo := InitRepo(t, "main")
+			GitTestCommit(t, repo)
 			if rel != "" {
-				WriteFile(t, filepath.Join(root, rel), "{}", 0o644)
+				WriteFile(t, filepath.Join(repo, rel), "{}", 0o644)
 			}
-			w := core.Worktree{Path: root, Main: true, Caps: core.CapabilityStates(core.CapInput{Root: root, MCP: MCPConfigs(root, nil)})}
-			want := core.CapAbsent
+			got := statusJSON(t, repo)
+			want := "n/a"
 			if rel != "" {
-				want = core.CapPresent
+				want = "yes"
 			}
-			if w.Caps["claude"] != want {
-				t.Fatalf("%s: claude = %v, want %v", rel, w.Caps["claude"], want)
+			if len(got) != 1 {
+				t.Fatalf("%s: got %d worktrees, want 1", rel, len(got))
+			}
+			if got[0].Integrations["claude"] != want {
+				t.Fatalf("%s: claude = %q, want %q", rel, got[0].Integrations["claude"], want)
 			}
 		})
 	}
 	// A harness settings file is a presence signal, not a parsed config: even a
 	// corrupt one counts as wired (contrast the MCP configs, which must parse).
 	t.Run("corrupt settings still wired", func(t *testing.T) {
-		root := t.TempDir()
-		WriteFile(t, filepath.Join(root, claudeSettingsFile), "{not json", 0o644)
-		w := core.Worktree{Path: root, Main: true, Caps: core.CapabilityStates(core.CapInput{Root: root, MCP: MCPConfigs(root, nil)})}
-		if w.Caps["claude"] != core.CapPresent {
-			t.Fatalf("corrupt settings: claude = %v, want present", w.Caps["claude"])
+		repo := InitRepo(t, "main")
+		GitTestCommit(t, repo)
+		WriteFile(t, filepath.Join(repo, claudeSettingsFile), "{not json", 0o644)
+		got := statusJSON(t, repo)
+		if len(got) != 1 {
+			t.Fatalf("corrupt settings: got %d worktrees, want 1", len(got))
+		}
+		if got[0].Integrations["claude"] != "yes" {
+			t.Fatalf("corrupt settings: claude = %q, want yes", got[0].Integrations["claude"])
 		}
 	})
 }

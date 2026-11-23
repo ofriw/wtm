@@ -187,7 +187,7 @@ func progressOptions(out io.Writer, ctx context.Context) []tea.ProgramOption {
 // done event carries the error so the summary is never a false success.
 func FeedProgress(ctx context.Context, events chan ProgressEvent, work func(*Progress) error) <-chan error {
 	workErr := make(chan error, 1)
-	p := &Progress{ctx: ctx, events: events}
+	p := NewProgress(ctx, events)
 	go func() {
 		defer close(events)
 		err := work(p)
