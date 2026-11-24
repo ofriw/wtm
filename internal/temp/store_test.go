@@ -53,13 +53,13 @@ func TestDecodeTempStoreRejectsInvalidEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodeTempStore(data, "/store/temp.json"); err == nil || !strings.Contains(err.Error(), bad) {
+	if _, err := decodeTempStore(data, "/store/temp.json"); err == nil || !strings.Contains(err.Error(), bad) {
 		t.Fatalf("invalid record must fail strict decode: %v", err)
 	}
 }
 
 func TestDecodeTempStoreMalformedJSON(t *testing.T) {
-	if _, err := DecodeTempStore([]byte("{not json"), "/store/temp.json"); err == nil {
+	if _, err := decodeTempStore([]byte("{not json"), "/store/temp.json"); err == nil {
 		t.Fatal("malformed top-level JSON must be an error")
 	}
 }

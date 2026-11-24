@@ -21,9 +21,9 @@ import (
 // store operates on checkout paths; activity for idle checks is injected as
 // data, so this package never reaches into harness discovery.
 
-// defaultTempTTL is the idle window a temp worktree gets when `add --temp`
+// DefaultTempTTL is the idle window a temp worktree gets when `add --temp`
 // carries no --ttl.
-const defaultTempTTL = time.Hour
+const DefaultTempTTL = time.Hour
 
 // Sanity bound on user input; 100 years is well within time.Time's range.
 const MaxTempTTL = 100 * 365 * 24 * time.Hour
@@ -40,11 +40,11 @@ type Record struct {
 // Store maps a canonical checkout path to its record.
 type Store map[string]Record
 
-// ActivityFn refreshes a checkout's activity at now. It returns the newest
+// activityFn refreshes a checkout's activity at now. It returns the newest
 // known activity time, plus the raw unverified sessions found, or an error
 // when activity cannot be refreshed. Classification of those sessions (stale
 // vs blocking) belongs to VerifyTempIdle, after the idle verdict.
-type ActivityFn func(path string, now time.Time) (last time.Time, unverified []UnverifiedSession, err error)
+type activityFn func(path string, now time.Time) (last time.Time, unverified []UnverifiedSession, err error)
 
 func tempPath() (string, error) { return fs.WtmFilePath(fs.TempFileName) }
 
@@ -83,10 +83,6 @@ func splitUnverifiedSessions(unverified []UnverifiedSession, knownNewest time.Ti
 	}
 	return stale, nil
 }
-
-// DefaultTempTTL is the idle window a temp worktree gets when `add --temp`
-// carries no --ttl.
-func DefaultTempTTL() time.Duration { return defaultTempTTL }
 
 // ParseTTL parses a positive idle window: a Go duration (30m, 1h, 24h) or whole
 // days (7d), matching the settings file's day syntax.
@@ -147,11 +143,11 @@ func RemainingWindowLabel(expiresAt, now time.Time) string {
 	if now.After(expiresAt) {
 		return "expired"
 	}
-	return compactWindow(expiresAt.Sub(now))
+	return CompactWindow(expiresAt.Sub(now))
 }
 
-// compactWindow renders d at the coarsest whole unit that fits: 3d, 2h, 1h30m, 45m.
-func compactWindow(d time.Duration) string {
+// CompactWindow renders d at the coarsest whole unit that fits: 3d, 2h, 1h30m, 45m.
+func CompactWindow(d time.Duration) string {
 	switch {
 	// Negative durations should not reach here (RemainingWindowLabel guards
 	// the precondition), but surfacing a negative label is more honest than
@@ -171,9 +167,6 @@ func compactWindow(d time.Duration) string {
 	}
 }
 
-// CompactWindow renders d at the coarsest whole unit that fits.
-func CompactWindow(d time.Duration) string { return compactWindow(d) }
-
 // ReadTempStoreUnlocked reads the registry via a shared handle that lets a
 // concurrent mutation atomically replace the file (open_windows.go). It is
 // called by both unlocked readers and mutations holding the registry lock.
@@ -190,11 +183,11 @@ func ReadTempStoreUnlocked() (Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return DecodeTempStore(data, p)
+	return decodeTempStore(data, p)
 }
 
 // Mutation must not turn an unreadable record into proven absence.
-func DecodeTempStore(data []byte, p string) (Store, error) {
+func decodeTempStore(data []byte, p string) (Store, error) {
 	var store Store
 	if err := json.Unmarshal(data, &store); err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
@@ -272,6 +265,7 @@ func newTempIdentity() (string, error) {
 	return hex.EncodeToString(data), nil
 }
 
+// TempIdentityPath resolves the private git dir's temp-identity file for path.
 func TempIdentityPath(path string) (string, error) {
 	dir, err := git.PrivateDir(path)
 	if err != nil {
@@ -333,6 +327,8 @@ func verifyTempBranch(path, expected string) error {
 	return nil
 }
 
+// VerifyTempSnapshot verifies a store snapshot against the expected identity and
+// branch, returning ErrTempMetadataChanged or ErrTempPromoted on drift.
 func VerifyTempSnapshot(store Store, path, branch, identity string) error {
 	rec, ok := store[path]
 	if !ok {
@@ -360,7 +356,7 @@ var (
 // sessions then block only when newer than the candidate's known newest
 // activity or zero-age (such a file could be its hidden recent use); older
 // ones are returned stale for the caller to disclose.
-func VerifyTempIdle(store Store, path string, now time.Time, fresh ActivityFn) (stale []string, err error) {
+func VerifyTempIdle(store Store, path string, now time.Time, fresh activityFn) (stale []string, err error) {
 	if fresh == nil {
 		return nil, errors.New("temp: activity probe is required")
 	}
@@ -386,7 +382,7 @@ func VerifyTempIdle(store Store, path string, now time.Time, fresh ActivityFn) (
 // idle verification + checkout removal sequence.  Verification refreshes
 // external state (Git activity, agent sessions) and removal runs a blocking
 // git command; callers should not expect the lock to be short-lived.
-func RemoveTempWorktreeIf(path, branch, identity string, idleOnly bool, now time.Time, fresh ActivityFn) (removed bool, stale []string, err error) {
+func RemoveTempWorktreeIf(path, branch, identity string, idleOnly bool, now time.Time, fresh activityFn) (removed bool, stale []string, err error) {
 	err = withLockedTempStore(func(store Store, registry string) error {
 		stale, err = verifyTempRemoval(store, path, branch, identity, idleOnly, now, fresh)
 		if err != nil {
@@ -401,7 +397,7 @@ func RemoveTempWorktreeIf(path, branch, identity string, idleOnly bool, now time
 	return removed, stale, err
 }
 
-func verifyTempRemoval(store Store, path, branch, identity string, idleOnly bool, now time.Time, fresh ActivityFn) ([]string, error) {
+func verifyTempRemoval(store Store, path, branch, identity string, idleOnly bool, now time.Time, fresh activityFn) ([]string, error) {
 	// branch/identity come from the observed checkout (the inventory record);
 	// the stored record alone cannot prove the checkout is the same one.
 	if err := VerifyTempSnapshot(store, path, branch, identity); err != nil {
