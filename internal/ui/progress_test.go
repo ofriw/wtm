@@ -36,8 +36,8 @@ func TestProgressEnabled(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("TERM", tc.term)
-			if got := ProgressEnabled(tc.mode, tc.tty, tc.json); got != tc.want {
-				t.Errorf("ProgressEnabled(%q, tty=%v, json=%v, TERM=%q) = %v, want %v",
+			if got := progressEnabled(tc.mode, tc.tty, tc.json); got != tc.want {
+				t.Errorf("progressEnabled(%q, tty=%v, json=%v, TERM=%q) = %v, want %v",
 					tc.mode, tc.tty, tc.json, tc.term, got, tc.want)
 			}
 		})
@@ -48,8 +48,8 @@ func TestProgressEnabled(t *testing.T) {
 // a work error surfaced only via the terminal event still reports failure.
 func TestProgressModelSummary(t *testing.T) {
 	m := newProgressModel(nil, 40)
-	m.apply(ProgressEvent{Kind: EvPhase, Name: "scanning", Total: 2})
-	m.apply(ProgressEvent{Kind: EvAdvance, N: 2})
+	m.apply(ProgressEvent{Kind: evPhase, Name: "scanning", Total: 2})
+	m.apply(ProgressEvent{Kind: evAdvance, N: 2})
 	m.finish(nil)
 	if got := m.render(); !strings.Contains(got, "✓ done") {
 		t.Errorf("render = %q, want the done summary", got)
@@ -72,9 +72,9 @@ func TestProgressModelSummary(t *testing.T) {
 // push any rendered line past the budget, even with a bar and a total.
 func TestProgressLineFitsWidth(t *testing.T) {
 	m := newProgressModel(nil, 20)
-	m.apply(ProgressEvent{Kind: EvPhase, Name: "scanning worktrees", Total: 100})
-	m.apply(ProgressEvent{Kind: EvAdvance, N: 50})
-	m.apply(ProgressEvent{Kind: EvDetail, Text: "~/a/very/long/path/that/exceeds/the/budget"})
+	m.apply(ProgressEvent{Kind: evPhase, Name: "scanning worktrees", Total: 100})
+	m.apply(ProgressEvent{Kind: evAdvance, N: 50})
+	m.apply(ProgressEvent{Kind: evDetail, Text: "~/a/very/long/path/that/exceeds/the/budget"})
 	for _, line := range strings.Split(m.render(), "\n") {
 		if w := DispWidth(line); w > 20 {
 			t.Errorf("line is %d cells, exceeds 20: %q", w, line)
@@ -88,8 +88,8 @@ func TestProgressLineFitsWidth(t *testing.T) {
 // bubbles' default half-block fill (▌) reads as a fence rather than a bar.
 func TestProgressBarOnlyWhileRunning(t *testing.T) {
 	m := newProgressModel(nil, 40)
-	m.apply(ProgressEvent{Kind: EvPhase, Name: "scanning", Total: 4})
-	m.apply(ProgressEvent{Kind: EvAdvance, N: 2})
+	m.apply(ProgressEvent{Kind: evPhase, Name: "scanning", Total: 4})
+	m.apply(ProgressEvent{Kind: evAdvance, N: 2})
 	running := m.render()
 	for _, want := range []string{"█", "░"} {
 		if !strings.Contains(running, want) {
@@ -110,8 +110,8 @@ func TestProgressBarOnlyWhileRunning(t *testing.T) {
 // phase rows and flips the summary to ✗ failed.
 func TestProgressFailedRun(t *testing.T) {
 	m := newProgressModel(nil, 40)
-	m.apply(ProgressEvent{Kind: EvPhase, Name: "removing", Total: 2})
-	m.apply(ProgressEvent{Kind: EvAdvance, N: 1})
+	m.apply(ProgressEvent{Kind: evPhase, Name: "removing", Total: 2})
+	m.apply(ProgressEvent{Kind: evAdvance, N: 1})
 	m.finish(errors.New("worktree is locked"))
 	frame := m.render()
 	for _, want := range []string{"removing", "✗ failed"} {
@@ -143,7 +143,7 @@ func TestProgressNoticePrintsPinnedLine(t *testing.T) {
 	events := make(chan ProgressEvent, 1)
 	// nextEvent blocks on this channel; feeding one event lets the drained
 	// command return instead of deadlocking the test.
-	events <- ProgressEvent{Kind: EvAdvance, N: 1}
+	events <- ProgressEvent{Kind: evAdvance, N: 1}
 	m := newProgressModel(events, 40)
 	const notice = "will delete remote origin/feat"
 	_, cmd := m.Update(progressEventMsg{Kind: EvNotice, Text: notice})

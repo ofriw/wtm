@@ -27,21 +27,21 @@ const (
 	ProgressNever  = "never"
 )
 
-// ProgressKind tags a ProgressEvent with the operation it carries.
-type ProgressKind int
+// progressKind tags a ProgressEvent with the operation it carries.
+type progressKind int
 
 const (
-	EvPhase ProgressKind = iota
-	EvAdvance
-	EvDetail
+	evPhase progressKind = iota
+	evAdvance
+	evDetail
 	EvNotice
-	EvDone
+	evDone
 )
 
 // ProgressEvent is the single wire format from worker to renderer. One channel
 // carries every operation so the renderer replays them in the worker's order.
 type ProgressEvent struct {
-	Kind  ProgressKind
+	Kind  progressKind
 	Name  string
 	Total int
 	N     int
@@ -75,15 +75,15 @@ func (p *Progress) send(ev ProgressEvent) {
 
 // Phase announces a new phase with its total step count.
 func (p *Progress) Phase(name string, total int) {
-	p.send(ProgressEvent{Kind: EvPhase, Name: name, Total: total})
+	p.send(ProgressEvent{Kind: evPhase, Name: name, Total: total})
 }
 
 // Advance advances the current phase by n steps.
-func (p *Progress) Advance(n int) { p.send(ProgressEvent{Kind: EvAdvance, N: n}) }
+func (p *Progress) Advance(n int) { p.send(ProgressEvent{Kind: evAdvance, N: n}) }
 
 // Detail updates the current phase's detail line.
 func (p *Progress) Detail(text string) {
-	p.send(ProgressEvent{Kind: EvDetail, Text: text})
+	p.send(ProgressEvent{Kind: evDetail, Text: text})
 }
 
 // Notice asks the renderer to print a persistent line above the progress block.
@@ -93,10 +93,10 @@ func (p *Progress) Notice(text string) {
 	p.send(ProgressEvent{Kind: EvNotice, Text: text})
 }
 
-// EmitProgress writes one persistent line: as a renderer notice while one runs
+// emitProgress writes one persistent line: as a renderer notice while one runs
 // (a raw stderr write would be erased by the next frame), else a plain stderr
 // line. It is the single write path for both notices and warnings.
-func EmitProgress(p *Progress, text string) {
+func emitProgress(p *Progress, text string) {
 	if p != nil {
 		p.Notice(text)
 		return
@@ -107,7 +107,7 @@ func EmitProgress(p *Progress, text string) {
 // NoticeProgress discloses a routine action (e.g. a destructive step about to
 // run) that must survive the renderer.
 func NoticeProgress(p *Progress, format string, a ...any) {
-	EmitProgress(p, fmt.Sprintf(format, a...))
+	emitProgress(p, fmt.Sprintf(format, a...))
 }
 
 // WarnProgress discloses a non-fatal warning, composing the label owned by
@@ -124,12 +124,12 @@ func WarnProgress(p *Progress, format string, a ...any) {
 // when work failed outside any phase (e.g. a scan error), and it is what
 // releases the renderer to quit.
 func (p *Progress) Done(err error) {
-	p.send(ProgressEvent{Kind: EvDone, Err: err})
+	p.send(ProgressEvent{Kind: evDone, Err: err})
 }
 
-// ProgressEnabled is the single source of truth for --progress precedence: auto
+// progressEnabled is the single source of truth for --progress precedence: auto
 // stays silent for machine output, non-TTY stderr and a dumb terminal.
-func ProgressEnabled(mode string, stderrIsTTY, json bool) bool {
+func progressEnabled(mode string, stderrIsTTY, json bool) bool {
 	switch mode {
 	case ProgressAlways:
 		return true
@@ -142,26 +142,26 @@ func ProgressEnabled(mode string, stderrIsTTY, json bool) bool {
 // RunMaybeProgress runs work against a live renderer when the gating allows,
 // else against a no-op handle. enabled is the call site's request for a
 // renderer (gc wants one; status only on an explicit --progress always, which
-// overrides enabled); ProgressEnabled still governs the mode/TTY/json gating.
+// overrides enabled); progressEnabled still governs the mode/TTY/json gating.
 // It is the only place a renderer is started, so call sites stay free of
 // terminal concerns.
 func RunMaybeProgress(out io.Writer, mode string, json, enabled bool, work func(*Progress) error) error {
-	if (!enabled && mode != ProgressAlways) || !ProgressEnabled(mode, term.IsTerminal(os.Stderr.Fd()), json) {
+	if (!enabled && mode != ProgressAlways) || !progressEnabled(mode, term.IsTerminal(os.Stderr.Fd()), json) {
 		return work(nil)
 	}
-	return RunProgressProgram(out, work)
+	return runProgressProgram(out, work)
 }
 
-// RunProgressProgram runs work against a live renderer. progressOptions is the
+// runProgressProgram runs work against a live renderer. progressOptions is the
 // renderer's terminal contract: stderr only, no input (a second stdin reader
 // would race the huh forms that run next on the tty), and no signal handler
 // (the parent process owns signals).
-func RunProgressProgram(out io.Writer, work func(*Progress) error) error {
+func runProgressProgram(out io.Writer, work func(*Progress) error) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	events := make(chan ProgressEvent, 64)
 	prog := tea.NewProgram(newProgressModel(events, progressWidth()), progressOptions(out, ctx)...)
-	workErr := FeedProgress(ctx, events, work)
+	workErr := feedProgress(ctx, events, work)
 	_, runErr := prog.Run()
 	cancel()
 	if err := <-workErr; err != nil {
@@ -182,10 +182,10 @@ func progressOptions(out io.Writer, ctx context.Context) []tea.ProgramOption {
 	}
 }
 
-// FeedProgress runs work on its own goroutine and closes the event stream when
+// feedProgress runs work on its own goroutine and closes the event stream when
 // it returns, so the renderer quits only after the work is done. The terminal
 // done event carries the error so the summary is never a false success.
-func FeedProgress(ctx context.Context, events chan ProgressEvent, work func(*Progress) error) <-chan error {
+func feedProgress(ctx context.Context, events chan ProgressEvent, work func(*Progress) error) <-chan error {
 	workErr := make(chan error, 1)
 	p := NewProgress(ctx, events)
 	go func() {
@@ -296,7 +296,7 @@ func (m progressModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m progressModel) updateEvent(ev ProgressEvent) (tea.Model, tea.Cmd) {
 	switch ev.Kind {
-	case EvDone:
+	case evDone:
 		m.finish(ev.Err)
 		return m, tea.Quit
 	case EvNotice:
@@ -308,15 +308,15 @@ func (m progressModel) updateEvent(ev ProgressEvent) (tea.Model, tea.Cmd) {
 
 func (m *progressModel) apply(ev ProgressEvent) {
 	switch ev.Kind {
-	case EvPhase:
+	case evPhase:
 		m.finishRunning()
 		m.phases = append(m.phases, &phaseItem{name: ev.Name, total: ev.Total, state: phaseRunning})
 		m.active = len(m.phases) - 1
-	case EvAdvance:
+	case evAdvance:
 		if m.active >= 0 {
 			m.phases[m.active].done += ev.N
 		}
-	case EvDetail:
+	case evDetail:
 		if m.active >= 0 {
 			m.phases[m.active].detail = ev.Text
 		}

@@ -54,16 +54,16 @@ func TestMiddleElide(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := MiddleElide(tc.in, tc.w); got != tc.want {
-				t.Errorf("MiddleElide(%q, %d) = %q, want %q", tc.in, tc.w, got, tc.want)
+			if got := middleElide(tc.in, tc.w); got != tc.want {
+				t.Errorf("middleElide(%q, %d) = %q, want %q", tc.in, tc.w, got, tc.want)
 			}
 		})
 	}
 	// Wide graphemes must never let an elision blow the budget.
 	wide := "日本語のとても長いパス🎉"
 	for w := 1; w <= 20; w++ {
-		if got := DispWidth(MiddleElide(wide, w)); got > w {
-			t.Errorf("MiddleElide(%q, %d) width = %d, want <= %d", wide, w, got, w)
+		if got := DispWidth(middleElide(wide, w)); got > w {
+			t.Errorf("middleElide(%q, %d) width = %d, want <= %d", wide, w, got, w)
 		}
 	}
 }
@@ -73,7 +73,7 @@ func TestElideCells(t *testing.T) {
 	rows := [][]string{headers}
 	widths := NaturalWidths(headers, rows)
 	widths[0] = 10
-	gotHeaders, gotRows := ElideCells(headers, rows, widths)
+	gotHeaders, gotRows := elideCells(headers, rows, widths)
 	if got := DispWidth(gotHeaders[0]); got > 10 {
 		t.Errorf("header width = %d, want <= 10", got)
 	}
@@ -112,9 +112,9 @@ func TestResolveColorMode(t *testing.T) {
 				t.Setenv(k, v)
 			}
 			var got colorprofile.Profile
-			testutil.CaptureStdout(t, func() { got = ResolveColorMode(tc.mode, tc.isTTY) })
+			testutil.CaptureStdout(t, func() { got = resolveColorMode(tc.mode, tc.isTTY) })
 			if got != tc.want {
-				t.Errorf("ResolveColorMode(%q, %v) = %v, want %v", tc.mode, tc.isTTY, got, tc.want)
+				t.Errorf("resolveColorMode(%q, %v) = %v, want %v", tc.mode, tc.isTTY, got, tc.want)
 			}
 		})
 	}
@@ -146,7 +146,7 @@ func TestDropZeroColumns(t *testing.T) {
 	}
 	widths := []int{10, 0, 5, 0}
 	ids := []string{"a", "b", "c", "d"}
-	h, idOut, r, w := DropZeroColumns(headers, ids, rows, widths, nil)
+	h, idOut, r, w := dropZeroColumns(headers, ids, rows, widths, nil)
 	if !slices.Equal(h, []string{"A", "C"}) {
 		t.Errorf("headers = %v, want [A C]", h)
 	}
@@ -165,7 +165,7 @@ func TestDropZeroColumnsAllDropped(t *testing.T) {
 	headers := []string{"A", "B"}
 	rows := [][]string{{"a1", "b1"}}
 	widths := []int{0, 0}
-	h, idOut, r, w := DropZeroColumns(headers, nil, rows, widths, nil)
+	h, idOut, r, w := dropZeroColumns(headers, nil, rows, widths, nil)
 	if len(h) != 0 || len(r[0]) != 0 || len(w) != 0 || idOut != nil {
 		t.Errorf("all-dropped = %v / %v / %v / %v, want empty and nil ids", h, idOut, r, w)
 	}
@@ -179,13 +179,13 @@ func TestDropZeroColumnsWarnsForHiddenCapability(t *testing.T) {
 	headers := []string{"PATH", "CAPX"}
 	rows := [][]string{{"/x", "yes"}}
 	t.Run("capability warns", func(t *testing.T) {
-		errOut := testutil.CaptureStderr(t, func() { DropZeroColumns(headers, nil, rows, []int{10, 0}, capHeader) })
+		errOut := testutil.CaptureStderr(t, func() { dropZeroColumns(headers, nil, rows, []int{10, 0}, capHeader) })
 		if !strings.Contains(errOut, "terminal too narrow; hid CAPX") {
 			t.Fatalf("hidden capability must warn: %q", errOut)
 		}
 	})
 	t.Run("core stays silent", func(t *testing.T) {
-		errOut := testutil.CaptureStderr(t, func() { DropZeroColumns(headers, nil, rows, []int{0, 5}, capHeader) })
+		errOut := testutil.CaptureStderr(t, func() { dropZeroColumns(headers, nil, rows, []int{0, 5}, capHeader) })
 		if errOut != "" {
 			t.Fatalf("hidden core column must not warn: %q", errOut)
 		}
@@ -226,4 +226,20 @@ func TestPrintTableRendersPrunedIDs(t *testing.T) {
 	if strings.Contains(out, "id-b") {
 		t.Fatalf("output must not contain dropped id: %q", out)
 	}
+}
+
+// TestRenderCellsRequiresIDsWhenStyled pins the documented guard: a renderer
+// with a nil/short ids panics with a clear message instead of an index-out-of-
+// range.
+func TestRenderCellsRequiresIDsWhenStyled(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for nil ids with render set")
+		}
+		if s, ok := r.(string); !ok || !strings.Contains(s, "ids length") {
+			t.Fatalf("panic = %v, want ids-length message", r)
+		}
+	}()
+	RenderCells([]string{"A"}, nil, [][]string{{"x"}}, func(id, val string) string { return val })
 }

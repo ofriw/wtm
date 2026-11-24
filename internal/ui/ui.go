@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
@@ -16,8 +17,10 @@ import (
 )
 
 // ui.go — generic table rendering, color resolution and the interactive
-// pickers. It knows nothing about worktrees or capabilities; domain styling
-// lives in internal/core.
+// pickers. It does not know the domain schema: column IDs, capability headers
+// and state words arrive as data (see core.ColumnID* and core.StateWord*).
+// Domain styling that colors specific status/state cells lives in
+// internal/cli/status_cmd.go; ui only applies the caller-supplied renderer.
 
 // WarnPrefix labels every non-fatal disclosure line, wherever it is emitted.
 const WarnPrefix = "warning: "
@@ -46,11 +49,11 @@ const (
 	ColorNever  = "never"
 )
 
-// CellRenderer renders one plain cell value into its colored form. It keys off
+// cellRenderer renders one plain cell value into its colored form. It keys off
 // the column's stable ID (not its display header) so styling survives header
 // renames. PrintTable calls it only when the profile supports styling, so it
 // may always decorate.
-type CellRenderer func(id, value string) string
+type cellRenderer func(id, value string) string
 
 // Policy bundles the shrink-policy inputs a grid needs: the elision priority
 // and floors (derived from the caller's column registry) plus capHeader, which
@@ -69,9 +72,9 @@ type Policy struct {
 // --json and goldens remain byte-stable. p carries the shrink policy from the
 // caller's column registry and the capability-header identifier for the drop
 // disclosure.
-func PrintTable(headers, ids []string, rows [][]string, colorMode string, render CellRenderer, rightAlign []string, p Policy) {
+func PrintTable(headers, ids []string, rows [][]string, colorMode string, render cellRenderer, rightAlign []string, p Policy) {
 	headers, ids, rows, widths, aligns := SizedGrid(headers, ids, rows, WidthBudget(), rightAlign, p)
-	profile := ResolveColorProfile(colorMode)
+	profile := resolveColorProfile(colorMode)
 	if profile > colorprofile.NoTTY && render != nil {
 		headers, rows = RenderCells(headers, ids, rows, render)
 	}
@@ -85,9 +88,9 @@ func PrintTable(headers, ids []string, rows [][]string, colorMode string, render
 // see ids aligned to the kept columns.
 func SizedGrid(headers, ids []string, rows [][]string, budget int, rightAlign []string, p Policy) ([]string, []string, [][]string, []int, []lipgloss.Position) {
 	widths := ColumnWidths(headers, rows, budget, p.Priority, p.Floors, p.CapHeader)
-	headers, ids, rows, widths = DropZeroColumns(headers, ids, rows, widths, p.CapHeader)
+	headers, ids, rows, widths = dropZeroColumns(headers, ids, rows, widths, p.CapHeader)
 	aligns := ColumnAligns(headers, rightAlign)
-	headers, rows = ElideCells(headers, rows, widths)
+	headers, rows = elideCells(headers, rows, widths)
 	return headers, ids, rows, widths, aligns
 }
 
@@ -123,11 +126,11 @@ func ColumnAligns(headers []string, rightAlign []string) []lipgloss.Position {
 	return aligns
 }
 
-// ResolveColorProfile is the single source of truth for color precedence:
+// resolveColorProfile is the single source of truth for color precedence:
 // --color beats NO_COLOR, which beats FORCE_COLOR/CLICOLOR_FORCE, then the
 // TERM/CLICOLOR/isatty capability detection in colorprofile.Detect.
-func ResolveColorProfile(mode string) colorprofile.Profile {
-	return ResolveColorMode(mode, term.IsTerminal(os.Stdout.Fd()))
+func resolveColorProfile(mode string) colorprofile.Profile {
+	return resolveColorMode(mode, term.IsTerminal(os.Stdout.Fd()))
 }
 
 func envColorProfile() colorprofile.Profile {
@@ -140,14 +143,14 @@ func envColorProfile() colorprofile.Profile {
 	return colorprofile.Detect(os.Stdout, os.Environ())
 }
 
-func ResolveColorMode(mode string, isTTY bool) colorprofile.Profile {
+func resolveColorMode(mode string, isTTY bool) colorprofile.Profile {
 	switch mode {
 	case ColorAlways:
 		return colorprofile.TrueColor
 	case ColorNever:
 		return colorprofile.NoTTY
 	}
-	if NoColorSet() {
+	if noColorSet() {
 		if isTTY {
 			return colorprofile.ASCII
 		}
@@ -156,9 +159,9 @@ func ResolveColorMode(mode string, isTTY bool) colorprofile.Profile {
 	return envColorProfile()
 }
 
-// NoColorSet implements https://no-color.org: any non-empty NO_COLOR disables
+// noColorSet implements https://no-color.org: any non-empty NO_COLOR disables
 // color, including values colorprofile's ParseBool would read as false.
-func NoColorSet() bool {
+func noColorSet() bool {
 	v, ok := os.LookupEnv("NO_COLOR")
 	return ok && v != ""
 }
@@ -170,9 +173,13 @@ func truthy(v string) bool {
 
 // RenderCells bolds the header row and renders each body cell through render.
 // It runs after elision so widths are measured on plain text. ids parallels
-// headers and is what render receives; a nil ids only matters when render is
-// non-nil.
-func RenderCells(headers, ids []string, rows [][]string, render CellRenderer) ([]string, [][]string) {
+// headers and is what render receives. When render is non-nil, ids must have
+// exactly len(headers) entries; a nil or short ids here panics with a clear
+// message instead of an index-out-of-range.
+func RenderCells(headers, ids []string, rows [][]string, render cellRenderer) ([]string, [][]string) {
+	if render != nil && len(ids) != len(headers) {
+		panic(fmt.Sprintf("ui.RenderCells: render set but ids length %d != headers length %d", len(ids), len(headers)))
+	}
 	styled := make([]string, len(headers))
 	for i, h := range headers {
 		styled[i] = lipgloss.NewStyle().Bold(true).Render(h)
@@ -186,6 +193,15 @@ func RenderCells(headers, ids []string, rows [][]string, render CellRenderer) ([
 		out[r] = cells
 	}
 	return styled, out
+}
+
+// PrintJSON writes indented JSON to stdout (machine output contract). Core's
+// PrintStatusJSON and cli handlers share it so stdout stays the single machine
+// channel; placement here keeps filesystem helpers free of presentation IO.
+func PrintJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
 
 // writeTable emits through a profile writer so colors are downsampled to the
@@ -210,6 +226,7 @@ func WidthBudget() int {
 	return 0
 }
 
+// DispWidth returns the display width of s in terminal cells (ANSI-aware).
 func DispWidth(s string) int { return ansi.StringWidth(s) }
 
 func balanceMiddle(s string, avail int) (head, tail string) {
@@ -229,7 +246,7 @@ func balanceMiddle(s string, avail int) (head, tail string) {
 
 // middleElide shortens s to at most w display cells, keeping both ends and
 // replacing the middle with an ellipsis. Returns s unchanged when it fits.
-func MiddleElide(s string, w int) string {
+func middleElide(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
@@ -288,12 +305,12 @@ func shrinkToFloors(headers []string, widths []int, priority []string, floors ma
 	return over
 }
 
-// DropZeroColumns removes columns sized to zero, so a dropped column leaves no
+// dropZeroColumns removes columns sized to zero, so a dropped column leaves no
 // gutter or empty cell behind. Cells, widths and headers stay index-aligned.
 // Capability columns dropped from a narrow --wide view are disclosed on stderr
 // (stdout stays machine-clean for pipes and goldens), so a missing column reads
 // as hidden, not absent. capHeader identifies those columns.
-func DropZeroColumns(headers, ids []string, rows [][]string, widths []int, capHeader func(string) bool) ([]string, []string, [][]string, []int) {
+func dropZeroColumns(headers, ids []string, rows [][]string, widths []int, capHeader func(string) bool) ([]string, []string, [][]string, []int) {
 	keep := positiveWidthColumns(widths)
 	if len(keep) == len(widths) {
 		return headers, ids, rows, widths
@@ -312,7 +329,7 @@ func DropZeroColumns(headers, ids []string, rows [][]string, widths []int, capHe
 		out[r] = selectStrings(row, keep)
 	}
 	// ids parallels headers; nil stays nil so a caller without per-cell ids
-	// gets a nil back and RenderCells stays a no-op for them.
+	// passes nil render as well (RenderCells requires ids when render is set).
 	var idOut []string
 	if ids != nil {
 		idOut = selectStrings(ids, keep)
@@ -331,7 +348,7 @@ func positiveWidthColumns(widths []int) []int {
 }
 
 // selectStrings keeps the columns at keep indices. Concrete (not generic): only
-// DropZeroColumns calls these, so one tiny function per element type is simpler
+// dropZeroColumns calls these, so one tiny function per element type is simpler
 // than a type parameter.
 func selectStrings(values []string, keep []int) []string {
 	out := make([]string, len(keep))
@@ -349,6 +366,8 @@ func selectInts(values []int, keep []int) []int {
 	return out
 }
 
+// NaturalWidths measures each column's widest plain cell, including headers —
+// the pre-elision width budget the grid sizing shrinks from.
 func NaturalWidths(headers []string, rows [][]string) []int {
 	widths := make([]int, len(headers))
 	for i, h := range headers {
@@ -394,17 +413,17 @@ func shrinkColumn(widths []int, i, over, floor int) int {
 	return over
 }
 
-// ElideCells middle-elides every header and cell that exceeds its column width.
-func ElideCells(headers []string, rows [][]string, widths []int) ([]string, [][]string) {
+// elideCells middle-elides every header and cell that exceeds its column width.
+func elideCells(headers []string, rows [][]string, widths []int) ([]string, [][]string) {
 	elided := make([]string, len(headers))
 	for i, h := range headers {
-		elided[i] = MiddleElide(h, widths[i])
+		elided[i] = middleElide(h, widths[i])
 	}
 	out := make([][]string, len(rows))
 	for r, row := range rows {
 		cells := make([]string, len(row))
 		for i, c := range row {
-			cells[i] = MiddleElide(c, widths[i])
+			cells[i] = middleElide(c, widths[i])
 		}
 		out[r] = cells
 	}
