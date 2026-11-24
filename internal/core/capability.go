@@ -84,8 +84,8 @@ func Presence(full, some bool) CapState {
 	}
 }
 
-// CapabilityStates classifies one worktree for every registered capability.
-func CapabilityStates(in CapInput) map[string]CapState {
+// capabilityStates classifies one worktree for every registered capability.
+func capabilityStates(in CapInput) map[string]CapState {
 	caps := requireCapabilities()
 	states := make(map[string]CapState, len(caps))
 	for _, c := range caps {
@@ -152,20 +152,29 @@ func (c Capability) GroupedToken(s CapState) string {
 	return c.Token
 }
 
-// WideText is the --wide/JSON state word. inUse false yields "n/a", which
+// Wide-state words produced by wideText; cli colors capability cells by
+// comparing against these rather than re-spelling the literals.
+const (
+	StateWordNA      = "n/a"
+	StateWordYes     = "yes"
+	StateWordPartial = "partial"
+	StateWordAbsent  = "-"
+)
+
+// wideText is the --wide/JSON state word. inUse false yields StateWordNA, which
 // keeps "this project does not use it" distinct from an applicable-but-absent
-// "-".
-func (c Capability) WideText(s CapState, inUse bool) string {
+// StateWordAbsent.
+func (c Capability) wideText(s CapState, inUse bool) string {
 	if !inUse {
-		return "n/a"
+		return StateWordNA
 	}
 	switch s {
 	case CapPresent:
-		return "yes"
+		return StateWordYes
 	case CapPartial:
-		return "partial"
+		return StateWordPartial
 	default:
-		return "-"
+		return StateWordAbsent
 	}
 }
 
@@ -176,7 +185,7 @@ func (c Capability) Column() WorktreeColumn {
 		ID:     c.ID,
 		Header: strings.ToUpper(c.ID),
 		Cell: func(w Worktree, ctx ColumnContext) string {
-			return c.WideText(w.Caps[c.ID], Applicable(ctx.Active, c.ID))
+			return c.wideText(w.Caps[c.ID], Applicable(ctx.Active, c.ID))
 		},
 		// Rank 1 elides capability columns before any core column gives up
 		// width; the grouped INTEGRATIONS cell covers narrow terminals, so

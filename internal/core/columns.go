@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"wtm/internal/fs"
 	"wtm/internal/temp"
 	"wtm/internal/ui"
 )
@@ -44,7 +43,7 @@ type WorktreeColumn struct {
 }
 
 // cell funcs wrap the display formatters so the registry stays declarative.
-func cellPath(w Worktree, _ ColumnContext) string     { return displayPath(w.Path) }
+func cellPath(w Worktree, _ ColumnContext) string     { return DisplayPath(w.Path) }
 func cellBranch(w Worktree, _ ColumnContext) string   { return w.BranchName() }
 func cellUpstream(w Worktree, _ ColumnContext) string { return upstreamCell(w) }
 func cellLastUsed(w Worktree, _ ColumnContext) string { return lastUsedCell(w) }
@@ -76,17 +75,31 @@ func cellIntegrations(w Worktree, c ColumnContext) string {
 
 func cellUncommitted(w Worktree, _ ColumnContext) string { return dirtyCell(w) }
 
+// Column IDs are the stable style-routing keys for status columns. cli styles
+// by ID (never the display header), so a rename here breaks the cli switch at
+// compile time instead of silently dropping a column's color.
+const (
+	ColumnIDPath         = "path"
+	ColumnIDBranch       = "branch"
+	ColumnIDUpstream     = "upstream"
+	ColumnIDLastUsed     = "lastUsed"
+	ColumnIDStatus       = "status"
+	ColumnIDTemp         = "temp"
+	ColumnIDIntegrations = "integrations"
+	columnIDUncommitted  = "uncommitted"
+)
+
 var (
 	// Core shrink ranks start at 2: rank 1 belongs to the --wide capability
 	// columns, which elide before any core column gives up width.
-	colPath         = WorktreeColumn{ID: "path", Header: "PATH", Cell: cellPath, ShrinkRank: 2, Floor: 12}
-	colBranch       = WorktreeColumn{ID: "branch", Header: "BRANCH", Cell: cellBranch, ShrinkRank: 4, Floor: 8}
-	colUpstream     = WorktreeColumn{ID: "upstream", Header: "UPSTREAM", Cell: cellUpstream, ShrinkRank: 3, Floor: 8}
-	colLastUsed     = WorktreeColumn{ID: "lastUsed", Header: "LAST USED", Cell: cellLastUsed, RightAlign: true, ShrinkRank: 5, Floor: 10}
-	colStatus       = WorktreeColumn{ID: "status", Header: "STATUS", Cell: cellStatus}
-	colTemp         = WorktreeColumn{ID: "temp", Header: "TEMP", Cell: cellTemp}
-	colIntegrations = WorktreeColumn{ID: "integrations", Header: "INTEGRATIONS", Cell: cellIntegrations, ShrinkRank: 6, Floor: 6}
-	colUncommitted  = WorktreeColumn{ID: "uncommitted", Header: "UNCOMMITTED", Cell: cellUncommitted}
+	colPath         = WorktreeColumn{ID: ColumnIDPath, Header: "PATH", Cell: cellPath, ShrinkRank: 2, Floor: 12}
+	colBranch       = WorktreeColumn{ID: ColumnIDBranch, Header: "BRANCH", Cell: cellBranch, ShrinkRank: 4, Floor: 8}
+	colUpstream     = WorktreeColumn{ID: ColumnIDUpstream, Header: "UPSTREAM", Cell: cellUpstream, ShrinkRank: 3, Floor: 8}
+	colLastUsed     = WorktreeColumn{ID: ColumnIDLastUsed, Header: "LAST USED", Cell: cellLastUsed, RightAlign: true, ShrinkRank: 5, Floor: 10}
+	colStatus       = WorktreeColumn{ID: ColumnIDStatus, Header: "STATUS", Cell: cellStatus}
+	colTemp         = WorktreeColumn{ID: ColumnIDTemp, Header: "TEMP", Cell: cellTemp}
+	colIntegrations = WorktreeColumn{ID: ColumnIDIntegrations, Header: "INTEGRATIONS", Cell: cellIntegrations, ShrinkRank: 6, Floor: 6}
+	colUncommitted  = WorktreeColumn{ID: columnIDUncommitted, Header: "UNCOMMITTED", Cell: cellUncommitted}
 )
 
 // CoreColumns is the shared prefix of every status schema: identity, tracking
@@ -234,6 +247,8 @@ func StatusColumnsFor(wide bool) []WorktreeColumn {
 	return cols
 }
 
+// JSONWorktree is the machine-readable status row shape; the struct tags are
+// the output contract consumed by scripts and goldens.
 type JSONWorktree struct {
 	Path         string            `json:"path"`
 	Branch       string            `json:"branch"`
@@ -266,7 +281,7 @@ func PrintStatusJSON(wts []Worktree, now time.Time, ttl time.Duration) error {
 		}
 		out = append(out, j)
 	}
-	return fs.PrintJSON(out)
+	return ui.PrintJSON(out)
 }
 
 // integrationStates is the stable JSON contract: every capability id is always
@@ -276,14 +291,14 @@ func IntegrationStates(w Worktree, active []Capability) map[string]string {
 	caps := requireCapabilities()
 	m := make(map[string]string, len(caps))
 	for _, c := range caps {
-		m[c.ID] = c.WideText(w.Caps[c.ID], Applicable(active, c.ID))
+		m[c.ID] = c.wideText(w.Caps[c.ID], Applicable(active, c.ID))
 	}
 	return m
 }
 
-// displayPath shortens the home directory to ~ so the PATH column budgets for
+// DisplayPath shortens the home directory to ~ so the PATH column budgets for
 // the path a human recognizes, not for an invariant absolute prefix.
-func displayPath(p string) string {
+func DisplayPath(p string) string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return p
@@ -296,9 +311,6 @@ func displayPath(p string) string {
 	}
 	return p
 }
-
-// DisplayPath is the exported form used by cli reporting.
-func DisplayPath(p string) string { return displayPath(p) }
 
 func lastUsedCell(w Worktree) string {
 	if w.LastUsed.IsZero() {

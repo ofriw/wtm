@@ -155,7 +155,7 @@ func Slugify(branch string) string {
 // ProjectName is the stable prefix shared by every sibling worktree: the main
 // worktree's directory name. Deriving it from the main worktree (not the
 // current one) keeps names stable when a worktree is created from a linked one.
-func ProjectName(wts []git.GWorktree) string {
+func ProjectName(wts []git.Worktree) string {
 	if len(wts) == 0 {
 		return "worktree"
 	}
@@ -173,9 +173,9 @@ func DeriveDirName(project, branch string) string {
 }
 
 // NestedIn reports the existing worktree that contains target (or equals it).
-// worktrees must be siblings: a nested checkout makes IDE watchers, linters and
+// Worktrees must be siblings: a nested checkout makes IDE watchers, linters and
 // test runners double-scan, and breaks discovery assumptions.
-func NestedIn(target string, wts []git.GWorktree) (string, bool) {
+func NestedIn(target string, wts []git.Worktree) (string, bool) {
 	for _, w := range wts {
 		p := fs.Canonical(w.Path)
 		if target == p || strings.HasPrefix(target, p+string(filepath.Separator)) {

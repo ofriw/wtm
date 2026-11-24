@@ -17,12 +17,12 @@ import (
 // handlers (which write) live in internal/cli; discovery needs the parsed TTL,
 // so the read side lives here.
 
-// DefaultUnusedDays is the TTL when no settings file exists.
-const DefaultUnusedDays = 90
+// defaultUnusedDays is the TTL when no settings file exists.
+const defaultUnusedDays = 90
 
-// UnusedTTLKey is the json key for the unused TTL — the single owner of the
-// spelling, shared by the read tag above and the cli writer (config command),
-// so schema and writer cannot drift.
+// UnusedTTLKey is the cli writer's key for the unused TTL. The Settings struct
+// tag must spell it identically (a Go tag cannot reference a const); the pin
+// test (settings_test.go) guards the two against drift.
 const UnusedTTLKey = "unusedTTL"
 
 // Settings is the persisted settings file model.
@@ -30,9 +30,9 @@ type Settings struct {
 	UnusedTTL string `json:"unusedTTL"`
 }
 
-// DefaultSettings is the SSOT for settings when no file exists.
-func DefaultSettings() Settings {
-	return Settings{UnusedTTL: fmt.Sprintf("%dd", DefaultUnusedDays)}
+// defaultSettings is the SSOT for settings when no file exists.
+func defaultSettings() Settings {
+	return Settings{UnusedTTL: fmt.Sprintf("%dd", defaultUnusedDays)}
 }
 
 // TTLDays parses a "Nd" TTL string, enforcing the positive-whole-days and
@@ -81,7 +81,7 @@ func LoadSettings() (Settings, string, error) {
 	}
 	data, err := fs.ReadFileShared(p)
 	if os.IsNotExist(err) {
-		return DefaultSettings(), p, nil
+		return defaultSettings(), p, nil
 	}
 	if err != nil {
 		return Settings{}, p, err

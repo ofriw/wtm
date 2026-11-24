@@ -115,7 +115,7 @@ func TestApplyTempRecordInvalidIdentitySkips(t *testing.T) {
 		r := temps[CanonicalPath(path)]
 		r.Identity = identity
 		store := temp.Store{CanonicalPath(path): r}
-		got := buildWorktree(git.GWorktree{Path: path, Branch: "tmp/test"}, SessionIndex{}, nil, store, nil, testNoMCP)
+		got := buildWorktree(git.Worktree{Path: path, Branch: "tmp/test"}, SessionIndex{}, nil, store, nil, testNoMCP)
 		if got.Temp {
 			t.Fatalf("invalid identity %q marked temp", identity)
 		}
@@ -243,4 +243,59 @@ func TestWorktreeLastUsed(t *testing.T) {
 			t.Fatalf("clamp lost recency: %v", got)
 		}
 	})
+}
+
+func TestWorktreeUnused(t *testing.T) {
+	now := time.Now()
+	ttl := 10 * time.Hour
+	cases := []struct {
+		name     string
+		lastUsed time.Time
+		want     bool
+	}{
+		{"zero LastUsed is unused", time.Time{}, true},
+		{"younger than ttl is in use", now.Add(-time.Hour), false},
+		{"exactly ttl is still in use (cutoff is exclusive)", now.Add(-ttl), false},
+		{"older than ttl is unused", now.Add(-ttl - time.Second), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := Worktree{LastUsed: tc.lastUsed}
+			if got := w.Unused(now, ttl); got != tc.want {
+				t.Fatalf("unused(now, %v) = %v, want %v", ttl, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorktreeStatus(t *testing.T) {
+	now := time.Now()
+	ttl := 10 * time.Hour
+	cases := []struct {
+		name     string
+		lastUsed time.Time
+		want     string
+	}{
+		{"zero is UNUSED", time.Time{}, "UNUSED"},
+		{"recent is ACTIVE", now.Add(-time.Hour), "ACTIVE"},
+		{"exactly ttl is ACTIVE", now.Add(-ttl), "ACTIVE"},
+		{"older than ttl is UNUSED", now.Add(-ttl - time.Second), "UNUSED"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := Worktree{LastUsed: tc.lastUsed}
+			if got := w.Status(now, ttl); got != tc.want {
+				t.Fatalf("status = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBranchName(t *testing.T) {
+	if got := (Worktree{}).BranchName(); got != "(detached)" {
+		t.Fatalf("empty branch = %q, want (detached)", got)
+	}
+	if got := (Worktree{Branch: "main"}).BranchName(); got != "main" {
+		t.Fatalf("named branch = %q, want main", got)
+	}
 }

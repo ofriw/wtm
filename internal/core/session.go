@@ -71,7 +71,8 @@ func SessionLastUsed(wtPath string, idx SessionIndex, strict bool) (time.Time, e
 	return newest, nil
 }
 
-// An indexed transcript replaced with a link or directory is no longer verified.
+// SessionMtime returns the mtime of a session file. An indexed transcript
+// replaced with a link or directory is no longer verified.
 func SessionMtime(p string) (time.Time, error) {
 	info, err := os.Lstat(p)
 	if err != nil {

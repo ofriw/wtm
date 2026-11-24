@@ -38,7 +38,7 @@ type Worktree struct {
 	Caps map[string]CapState
 }
 
-// unused reports whether gc may reclaim a worktree: a temp one past its own
+// Unused reports whether gc may reclaim a worktree: a temp one past its own
 // idle window, a permanent one past the global unusedTTL. It is the single
 // candidate predicate for status and gc.
 func (w Worktree) Unused(now time.Time, ttl time.Duration) bool {
@@ -48,8 +48,8 @@ func (w Worktree) Unused(now time.Time, ttl time.Duration) bool {
 	return w.LastUsed.IsZero() || now.Sub(w.LastUsed) > ttl
 }
 
-// tempExpiresAt is the deadline a temp worktree is measured against.
-// temp.Deadline owns the formula. Zero for a permanent worktree.
+// TempExpiresAt is the deadline a temp worktree is measured against; temp.Deadline
+// owns the formula. Zero for a permanent worktree.
 func (w Worktree) TempExpiresAt() time.Time {
 	if !w.Temp {
 		return time.Time{}
@@ -57,6 +57,8 @@ func (w Worktree) TempExpiresAt() time.Time {
 	return temp.Deadline(w.TempCreated, w.LastUsed, w.TempTTL)
 }
 
+// Status classifies the worktree as ACTIVE or UNUSED using the same cutoff as
+// Unused, so the table and the gc selection never disagree.
 func (w Worktree) Status(now time.Time, ttl time.Duration) string {
 	if w.Unused(now, ttl) {
 		return "UNUSED"
@@ -64,6 +66,7 @@ func (w Worktree) Status(now time.Time, ttl time.Duration) string {
 	return "ACTIVE"
 }
 
+// BranchName returns the branch name, or "(detached)" when none is checked out.
 func (w Worktree) BranchName() string {
 	if w.Branch == "" {
 		return "(detached)"
@@ -102,16 +105,16 @@ type Workspace struct {
 // the harness.
 type SessionDiscovery func(*ui.Progress) (SessionIndex, []temp.UnverifiedSession, error)
 
-// MCPFn inventories a worktree root's MCP configs; the harness provides the
+// mcpFn inventories a worktree root's MCP configs; the harness provides the
 // real implementation, core only defines the seam (it must not import the
 // harness).
-type MCPFn func(root string, p *ui.Progress) map[string]bool
+type mcpFn func(root string, p *ui.Progress) map[string]bool
 
 // Hooks carries the harness-provided discovery functions core cannot call
 // directly (it must not import the harness).
 type Hooks struct {
 	Sessions SessionDiscovery
-	MCP      MCPFn
+	MCP      mcpFn
 }
 
 // LoadWorkspace resolves the repo, TTL and inventory. discovery — the slow
@@ -120,10 +123,6 @@ type Hooks struct {
 // passes failClosed-style hooks to reject unreadable sessions before any
 // destructive action.
 func LoadWorkspace(g *Globals, showProgress bool, hooks Hooks) (Workspace, error) {
-	return loadWorkspaceWithSessions(g, showProgress, hooks)
-}
-
-func loadWorkspaceWithSessions(g *Globals, showProgress bool, hooks Hooks) (Workspace, error) {
 	var ws Workspace
 	if err := validateDiscoveryHooks(hooks); err != nil {
 		return ws, err
@@ -145,20 +144,20 @@ func loadWorkspaceWithSessions(g *Globals, showProgress bool, hooks Hooks) (Work
 	return ws, err
 }
 
-func buildWorktree(g git.GWorktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp MCPFn) Worktree {
+func buildWorktree(g git.Worktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp mcpFn) Worktree {
 	w := worktreeInventory(g, idx, ups, p, mcp)
 	applyTempRecord(&w, temps, p)
 	return w
 }
 
-func worktreeInventory(g git.GWorktree, idx SessionIndex, ups map[string]git.Upstream, p *ui.Progress, mcp MCPFn) Worktree {
+func worktreeInventory(g git.Worktree, idx SessionIndex, ups map[string]git.Upstream, p *ui.Progress, mcp mcpFn) Worktree {
 	pth := fs.Canonical(g.Path)
 	configs := mcp(pth, p)
 	return Worktree{
 		Path: pth, Branch: g.Branch, Upstream: ups[g.Branch], Main: g.Main,
 		// Dirty is set lazily by the gc picker; status does not use it.
 		LastUsed: worktreeLastUsed(pth, idx),
-		Caps:     CapabilityStates(CapInput{Root: pth, MCP: configs}),
+		Caps:     capabilityStates(CapInput{Root: pth, MCP: configs}),
 	}
 }
 
@@ -171,12 +170,12 @@ func applyTempRecord(w *Worktree, temps temp.Store, p *ui.Progress) {
 		return
 	}
 	if err := temp.VerifyTempIdentity(w.Path, rec); err != nil {
-		ui.WarnProgress(p, "temp record for %s: %s; treating as permanent", displayPath(w.Path), err)
+		ui.WarnProgress(p, "temp record for %s: %s; treating as permanent", DisplayPath(w.Path), err)
 		return
 	}
 	ttl, err := temp.ParseTTL(rec.TTL)
 	if err != nil {
-		ui.WarnProgress(p, "temp record for %s: %s; treating as permanent", displayPath(w.Path), err)
+		ui.WarnProgress(p, "temp record for %s: %s; treating as permanent", DisplayPath(w.Path), err)
 		return
 	}
 	w.Temp, w.TempTTL, w.TempCreated, w.TempIdentity = true, ttl, rec.CreatedAt, rec.Identity
@@ -215,7 +214,7 @@ func discoverUpstreams(root string, p *ui.Progress) map[string]git.Upstream {
 
 // discoverInputs reads each shared source once: worktrees, sessions, upstreams
 // and temp records. Reclamation retains unknown files for candidate-level checks.
-func discoverInputs(root string, p *ui.Progress, hooks Hooks) ([]git.GWorktree, SessionIndex, []temp.UnverifiedSession, map[string]git.Upstream, temp.Store, error) {
+func discoverInputs(root string, p *ui.Progress, hooks Hooks) ([]git.Worktree, SessionIndex, []temp.UnverifiedSession, map[string]git.Upstream, temp.Store, error) {
 	p.Phase("reading worktrees", 0)
 	raw, err := git.Worktrees(root)
 	if err != nil {
@@ -255,7 +254,7 @@ func keepPermanentsActive(wts []Worktree, now time.Time, p *ui.Progress) {
 	for i := range wts {
 		if !wts[i].Temp {
 			wts[i].LastUsed = now
-			ui.WarnProgress(p, "%s: keeping permanent worktree ACTIVE because session ownership is unverified", displayPath(wts[i].Path))
+			ui.WarnProgress(p, "%s: keeping permanent worktree ACTIVE because session ownership is unverified", DisplayPath(wts[i].Path))
 		}
 	}
 }
@@ -268,7 +267,7 @@ func keepPermanentsOlderThan(wts []Worktree, newest, now time.Time, p *ui.Progre
 	for i := range wts {
 		if !wts[i].Temp && !wts[i].LastUsed.After(newest) {
 			wts[i].LastUsed = now
-			ui.WarnProgress(p, "%s: keeping permanent worktree ACTIVE because session ownership is unverified", displayPath(wts[i].Path))
+			ui.WarnProgress(p, "%s: keeping permanent worktree ACTIVE because session ownership is unverified", DisplayPath(wts[i].Path))
 		}
 	}
 }
@@ -306,13 +305,13 @@ func readTempStoreLenient(p *ui.Progress) temp.Store {
 
 // scanWorktrees builds the inventory and reports per-worktree progress; the
 // loop is split out so discover stays a readable sequence of phases.
-func scanWorktrees(raw []git.GWorktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp MCPFn) []Worktree {
+func scanWorktrees(raw []git.Worktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp mcpFn) []Worktree {
 	p.Phase("scanning worktrees", len(raw))
 	wts := make([]Worktree, 0, len(raw))
 	for _, g := range raw {
 		wts = append(wts, buildWorktree(g, idx, ups, temps, p, mcp))
 		p.Advance(1)
-		p.Detail(displayPath(g.Path))
+		p.Detail(DisplayPath(g.Path))
 	}
 	return wts
 }

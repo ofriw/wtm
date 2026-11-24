@@ -61,9 +61,9 @@ func SubFlags(name string, g *Globals) *flag.FlagSet {
 	return fs
 }
 
-// PrintSubFlags shows a subcommand's own flag descriptions. The global block in
+// printSubFlags shows a subcommand's own flag descriptions. The global block in
 // usage is their single printed home, so globals are filtered out here.
-func PrintSubFlags(fs *flag.FlagSet, g *Globals) {
+func printSubFlags(fs *flag.FlagSet, g *Globals) {
 	local := flag.NewFlagSet(fs.Name(), flag.ContinueOnError)
 	fs.VisitAll(func(f *flag.Flag) {
 		if g.Flags[f.Name] {
@@ -94,7 +94,7 @@ func ParseSub(fs *flag.FlagSet, g *Globals, args []string, usage string) ([]stri
 	for {
 		if err := fs.Parse(args); err != nil {
 			if errors.Is(err, flag.ErrHelp) {
-				PrintSubFlags(fs, g)
+				printSubFlags(fs, g)
 				fmt.Print(usage)
 				return nil, ErrHelpOK
 			}
