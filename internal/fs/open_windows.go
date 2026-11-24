@@ -10,14 +10,14 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// OpenShared opens path for reading with FILE_SHARE_DELETE. Go's os.Open grants
+// openShared opens path for reading with FILE_SHARE_DELETE. Go's os.Open grants
 // only FILE_SHARE_READ|FILE_SHARE_WRITE, so an ordinary reader handle makes
 // MoveFileEx (os.Rename) fail with ERROR_ACCESS_DENIED. Share delete is
 // necessary but not sufficient: the writer must also rename with POSIX
 // semantics (rename_windows.go), or MoveFileEx still refuses an open
 // destination.
-func OpenShared(path string) (*os.File, error) {
-	name, err := WindowsPath(path)
+func openShared(path string) (*os.File, error) {
+	name, err := windowsPath(path)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
@@ -30,14 +30,14 @@ func OpenShared(path string) (*os.File, error) {
 	return os.NewFile(uintptr(h), path), nil
 }
 
-// MaxPathWithoutPrefix is MAX_PATH (260) minus the 8.3 name reserve, matching
+// maxPathWithoutPrefix is MAX_PATH (260) minus the 8.3 name reserve, matching
 // os.fixLongPath: shorter paths need no extended prefix.
-const MaxPathWithoutPrefix = 248
+const maxPathWithoutPrefix = 248
 
-// LongPath returns the absolute form of path, extended-length prefixed (\\?\)
+// longPath returns the absolute form of path, extended-length prefixed (\\?\)
 // only when it may exceed MAX_PATH. The rename target (rename_windows.go)
 // reuses this so the prefix rule has one home.
-func LongPath(path string) (string, error) {
+func longPath(path string) (string, error) {
 	abs := path
 	if !filepath.IsAbs(abs) {
 		var err error
@@ -45,30 +45,30 @@ func LongPath(path string) (string, error) {
 			return "", err
 		}
 	}
-	if len(abs) >= MaxPathWithoutPrefix {
-		abs = ExtendedPath(abs)
+	if len(abs) >= maxPathWithoutPrefix {
+		abs = extendedPath(abs)
 	}
 	return abs, nil
 }
 
-// WindowsPath returns the UTF-16 name for CreateFile. Go's os package does the
+// windowsPath returns the UTF-16 name for CreateFile. Go's os package does the
 // same internally; a custom CreateFile must repeat it because the prefix is
 // what lifts the limit.
-func WindowsPath(path string) (*uint16, error) {
-	abs, err := LongPath(path)
+func windowsPath(path string) (*uint16, error) {
+	abs, err := longPath(path)
 	if err != nil {
 		return nil, err
 	}
 	return windows.UTF16PtrFromString(abs)
 }
 
-// ExtendedPath adds the \\?\ prefix (or \\?\UNC\ for shares) so CreateFile
+// extendedPath adds the \\?\ prefix (or \\?\UNC\ for shares) so CreateFile
 // accepts paths beyond MAX_PATH. FullPath normalizes separators and resolves
 // relative components, which the prefix requires: \\?\ disables both. A
 // FullPath failure falls back to the raw path and lets CreateFile report the
 // error: the fallback never hides a failure, it only preserves a chance to
 // succeed where the process is long-path aware.
-func ExtendedPath(path string) string {
+func extendedPath(path string) string {
 	abs, err := windows.FullPath(path)
 	if err != nil {
 		return path

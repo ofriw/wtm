@@ -11,7 +11,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// RenameReplace atomically replaces newname with oldname. Go's os.Rename maps
+// renameReplace atomically replaces newname with oldname. Go's os.Rename maps
 // to MoveFileEx(MOVEFILE_REPLACE_EXISTING), which returns ERROR_ACCESS_DENIED
 // when newname has an open handle even if that handle shared delete:
 // FILE_SHARE_DELETE is necessary but not sufficient. Only a POSIX-semantics
@@ -19,37 +19,37 @@ import (
 // SetFileInformationByHandle(FileRenameInfoEx) for exactly that case. Every
 // other error keeps MoveFileEx's result. If both attempts fail, retain both
 // causes so callers can diagnose the fallback and match either error.
-func RenameReplace(oldname, newname string) error {
+func renameReplace(oldname, newname string) error {
 	err := os.Rename(oldname, newname)
-	if !IsOpenHandleReplaceErr(err) {
+	if !isOpenHandleReplaceErr(err) {
 		return err
 	}
-	if fallbackErr := PosixRename(oldname, newname); fallbackErr != nil {
+	if fallbackErr := posixRename(oldname, newname); fallbackErr != nil {
 		return errors.Join(err, fallbackErr)
 	}
 	return nil
 }
 
-// IsOpenHandleReplaceErr reports whether err is the refusal a POSIX-semantics
+// isOpenHandleReplaceErr reports whether err is the refusal a POSIX-semantics
 // rename can overcome. ERROR_SHARING_VIOLATION is included because Windows
 // reports the same open-destination condition under that code in some paths.
-func IsOpenHandleReplaceErr(err error) bool {
+func isOpenHandleReplaceErr(err error) bool {
 	return errors.Is(err, windows.ERROR_ACCESS_DENIED) ||
 		errors.Is(err, windows.ERROR_SHARING_VIOLATION)
 }
 
-// PosixRename renames by handle, so an open destination is replaced the way
+// posixRename renames by handle, so an open destination is replaced the way
 // POSIX rename(2) does. The source handle must carry DELETE access and share
-// delete (OpenForRename); the destination reader must hold FILE_SHARE_DELETE
-// (OpenShared) — the POSIX-semantics flag is what actually permits the replace,
+// delete (openForRename); the destination reader must hold FILE_SHARE_DELETE
+// (openShared) — the POSIX-semantics flag is what actually permits the replace,
 // not the share alone.
-func PosixRename(oldname, newname string) error {
-	src, err := OpenForRename(oldname)
+func posixRename(oldname, newname string) error {
+	src, err := openForRename(oldname)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = src.Close() }()
-	buf, err := RenameInfoBuffer(newname)
+	buf, err := renameInfoBuffer(newname)
 	if err != nil {
 		return err
 	}
@@ -64,10 +64,10 @@ func PosixRename(oldname, newname string) error {
 	return nil
 }
 
-// OpenForRename opens the rename source: DELETE is what SetFileInformation
+// openForRename opens the rename source: DELETE is what SetFileInformation
 // requires, and share delete lets concurrent readers coexist.
-func OpenForRename(path string) (*os.File, error) {
-	name, err := WindowsPath(path)
+func openForRename(path string) (*os.File, error) {
+	name, err := windowsPath(path)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
@@ -80,26 +80,26 @@ func OpenForRename(path string) (*os.File, error) {
 	return os.NewFile(uintptr(h), path), nil
 }
 
-// FileRenameInfo mirrors Win32 FILE_RENAME_INFO_EX for
+// fileRenameInfo mirrors Win32 FILE_RENAME_INFO_EX for
 // SetFileInformationByHandle(FileRenameInfoEx). The name bytes follow the
 // struct; the FILE_RENAME flags reuse the union that ReplaceIfExists occupied.
 // See https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-file_rename_info_ex .
-type FileRenameInfo struct {
+type fileRenameInfo struct {
 	Flags          uint32
 	RootDirectory  windows.Handle
 	FileNameLength uint32
 	FileName       [1]uint16
 }
 
-// RenameInfoBuffer serializes FILE_RENAME_INFO for FileRenameInfoEx, with the
+// renameInfoBuffer serializes FILE_RENAME_INFO for FileRenameInfoEx, with the
 // destination as a long-path-aware UTF-16 name.
-func RenameInfoBuffer(newname string) ([]byte, error) {
-	path, err := LongPath(newname)
+func renameInfoBuffer(newname string) ([]byte, error) {
+	path, err := longPath(newname)
 	if err != nil {
 		return nil, err
 	}
 	name := windows.StringToUTF16(path)
-	var info FileRenameInfo
+	var info fileRenameInfo
 	offset := int(unsafe.Offsetof(info.FileName))
 	// FileNameLength excludes the trailing NUL the kernel still reads.
 	nameBytes := (len(name) - 1) * 2

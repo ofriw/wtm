@@ -13,6 +13,7 @@ import (
 
 // fs.go — the only file with filesystem helpers.
 
+// Exists reports whether p exists in the filesystem.
 func Exists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
@@ -42,7 +43,7 @@ func CanonicalAbs(p string) (string, error) {
 	return Canonical(abs), nil
 }
 
-func CreateDstFile(dst string, mode os.FileMode) (*os.File, error) {
+func createDstFile(dst string, mode os.FileMode) (*os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return nil, err
 	}
@@ -60,7 +61,7 @@ func CopyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	out, err := CreateDstFile(dst, info.Mode().Perm())
+	out, err := createDstFile(dst, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
@@ -75,18 +76,18 @@ func CloneDir(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	if err := ClonePlatform(src, dst); err == nil {
-		return RemoveExcluded(dst)
+	if err := clonePlatform(src, dst); err == nil {
+		return removeExcluded(dst)
 	}
 	if err := os.RemoveAll(dst); err != nil {
 		return err
 	}
-	return CopyTree(src, dst)
+	return copyTree(src, dst)
 }
 
-// ClonePlatform is best-effort: linux uses GNU `cp --reflink=auto`, darwin
+// clonePlatform is best-effort: linux uses GNU `cp --reflink=auto`, darwin
 // uses `cp -c` (clonefile). On any failure the caller copies byte-wise.
-func ClonePlatform(src, dst string) error {
+func clonePlatform(src, dst string) error {
 	if _, err := exec.LookPath("cp"); err != nil {
 		return err
 	}
@@ -102,16 +103,14 @@ func ClonePlatform(src, dst string) error {
 	return exec.Command("cp", args...).Run()
 }
 
-// CopyTree mirrors a tree. Live daemon sidecars never cross over: a copied
-// watchman/ state or daemon.log would point at the wrong root or lie about a
-// running daemon.
-func Excluded(d fs.DirEntry) bool {
+// excluded reports whether d is a live daemon sidecar that tree copies must skip.
+func excluded(d fs.DirEntry) bool {
 	return d.Name() == "daemon.log" || (d.IsDir() && (d.Name() == "watchman" || d.Name() == ".watchman"))
 }
 
-func RemoveExcluded(root string) error {
+func removeExcluded(root string) error {
 	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || !Excluded(d) {
+		if err != nil || !excluded(d) {
 			return err
 		}
 		if err := os.RemoveAll(p); err != nil {
@@ -124,9 +123,9 @@ func RemoveExcluded(root string) error {
 	})
 }
 
-// CopyLink replicates one symlink without dereferencing it, so dangling
+// copyLink replicates one symlink without dereferencing it, so dangling
 // links survive and file/dir targets stay links instead of full copies.
-func CopyLink(src, dst string) error {
+func copyLink(src, dst string) error {
 	link, err := os.Readlink(src)
 	if err != nil {
 		return err
@@ -137,7 +136,7 @@ func CopyLink(src, dst string) error {
 	return os.Symlink(link, dst)
 }
 
-func CopyTreeDir(p, target string) error {
+func copyTreeDir(p, target string) error {
 	mode := os.FileMode(0o755)
 	if info, err := os.Stat(p); err == nil {
 		mode = info.Mode().Perm()
@@ -145,33 +144,37 @@ func CopyTreeDir(p, target string) error {
 	return os.MkdirAll(target, mode)
 }
 
-func CopyTreeEntry(src, dst, p string, d fs.DirEntry) error {
+func copyTreeEntry(src, dst, p string, d fs.DirEntry) error {
 	rel, err := filepath.Rel(src, p)
-	if err != nil || Excluded(d) {
-		if d.IsDir() && Excluded(d) {
+	if err != nil || excluded(d) {
+		if d.IsDir() && excluded(d) {
 			return filepath.SkipDir
 		}
 		return err
 	}
 	target := filepath.Join(dst, rel)
 	if d.Type()&fs.ModeSymlink != 0 {
-		return CopyLink(p, target)
+		return copyLink(p, target)
 	}
 	if d.IsDir() {
-		return CopyTreeDir(p, target)
+		return copyTreeDir(p, target)
 	}
 	return CopyFile(p, target)
 }
 
-func CopyTree(src, dst string) error {
+// copyTree mirrors src into dst, skipping live-daemon sidecars so a copied
+// watchman/ state or daemon.log cannot point at the wrong root or lie about a
+// running daemon.
+func copyTree(src, dst string) error {
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		return CopyTreeEntry(src, dst, p, d)
+		return copyTreeEntry(src, dst, p, d)
 	})
 }
 
+// ReadJSON reads JSON from path into v.
 func ReadJSON(path string, v any) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -185,7 +188,7 @@ func ReadJSON(path string, v any) error {
 // must rename with POSIX semantics: FILE_SHARE_DELETE alone does not let
 // MoveFileEx replace an open destination (open_windows.go, rename_windows.go).
 func ReadFileShared(path string) ([]byte, error) {
-	f, err := OpenShared(path)
+	f, err := openShared(path)
 	if err != nil {
 		return nil, err
 	}
@@ -205,27 +208,27 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	return ReplaceAtomicFile(f, path, data, mode)
+	return replaceAtomicFile(f, path, data, mode)
 }
 
-func ReplaceAtomicFile(f *os.File, path string, data []byte, mode os.FileMode) (err error) {
+func replaceAtomicFile(f *os.File, path string, data []byte, mode os.FileMode) (err error) {
 	// Remove only failed writes; a successful rename releases the temp path.
 	defer func() {
 		if err != nil {
 			_ = os.Remove(f.Name())
 		}
 	}()
-	if err := WriteAtomicContents(f, data, mode); err != nil {
+	if err := writeAtomicContents(f, data, mode); err != nil {
 		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return RenameReplace(f.Name(), path)
+	return renameReplace(f.Name(), path)
 }
 
-func WriteAtomicContents(f *os.File, data []byte, mode os.FileMode) error {
+func writeAtomicContents(f *os.File, data []byte, mode os.FileMode) error {
 	if _, err := f.Write(data); err != nil {
 		return err
 	}
@@ -245,7 +248,7 @@ func WithFileLock(lockPath string, fn func() error) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	if err := LockFile(f); err != nil {
+	if err := lockFile(f); err != nil {
 		return err
 	}
 	defer func() { _ = UnlockFile(f) }()
@@ -259,11 +262,4 @@ func WriteJSON(path string, v any) error {
 		return err
 	}
 	return os.WriteFile(path, append(b, '\n'), 0o644)
-}
-
-// PrintJSON writes indented JSON to stdout (machine output contract).
-func PrintJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
 }

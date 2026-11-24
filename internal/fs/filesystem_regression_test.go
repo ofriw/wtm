@@ -109,8 +109,8 @@ func TestCopyLink(t *testing.T) {
 	MustSymlink(t, "target-file", src)
 
 	dst := filepath.Join(t.TempDir(), "out", "link")
-	if err := CopyLink(src, dst); err != nil {
-		t.Fatalf("CopyLink: %v", err)
+	if err := copyLink(src, dst); err != nil {
+		t.Fatalf("copyLink: %v", err)
 	}
 	if got, err := os.Readlink(dst); err != nil || got != "target-file" {
 		t.Fatalf("readlink = (%q,%v), want target-file", got, err)
@@ -120,8 +120,8 @@ func TestCopyLink(t *testing.T) {
 	dangle := filepath.Join(t.TempDir(), "dangle")
 	MustSymlink(t, "does-not-exist", dangle)
 	dst2 := filepath.Join(t.TempDir(), "d2")
-	if err := CopyLink(dangle, dst2); err != nil {
-		t.Fatalf("CopyLink dangling: %v", err)
+	if err := copyLink(dangle, dst2); err != nil {
+		t.Fatalf("copyLink dangling: %v", err)
 	}
 	if got, _ := os.Readlink(dst2); got != "does-not-exist" {
 		t.Fatalf("dangling readlink = %q", got)
@@ -153,8 +153,8 @@ func TestCopyTree(t *testing.T) {
 		fsWriteTree(t, src)
 		chmodTest(t, filepath.Join(src, "sub"), 0o700)
 		chmodTest(t, filepath.Join(src, "a.txt"), 0o640)
-		if err := CopyTree(src, dst); err != nil {
-			t.Fatalf("CopyTree: %v", err)
+		if err := copyTree(src, dst); err != nil {
+			t.Fatalf("copyTree: %v", err)
 		}
 		for _, rel := range []string{"a.txt", "keep.txt", "sub/b.txt"} {
 			b, _ := os.ReadFile(filepath.Join(dst, filepath.FromSlash(rel)))
@@ -170,8 +170,8 @@ func TestCopyTree(t *testing.T) {
 		src := t.TempDir()
 		dst := filepath.Join(t.TempDir(), "dst")
 		fsWriteTree(t, src)
-		if err := CopyTree(src, dst); err != nil {
-			t.Fatalf("CopyTree: %v", err)
+		if err := copyTree(src, dst); err != nil {
+			t.Fatalf("copyTree: %v", err)
 		}
 		for _, rel := range fsExcludedRels() {
 			if Exists(filepath.Join(dst, filepath.FromSlash(rel))) {
@@ -188,8 +188,8 @@ func TestCopyTree(t *testing.T) {
 		dst := filepath.Join(t.TempDir(), "dst")
 		WriteFile(t, filepath.Join(src, "a.txt"), "A", 0o644)
 		MustSymlink(t, "a.txt", filepath.Join(src, "link"))
-		if err := CopyTree(src, dst); err != nil {
-			t.Fatalf("CopyTree: %v", err)
+		if err := copyTree(src, dst); err != nil {
+			t.Fatalf("copyTree: %v", err)
 		}
 		info, err := os.Lstat(filepath.Join(dst, "link"))
 		if err != nil {
@@ -241,7 +241,7 @@ func fsWalkFiles(t *testing.T, root string) map[string]string {
 	return m
 }
 
-// fsDropExcluded removes the entries CopyTree/CloneDir must never carry over.
+// fsDropExcluded removes the entries copyTree/CloneDir must never carry over.
 func fsDropExcluded(m map[string]string) {
 	for k := range m {
 		for _, seg := range strings.Split(k, "/") {
@@ -275,8 +275,8 @@ func TestCloneDir(t *testing.T) {
 func TestRemoveExcluded(t *testing.T) {
 	root := t.TempDir()
 	fsWriteTree(t, root)
-	if err := RemoveExcluded(root); err != nil {
-		t.Fatalf("RemoveExcluded: %v", err)
+	if err := removeExcluded(root); err != nil {
+		t.Fatalf("removeExcluded: %v", err)
 	}
 	for _, rel := range fsExcludedRels() {
 		if Exists(filepath.Join(root, filepath.FromSlash(rel))) {
@@ -314,17 +314,6 @@ func TestWriteJSONContract(t *testing.T) {
 	}
 	if string(out["known"]) != "1" || string(out["extra"]) != `"x"` {
 		t.Fatalf("round-trip lost keys: %v", out)
-	}
-}
-
-func TestPrintJSON(t *testing.T) {
-	out := CaptureStdout(t, func() {
-		if err := PrintJSON(map[string]any{"a": 1}); err != nil {
-			t.Errorf("PrintJSON: %v", err)
-		}
-	})
-	if want := "{\n  \"a\": 1\n}\n"; out != want {
-		t.Fatalf("PrintJSON = %q, want %q", out, want)
 	}
 }
 

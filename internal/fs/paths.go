@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 )
 
-// WtmDir returns the per-user wtm state directory (~/.wtm).
-func WtmDir() (string, error) {
+// wtmDir returns the per-user wtm state directory (~/.wtm).
+func wtmDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -25,7 +25,7 @@ const TempFileName, TempLockFileName = "temp.json", "temp.lock"
 // WtmFilePath resolves a file directly inside ~/.wtm — the SSOT for the store
 // layout shared by settings.json and temp.json and their lock files.
 func WtmFilePath(name string) (string, error) {
-	dir, err := WtmDir()
+	dir, err := wtmDir()
 	if err != nil {
 		return "", err
 	}

@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// RenameReplace on POSIX is os.Rename: an open reader never blocks replace,
+// renameReplace on POSIX is os.Rename: an open reader never blocks replace,
 // and the held handle keeps the pre-replace snapshot.
 func TestRenameReplaceOverOpenReader(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "store.json")
@@ -26,8 +26,8 @@ func TestRenameReplaceOverOpenReader(t *testing.T) {
 	if err := os.WriteFile(src, []byte("new"), 0o600); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
-	if err := RenameReplace(src, dest); err != nil {
-		t.Fatalf("RenameReplace over open reader: %v", err)
+	if err := renameReplace(src, dest); err != nil {
+		t.Fatalf("renameReplace over open reader: %v", err)
 	}
 	got, err := io.ReadAll(held)
 	if err != nil {
@@ -51,8 +51,8 @@ func TestRenameReplaceOverOpenReader(t *testing.T) {
 // Missing source passes the error through and never creates dest.
 func TestRenameReplaceMissingSource(t *testing.T) {
 	dir := t.TempDir()
-	if err := RenameReplace(filepath.Join(dir, "nope.json"), filepath.Join(dir, "dest.json")); err == nil {
-		t.Fatal("RenameReplace with missing source succeeded")
+	if err := renameReplace(filepath.Join(dir, "nope.json"), filepath.Join(dir, "dest.json")); err == nil {
+		t.Fatal("renameReplace with missing source succeeded")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "dest.json")); !os.IsNotExist(err) {
 		t.Fatalf("dest exists after failed replace: %v", err)
