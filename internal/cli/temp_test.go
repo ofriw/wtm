@@ -25,8 +25,8 @@ var tempActivation = TempTestTime.Add(90 * time.Minute)
 const fixtureTempIdentity = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // mutateTempStore applies fn to the registry and writes the whole map back
-// atomically; fn returning false skips the write. Fixtures are seeded before
-// any subprocess starts, so a plain unlocked write is safe here.
+// atomically; fn returning false skips the write. Add/remove role callers
+// supply the registry lock; seed calls run before any subprocess starts.
 func mutateTempStore(fn func(temp.Store) bool) error {
 	store, err := temp.ReadTempStoreUnlocked()
 	if err != nil {
