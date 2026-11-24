@@ -28,11 +28,11 @@ func fixtureStoreRecord(branch string) Record {
 // seedStore writes recs through the exclusive lock and returns the stored map.
 func seedStore(t *testing.T, recs map[string]Record) Store {
 	t.Helper()
-	if err := withLockedTempStore(func(store Store, p string) error {
+	if err := withLockedTempStore(func(store Store, _ string) error {
 		for k, v := range recs {
 			store[fs.Canonical(k)] = v
 		}
-		return writeTempStore(p, store)
+		return WriteTempStoreUnlocked(store)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -80,9 +80,9 @@ func TestTempStoreRoundTrip(t *testing.T) {
 	}
 	// Mutation under the lock drops one record and persists it.
 	drop := fs.Canonical(filepath.Join(base, "a"))
-	if err := withLockedTempStore(func(s Store, p string) error {
+	if err := withLockedTempStore(func(s Store, _ string) error {
 		delete(s, drop)
-		return writeTempStore(p, s)
+		return WriteTempStoreUnlocked(s)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -109,9 +109,9 @@ func TestTempStoreConcurrentAdds(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			name := fmt.Sprintf("wt-%d", i)
-			errs <- withLockedTempStore(func(store Store, p string) error {
+			errs <- withLockedTempStore(func(store Store, _ string) error {
 				store[fs.Canonical(filepath.Join(base, name))] = fixtureStoreRecord("tmp/" + name)
-				return writeTempStore(p, store)
+				return WriteTempStoreUnlocked(store)
 			})
 		}(i)
 	}
@@ -218,21 +218,16 @@ func TestTempStoreReaderSnapshotsWhileWriterHoldsLock(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		p, err := tempPath()
-		if err != nil {
-			t.Errorf("tempPath: %v", err)
-			return
-		}
 		// Single lock acquisition for the whole writer lifetime: nesting
 		// WithFileLock would re-lock the same inode on a second descriptor,
 		// which blocks (flock) even within one process.
-		err = fs.WithFileLock(lock, func() error {
+		err := fs.WithFileLock(lock, func() error {
 			for i := 0; ; i++ {
 				s := storeA
 				if i%2 == 1 {
 					s = storeB
 				}
-				if err := writeTempStore(p, s); err != nil {
+				if err := WriteTempStoreUnlocked(s); err != nil {
 					return err
 				}
 				if i == 0 {
