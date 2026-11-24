@@ -17,6 +17,6 @@ var PiAgent = agent{
 	seedDir:       ".pi",
 	configDirEnv:  "PI_CODING_AGENT_DIR",
 	configDirRel:  []string{".pi", "agent"},
-	sessionSubdir: "sessions",
+	sessionSubdir: PiSessionSubdir,
 	sessionOwner:  piSessionOwner,
 }

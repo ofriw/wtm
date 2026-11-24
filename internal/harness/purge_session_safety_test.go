@@ -127,7 +127,7 @@ func requireRootPolicy(t *testing.T, root string) {
 		t.Fatalf("strict scan accepted unreadable Root: %v", err)
 	}
 	warning := CaptureStderr(t, func() {
-		if _, err := IndexSessions(agents(), core.SessionErrPolicy{}); err != nil {
+		if _, err := indexSessions(agents(), core.SessionErrPolicy{}); err != nil {
 			t.Fatalf("display scan failed: %v", err)
 		}
 	})

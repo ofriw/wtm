@@ -115,13 +115,13 @@ func TestUnreadableSessionFailClosed(t *testing.T) {
 	path := MkClaudeSession(t, repo, "unreadable", time.Now())
 	makeUnreadable(t, path)
 
-	if _, err := IndexSessions(agents(), core.SessionErrPolicy{FailClosed: true}); err == nil || !strings.Contains(err.Error(), path) {
+	if _, err := indexSessions(agents(), core.SessionErrPolicy{FailClosed: true}); err == nil || !strings.Contains(err.Error(), path) {
 		t.Fatalf("reclamation index must fail on unreadable transcript %s: %v", path, err)
 	}
 	var idx core.SessionIndex
 	warned := CaptureStderr(t, func() {
 		var err error
-		idx, err = IndexSessions(agents(), core.SessionErrPolicy{})
+		idx, err = indexSessions(agents(), core.SessionErrPolicy{})
 		if err != nil {
 			t.Fatalf("discovery index must not fail: %v", err)
 		}
@@ -299,7 +299,7 @@ func unlistableSessionFixture(t *testing.T) (owner, owned, blocked string) {
 // Hidden child contents cannot prove inactivity, so reclamation must stop.
 func TestIndexRejectsUnlistableDirectory(t *testing.T) {
 	_, _, blocked := unlistableSessionFixture(t)
-	if _, err := IndexSessions(agents(), core.SessionErrPolicy{FailClosed: true}); err == nil || !strings.Contains(err.Error(), blocked) {
+	if _, err := indexSessions(agents(), core.SessionErrPolicy{FailClosed: true}); err == nil || !strings.Contains(err.Error(), blocked) {
 		t.Fatalf("strict index must identify unreadable child %s: %v", blocked, err)
 	}
 }
@@ -309,7 +309,7 @@ func TestIndexWarnsOnUnlistableDirectory(t *testing.T) {
 	var idx core.SessionIndex
 	warning := CaptureStderr(t, func() {
 		var err error
-		idx, err = IndexSessions(agents(), core.SessionErrPolicy{})
+		idx, err = indexSessions(agents(), core.SessionErrPolicy{})
 		if err != nil {
 			t.Fatalf("lenient index: %v", err)
 		}
@@ -333,7 +333,7 @@ func TestIndexSkipsDanglingSessionSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	idx, err := IndexSessions(agents(), core.SessionErrPolicy{FailClosed: true})
+	idx, err := indexSessions(agents(), core.SessionErrPolicy{FailClosed: true})
 	if err != nil {
 		t.Fatalf("dangling symlink must not abort indexing: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestIndexSessionsWithoutHome(t *testing.T) {
 	t.Setenv("PI_CODING_AGENT_DIR", "")
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("HOME", "") // os.UserHomeDir fails; harness state is unknowable
-	idx, err := IndexSessions(agents(), core.SessionErrPolicy{FailClosed: true})
+	idx, err := indexSessions(agents(), core.SessionErrPolicy{FailClosed: true})
 	if err != nil {
 		t.Fatalf("indexSessions without HOME: %v", err)
 	}
@@ -426,11 +426,11 @@ func TestIndexUnreadableSessionRootIsFatal(t *testing.T) {
 	if _, err := os.ReadDir(root); err == nil {
 		t.Skip("host allows listing mode-000 session root")
 	}
-	if _, err := IndexSessions(agents(), core.SessionErrPolicy{FailClosed: true}); err == nil || !strings.Contains(err.Error(), root) {
+	if _, err := indexSessions(agents(), core.SessionErrPolicy{FailClosed: true}); err == nil || !strings.Contains(err.Error(), root) {
 		t.Fatalf("strict index on unreadable root = %v, want error naming %s", err, root)
 	}
 	warning := CaptureStderr(t, func() {
-		if _, err := IndexSessions(agents(), core.SessionErrPolicy{}); err != nil {
+		if _, err := indexSessions(agents(), core.SessionErrPolicy{}); err != nil {
 			t.Fatalf("display index on unreadable Root: %v", err)
 		}
 	})

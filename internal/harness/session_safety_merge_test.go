@@ -123,7 +123,7 @@ func TestSharedSessionSafetyUnreadableChild(t *testing.T) {
 		if _, _, err := IndexSessionsStrict(nil); err == nil || !strings.Contains(err.Error(), dir) {
 			t.Fatalf("unreadable child must stop removal checks: %v", err)
 		}
-		warning := CaptureStderr(t, func() { _, _ = IndexSessions(agents(), core.SessionErrPolicy{}) })
+		warning := CaptureStderr(t, func() { _, _ = indexSessions(agents(), core.SessionErrPolicy{}) })
 		if !strings.Contains(warning, dir) {
 			t.Fatalf("display did not disclose unreadable directory: %q", warning)
 		}

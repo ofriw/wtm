@@ -23,3 +23,15 @@ func TestAgentConfigDirMatchesHarness(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentSessionSubdirsMatchConstants pins the exported subdir constants to
+// the agent descriptors, so the cli discovery fixtures (which use the
+// constants) cannot drift from the real session roots.
+func TestAgentSessionSubdirsMatchConstants(t *testing.T) {
+	if got := ClaudeAgent.sessionSubdir; got != ClaudeSessionSubdir {
+		t.Fatalf("ClaudeAgent.sessionSubdir = %q, want %q", got, ClaudeSessionSubdir)
+	}
+	if got := PiAgent.sessionSubdir; got != PiSessionSubdir {
+		t.Fatalf("PiAgent.sessionSubdir = %q, want %q", got, PiSessionSubdir)
+	}
+}

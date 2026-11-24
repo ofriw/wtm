@@ -28,6 +28,14 @@ import (
 const ProjectMCPFile = ".mcp.json"
 
 // agent describes one harness's per-worktree and per-user layout.
+// SessionSubdirs are the per-agent session subdirectory names — the single
+// source for both the agent descriptors and the cli discovery fixtures, so a
+// rename cannot make safety fixtures land outside the scanned root.
+const (
+	ClaudeSessionSubdir = "projects"
+	PiSessionSubdir     = "sessions"
+)
+
 type agent struct {
 	name          string
 	statusToken   string   // grouped-cell token; a prefix of name, guarded by TestCapabilityTokens
@@ -331,8 +339,8 @@ type sessionScan struct {
 	collect    bool
 }
 
-// IndexSessions builds the session index for the given agents.
-func IndexSessions(ags []agent, pol core.SessionErrPolicy) (core.SessionIndex, error) {
+// indexSessions builds the session index for the given agents.
+func indexSessions(ags []agent, pol core.SessionErrPolicy) (core.SessionIndex, error) {
 	s := sessionScan{idx: core.SessionIndex{}, pol: pol}
 	if err := s.scan(ags); err != nil {
 		return nil, err
@@ -351,7 +359,7 @@ func IndexSessionsStrict(p *ui.Progress) (core.SessionIndex, []temp.UnverifiedSe
 // DiscoverySessions adapts the harness indexer to core's discovery hook type.
 func DiscoverySessions(failClosed bool) core.SessionDiscovery {
 	return func(p *ui.Progress) (core.SessionIndex, []temp.UnverifiedSession, error) {
-		idx, err := IndexSessions(agents(), core.SessionErrPolicy{FailClosed: failClosed, P: p})
+		idx, err := indexSessions(agents(), core.SessionErrPolicy{FailClosed: failClosed, P: p})
 		return idx, nil, err
 	}
 }

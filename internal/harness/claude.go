@@ -21,6 +21,6 @@ var ClaudeAgent = agent{
 	seedSkip:      []string{claudeWorktreesDir},
 	configDirEnv:  "CLAUDE_CONFIG_DIR",
 	configDirRel:  []string{".claude"},
-	sessionSubdir: "projects",
+	sessionSubdir: ClaudeSessionSubdir,
 	sessionOwner:  claudeSessionOwner,
 }

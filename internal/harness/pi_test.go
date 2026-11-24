@@ -68,7 +68,7 @@ func TestSessionCWD(t *testing.T) {
 // mustIndexSessions builds the session index once for a test, failing on error.
 func mustIndexSessions(t *testing.T) core.SessionIndex {
 	t.Helper()
-	idx, err := IndexSessions(agents(), core.SessionErrPolicy{FailClosed: true})
+	idx, err := indexSessions(agents(), core.SessionErrPolicy{FailClosed: true})
 	if err != nil {
 		t.Fatalf("indexSessions: %v", err)
 	}
