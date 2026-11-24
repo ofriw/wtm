@@ -18,66 +18,12 @@ import (
 	"wtm/internal/ui"
 )
 
-// status_test.go — Tier-1 contracts for status.go. Discovery runs against a
-// real repo with linked worktrees; time-based helpers pin RELATIVE mtimes so
-// assertions never race the wall clock.
+// status_test.go — Tier-1 contracts for the status command path (status_cmd.go)
+// and the status JSON contract (core.PrintStatusJSON). The pure core predicates
+// (Worktree.Unused/Status/BranchName) are pinned in internal/core/status_test.go.
 
 // status tests use the shared defaultHooks() from cli.go so they exercise the
 // production session/MCP paths the real dispatcher wires.
-func TestWorktreeUnused(t *testing.T) {
-	now := time.Now()
-	ttl := 10 * time.Hour
-	cases := []struct {
-		name     string
-		lastUsed time.Time
-		want     bool
-	}{
-		{"zero LastUsed is unused", time.Time{}, true},
-		{"younger than ttl is in use", now.Add(-time.Hour), false},
-		{"exactly ttl is still in use (cutoff is exclusive)", now.Add(-ttl), false},
-		{"older than ttl is unused", now.Add(-ttl - time.Second), true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			w := core.Worktree{LastUsed: tc.lastUsed}
-			if got := w.Unused(now, ttl); got != tc.want {
-				t.Fatalf("unused(now, %v) = %v, want %v", ttl, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestWorktreeStatus(t *testing.T) {
-	now := time.Now()
-	ttl := 10 * time.Hour
-	cases := []struct {
-		name     string
-		lastUsed time.Time
-		want     string
-	}{
-		{"zero is UNUSED", time.Time{}, "UNUSED"},
-		{"recent is ACTIVE", now.Add(-time.Hour), "ACTIVE"},
-		{"exactly ttl is ACTIVE", now.Add(-ttl), "ACTIVE"},
-		{"older than ttl is UNUSED", now.Add(-ttl - time.Second), "UNUSED"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			w := core.Worktree{LastUsed: tc.lastUsed}
-			if got := w.Status(now, ttl); got != tc.want {
-				t.Fatalf("status = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestBranchName(t *testing.T) {
-	if got := (core.Worktree{}).BranchName(); got != "(detached)" {
-		t.Fatalf("empty branch = %q, want (detached)", got)
-	}
-	if got := (core.Worktree{Branch: "main"}).BranchName(); got != "main" {
-		t.Fatalf("named branch = %q, want main", got)
-	}
-}
 
 func TestDiscover(t *testing.T) {
 	Sandbox(t)
@@ -481,7 +427,7 @@ func TestDispatchValidatesColor(t *testing.T) {
 }
 
 // TestParseSubRejectsInvalidGlobalsAfterSubcommand pins that a bogus global
-// placed AFTER the subcommand is validated: subFlags re-binds globals, so the
+// placed AFTER the subcommand is validated: subFlags re-binds core.Globals, so the
 // value is only visible once parseSub has parsed it.
 func TestParseSubRejectsInvalidGlobalsAfterSubcommand(t *testing.T) {
 	for _, args := range [][]string{

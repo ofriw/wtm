@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	. "wtm/internal/testutil"
@@ -15,7 +16,7 @@ import (
 // that runs the gc removal path regardless of the unused TTL, then removes the
 // local branch the command names. Fixtures drive real git only.
 
-func deleteResultOf(t *testing.T, g *globals, args ...string) gcResult {
+func deleteResultOf(t *testing.T, g *core.Globals, args ...string) gcResult {
 	t.Helper()
 	g.JSON = true
 	var err error
@@ -30,7 +31,7 @@ func deleteResultOf(t *testing.T, g *globals, args ...string) gcResult {
 	return res
 }
 
-// TestDeleteActiveWorktree pins the unconditional contract: an ACTIVE worktree
+// TestDeleteActiveWorktree pins the unconditional contract: an ACTIVE core.Worktree
 // (recent activity) is removed, its local branch deleted, sessions purged.
 func TestDeleteActiveWorktree(t *testing.T) {
 	Sandbox(t)
@@ -40,7 +41,7 @@ func TestDeleteActiveWorktree(t *testing.T) {
 	GitWorktreeAdd(t, repo, linked, "feature/x", "refs/heads/main")
 	session := MkSession(t, linked, "linked-s", TempNow) // fresh → ACTIVE
 
-	res := deleteResultOf(t, &globals{Root: repo, Yes: true}, "feature/x")
+	res := deleteResultOf(t, &core.Globals{Root: repo, Yes: true}, "feature/x")
 	if res.DeletedBranch != "feature/x" {
 		t.Fatalf("DeletedBranch = %q, want feature/x", res.DeletedBranch)
 	}
@@ -66,7 +67,7 @@ func TestDeleteKeepsSessions(t *testing.T) {
 	GitWorktreeAdd(t, repo, linked, "feat", "refs/heads/main")
 	session := MkSession(t, linked, "linked-s", TempNow)
 
-	res := deleteResultOf(t, &globals{Root: repo, Yes: true}, "feat", "--keep-sessions")
+	res := deleteResultOf(t, &core.Globals{Root: repo, Yes: true}, "feat", "--keep-sessions")
 	if !res.KeptSessions {
 		t.Fatal("--keep-sessions must report the keep")
 	}
@@ -84,7 +85,7 @@ func TestDeleteRemote(t *testing.T) {
 	t.Run("default deletes remote", func(t *testing.T) {
 		Sandbox(t)
 		repo, _, origin := gcFixtureWithUpstream(t)
-		res := deleteResultOf(t, &globals{Root: repo, Yes: true}, "feat")
+		res := deleteResultOf(t, &core.Globals{Root: repo, Yes: true}, "feat")
 		if len(res.RemoteDeleted) != 1 || res.RemoteDeleted[0] != "origin/feat" {
 			t.Fatalf("RemoteDeleted = %v, want [origin/feat]", res.RemoteDeleted)
 		}
@@ -95,7 +96,7 @@ func TestDeleteRemote(t *testing.T) {
 	t.Run("keep-remote preserves remote", func(t *testing.T) {
 		Sandbox(t)
 		repo, _, origin := gcFixtureWithUpstream(t)
-		res := deleteResultOf(t, &globals{Root: repo, Yes: true}, "feat", "--keep-remote")
+		res := deleteResultOf(t, &core.Globals{Root: repo, Yes: true}, "feat", "--keep-remote")
 		if !res.KeptRemote || len(res.RemoteDeleted) != 0 {
 			t.Fatalf("KeptRemote=%v RemoteDeleted=%v, want true/[]", res.KeptRemote, res.RemoteDeleted)
 		}
@@ -109,7 +110,7 @@ func TestDeleteRefusesMain(t *testing.T) {
 	Sandbox(t)
 	repo := InitRepo(t, "main")
 	GitTestCommit(t, repo)
-	err := cmdDelete(&globals{Root: repo, Yes: true}, []string{"main"})
+	err := cmdDelete(&core.Globals{Root: repo, Yes: true}, []string{"main"})
 	if err == nil || !strings.Contains(err.Error(), "refusing to remove the main worktree") {
 		t.Fatalf("delete main = %v, want refusal", err)
 	}
@@ -132,11 +133,11 @@ func TestPromoteRefusesMainAndDefaultBranch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var err error
 			if tc.name == "default branch" {
-				// A linked worktree on the default branch; only the main worktree
+				// A linked worktree on the default branch; only the main core.Worktree
 				// can satisfy that, so call the resolver directly.
-				_, err = checkedDeleteTarget(&worktree{Path: "/linked", Branch: "main"}, "main", "main")
+				_, err = checkedDeleteTarget(&core.Worktree{Path: "/linked", Branch: "main"}, "main", "main")
 			} else {
-				err = cmdPromote(&globals{Root: repo}, []string{tc.branch})
+				err = cmdPromote(&core.Globals{Root: repo}, []string{tc.branch})
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("%s refusal = %v, want %q", tc.name, err, tc.want)
@@ -152,7 +153,7 @@ func TestDeleteUnknownBranch(t *testing.T) {
 	Sandbox(t)
 	repo := InitRepo(t, "main")
 	GitTestCommit(t, repo)
-	err := cmdDelete(&globals{Root: repo, Yes: true}, []string{"no-such-branch"})
+	err := cmdDelete(&core.Globals{Root: repo, Yes: true}, []string{"no-such-branch"})
 	if err == nil || !strings.Contains(err.Error(), "no worktree has branch") {
 		t.Fatalf("delete unknown = %v, want not-found", err)
 	}
@@ -166,8 +167,8 @@ func TestDeleteRequiresYesNonInteractive(t *testing.T) {
 	GitTestCommit(t, repo)
 	linked := CanonicalPath(filepath.Join(filepath.Dir(repo), "linked"))
 	GitWorktreeAdd(t, repo, linked, "feature/x", "refs/heads/main")
-	err := cmdDelete(&globals{Root: repo}, []string{"feature/x"})
-	var ue usageError
+	err := cmdDelete(&core.Globals{Root: repo}, []string{"feature/x"})
+	var ue core.UsageError
 	if !errors.As(err, &ue) {
 		t.Fatalf("non-TTY delete = %v, want usageError", err)
 	}
@@ -181,7 +182,7 @@ func TestDeleteRefusesDefaultBranchLinkedWorktree(t *testing.T) {
 	MustGit(t, repo, "checkout", "-q", "other")
 	linked := CanonicalPath(filepath.Join(filepath.Dir(repo), "linked-main"))
 	MustGit(t, repo, "worktree", "add", linked, "main")
-	err := cmdDelete(&globals{Root: repo, Yes: true}, []string{"main"})
+	err := cmdDelete(&core.Globals{Root: repo, Yes: true}, []string{"main"})
 	if err == nil || !strings.Contains(err.Error(), "refusing to remove default branch") {
 		t.Fatalf("delete linked default branch = %v, want refusal", err)
 	}
@@ -199,7 +200,7 @@ func TestDeleteDisclosesKeptBranchOnRemoteFailure(t *testing.T) {
 	MustGit(t, origin, "config", "receive.denyDeletes", "true")
 	var err error
 	errOut := CaptureStderr(t, func() {
-		err = cmdDelete(&globals{Root: repo, Yes: true}, []string{"feat"})
+		err = cmdDelete(&core.Globals{Root: repo, Yes: true}, []string{"feat"})
 	})
 	if err == nil {
 		t.Fatal("delete must fail when remote deletion fails")
@@ -221,7 +222,7 @@ func TestDeleteNormalizesInput(t *testing.T) {
 	GitTestCommit(t, repo)
 	linked := CanonicalPath(filepath.Join(filepath.Dir(repo), "linked"))
 	GitWorktreeAdd(t, repo, linked, "feature-x", "refs/heads/main")
-	res := deleteResultOf(t, &globals{Root: repo, Yes: true}, "Feature X")
+	res := deleteResultOf(t, &core.Globals{Root: repo, Yes: true}, "Feature X")
 	if res.DeletedBranch != "feature-x" {
 		t.Fatalf("DeletedBranch = %q, want feature-x", res.DeletedBranch)
 	}
@@ -236,7 +237,7 @@ func TestDeleteMatchesTempPrefix(t *testing.T) {
 	GitTestCommit(t, repo)
 	linked := CanonicalPath(filepath.Join(filepath.Dir(repo), "linked"))
 	GitWorktreeAdd(t, repo, linked, "tmp/review", "refs/heads/main")
-	res := deleteResultOf(t, &globals{Root: repo, Yes: true}, "review")
+	res := deleteResultOf(t, &core.Globals{Root: repo, Yes: true}, "review")
 	if res.DeletedBranch != "tmp/review" {
 		t.Fatalf("DeletedBranch = %q, want tmp/review", res.DeletedBranch)
 	}
@@ -246,7 +247,7 @@ func TestDeleteMatchesTempPrefix(t *testing.T) {
 }
 
 func TestDeletePromptTitle(t *testing.T) {
-	w := worktree{Path: "/path/to/wt", Branch: "feat"}
+	w := core.Worktree{Path: "/path/to/wt", Branch: "feat"}
 	if got := deletePromptTitle(w, 0); got != "Delete worktree /path/to/wt, local branch feat?" {
 		t.Fatalf("deletePromptTitle(0) = %q", got)
 	}
@@ -266,7 +267,7 @@ func TestDeleteOrphanRetry(t *testing.T) {
 	var firstErr error
 	errOut := CaptureStderr(t, func() {
 		CaptureStdout(t, func() {
-			firstErr = cmdDelete(&globals{Root: repo, Yes: true}, []string{"feat"})
+			firstErr = cmdDelete(&core.Globals{Root: repo, Yes: true}, []string{"feat"})
 		})
 	})
 	if firstErr == nil {
@@ -283,7 +284,7 @@ func TestDeleteOrphanRetry(t *testing.T) {
 	}
 
 	MustGit(t, origin, "config", "receive.denyDeletes", "false")
-	res := deleteResultOf(t, &globals{Root: repo, Yes: true}, "feat")
+	res := deleteResultOf(t, &core.Globals{Root: repo, Yes: true}, "feat")
 	if res.DeletedBranch != "feat" {
 		t.Fatalf("retry DeletedBranch = %q, want feat", res.DeletedBranch)
 	}
@@ -307,7 +308,7 @@ func TestDeleteBranchWithoutWorktree(t *testing.T) {
 	var err error
 	errOut := CaptureStderr(t, func() {
 		CaptureStdout(t, func() {
-			err = cmdDelete(&globals{Root: repo, Yes: true}, []string{"orphan"})
+			err = cmdDelete(&core.Globals{Root: repo, Yes: true}, []string{"orphan"})
 		})
 	})
 	if err != nil {
@@ -334,7 +335,7 @@ func TestDeleteDirtyWarnsOnce(t *testing.T) {
 	var err error
 	errOut := CaptureStderr(t, func() {
 		CaptureStdout(t, func() {
-			err = cmdDelete(&globals{Root: repo, Yes: true}, []string{"feat"})
+			err = cmdDelete(&core.Globals{Root: repo, Yes: true}, []string{"feat"})
 		})
 	})
 	if err != nil {

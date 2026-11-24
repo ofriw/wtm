@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	"wtm/internal/harness"
@@ -13,7 +14,7 @@ import (
 	. "wtm/internal/testutil"
 )
 
-func addCleanupTemp(t *testing.T, repo, branch string) worktree {
+func addCleanupTemp(t *testing.T, repo, branch string) core.Worktree {
 	t.Helper()
 	path := CanonicalPath(filepath.Join(filepath.Dir(repo), branch))
 	GitWorktreeAdd(t, repo, path, branch, "refs/heads/main")
@@ -21,12 +22,12 @@ func addCleanupTemp(t *testing.T, repo, branch string) worktree {
 	return discovered(t, repo, path)
 }
 
-func runFailedTempGC(t *testing.T, repo string, selected []worktree) (gcResult, string) {
+func runFailedTempGC(t *testing.T, repo string, selected []core.Worktree) (gcResult, string) {
 	t.Helper()
 	var res gcResult
 	warnings := CaptureStderr(t, func() {
 		var err error
-		res, err = gcRunRemove(t, &globals{JSON: true}, repo, selected, false, false)
+		res, err = gcRunRemove(t, &core.Globals{JSON: true}, repo, selected, false, false)
 		if err == nil {
 			t.Error("cleanup unexpectedly succeeded")
 		}
@@ -34,7 +35,7 @@ func runFailedTempGC(t *testing.T, repo string, selected []worktree) (gcResult, 
 	return res, warnings
 }
 
-func assertTempRecoveryBranch(t *testing.T, repo string, w worktree, warnings string) {
+func assertTempRecoveryBranch(t *testing.T, repo string, w core.Worktree, warnings string) {
 	t.Helper()
 	if !git.RefExists(repo, "refs/heads/"+w.Branch) {
 		t.Fatalf("recovery branch %s was deleted", w.Branch)
@@ -46,7 +47,7 @@ func assertTempRecoveryBranch(t *testing.T, repo string, w worktree, warnings st
 	}
 }
 
-func assertTempCleanupSucceeded(t *testing.T, repo string, w worktree, res gcResult) {
+func assertTempCleanupSucceeded(t *testing.T, repo string, w core.Worktree, res gcResult) {
 	t.Helper()
 	if fs.Exists(w.Path) || git.RefExists(repo, "refs/heads/"+w.Branch) {
 		t.Fatalf("successful checkout %s or its branch survived", w.Path)
@@ -69,7 +70,7 @@ func TestGCTempPruneFailureRetainsRecoveryBranch(t *testing.T) {
 	mustProcessError(t, os.WriteFile(config, []byte("[invalid\n"), 0o600))
 	res := gcResult{Removed: []string{w.Path}}
 	warnings := CaptureStderr(t, func() {
-		finishSelectedCleanup(repo, []worktree{w}, nil, remotePlan{}, true, gcMode{deleteTemp: true}, &res, nil, nil)
+		finishSelectedCleanup(repo, []core.Worktree{w}, nil, remotePlan{}, true, gcMode{deleteTemp: true}, &res, nil, nil)
 	})
 	mustProcessError(t, os.WriteFile(config, original, 0o600))
 	assertTempPruneFailure(t, repo, w, res, warnings)
@@ -77,7 +78,7 @@ func TestGCTempPruneFailureRetainsRecoveryBranch(t *testing.T) {
 
 // A repo-global prune failure must not veto this checkout's branch purge.
 // The branch survives only because its own deletion failed, and gc says so.
-func assertTempPruneFailure(t *testing.T, repo string, w worktree, res gcResult, warnings string) {
+func assertTempPruneFailure(t *testing.T, repo string, w core.Worktree, res gcResult, warnings string) {
 	t.Helper()
 	if res.Pruned {
 		t.Fatal("prune failure was not reported")
@@ -111,7 +112,7 @@ func TestGCTempRegistryWriteFailureRetainsRecoveryBranch(t *testing.T) {
 	repo, _, w := identityCheckout(t)
 	path := w.Path
 	restrictRegistryWrites(t)
-	res, warnings := runFailedTempGC(t, repo, []worktree{w})
+	res, warnings := runFailedTempGC(t, repo, []core.Worktree{w})
 	assertTempRecoveryBranch(t, repo, w, warnings)
 	if fs.Exists(path) || len(res.Removed) != 1 || res.Removed[0] != path {
 		t.Fatalf("checkout removal was not reported: %+v", res)
@@ -146,15 +147,15 @@ func testGCTempMixedCleanup(t *testing.T, failure string, failedFirst bool) {
 		MustGit(t, origin, "config", "receive.denyDeletes", "true")
 	}
 	good := addCleanupTemp(t, repo, "tmp/good")
-	selected := []worktree{good, failed}
+	selected := []core.Worktree{good, failed}
 	if failedFirst {
-		selected = []worktree{failed, good}
+		selected = []core.Worktree{failed, good}
 	}
 	res, warnings := runFailedTempGC(t, repo, selected)
 	assertMixedTempResult(t, repo, good, failed, failure, res, warnings)
 }
 
-func assertMixedTempResult(t *testing.T, repo string, good, failed worktree, failure string, res gcResult, warnings string) {
+func assertMixedTempResult(t *testing.T, repo string, good, failed core.Worktree, failure string, res gcResult, warnings string) {
 	t.Helper()
 	assertTempCleanupSucceeded(t, repo, good, res)
 	assertTempRecoveryBranch(t, repo, failed, warnings)
@@ -179,13 +180,13 @@ func TestGCTempSharedUpstreamFailureRetainsEachBranch(t *testing.T) {
 	seedTempRecord(t, linked, "feat", "1h", TempNow)
 	second := addCleanupTemp(t, repo, "tmp/shared")
 	MustGit(t, repo, "branch", "--set-upstream-to=origin/feat", second.Branch)
-	selected := []worktree{discovered(t, repo, linked), discovered(t, repo, second.Path)}
+	selected := []core.Worktree{discovered(t, repo, linked), discovered(t, repo, second.Path)}
 	MustGit(t, origin, "config", "receive.denyDeletes", "true")
 	res, warnings := runFailedTempGC(t, repo, selected)
 	assertSharedTempFailure(t, repo, selected, res, warnings)
 }
 
-func assertSharedTempFailure(t *testing.T, repo string, selected []worktree, res gcResult, warnings string) {
+func assertSharedTempFailure(t *testing.T, repo string, selected []core.Worktree, res gcResult, warnings string) {
 	t.Helper()
 	if len(res.Removed) != 2 || len(res.Failed) != 2 || len(res.DeletedBranches) != 0 {
 		t.Fatalf("shared failure result: %+v", res)

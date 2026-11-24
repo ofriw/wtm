@@ -16,7 +16,7 @@ import (
 
 // cmdStatus is the status command handler. hooks carry the harness-provided
 // session/MCP discovery.
-func cmdStatus(g *globals, args []string, hooks core.Hooks) error {
+func cmdStatus(g *core.Globals, args []string, hooks core.Hooks) error {
 	flags := core.SubFlags("status", g)
 	wide := flags.Bool("wide", false, "show one column per integration")
 	pos, err := core.ParseSub(flags, g, args, usage)
@@ -71,16 +71,16 @@ func booleanStyle(active bool) lipgloss.Style {
 // error.
 func statusCellStyle(id, value string) lipgloss.Style {
 	switch id {
-	case "status":
+	case core.ColumnIDStatus:
 		if value == "ACTIVE" {
 			return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Green)
 		}
 		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
-	case "temp":
+	case core.ColumnIDTemp:
 		return tempCellStyle(value)
-	case "upstream":
+	case core.ColumnIDUpstream:
 		return booleanStyle(value != "-")
-	case "branch", "lastUsed":
+	case core.ColumnIDBranch, core.ColumnIDLastUsed:
 		if value == "(detached)" || value == "never" {
 			return lipgloss.NewStyle().Faint(true)
 		}
@@ -98,11 +98,11 @@ func statusCellStyle(id, value string) lipgloss.Style {
 // through a value-string wrapper.
 func capabilityCellStyle(value string) lipgloss.Style {
 	switch value {
-	case "yes":
+	case core.StateWordYes:
 		return capStateStyle(core.CapPresent)
-	case "partial":
+	case core.StateWordPartial:
 		return capStateStyle(core.CapPartial)
-	default: // "-" and "n/a"
+	default: // StateWordAbsent and StateWordNA
 		return capStateStyle(core.CapAbsent)
 	}
 }
@@ -133,7 +133,7 @@ func capStateStyle(s core.CapState) lipgloss.Style {
 // statusCell renders one plain status cell with its color. The grouped
 // INTEGRATIONS cell colors token-by-token; every other column takes one style.
 func statusCell(id, value string) string {
-	if id == "integrations" {
+	if id == core.ColumnIDIntegrations {
 		return groupedCellStyle(value)
 	}
 	return statusCellStyle(id, value).Render(value)

@@ -7,6 +7,7 @@ import (
 
 	"wtm/internal/core"
 	"wtm/internal/fs"
+	"wtm/internal/ui"
 )
 
 // settingsPath resolves the SSOT settings file inside ~/.wtm.
@@ -91,7 +92,7 @@ func cmdConfigGet(g *core.Globals) error {
 	if g.JSON {
 		// core.Settings is embedded so the json tag stays single-owner; the
 		// promoted field keeps the exact key spelling.
-		return fs.PrintJSON(struct {
+		return ui.PrintJSON(struct {
 			Path string `json:"path"`
 			core.Settings
 		}{p, s})

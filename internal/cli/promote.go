@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	"wtm/internal/core"
-	"wtm/internal/fs"
 	"wtm/internal/harness"
 	"wtm/internal/temp"
+	"wtm/internal/ui"
 )
 
 // Promotion removes registry permission and private Git identity metadata.
@@ -81,7 +81,7 @@ func explainPromoteMiss(root string, wts []core.Worktree, branch string, cause e
 
 func printPromoteResult(g *core.Globals, res promoteResult) error {
 	if g.JSON {
-		return fs.PrintJSON(res)
+		return ui.PrintJSON(res)
 	}
 	verb := "promoted"
 	if !res.Promoted {

@@ -28,19 +28,19 @@ func TestStatusCellStyle(t *testing.T) {
 		bold, faint bool
 		fg          color.Color
 	}{
-		{"status", "ACTIVE", true, false, lipgloss.Green},
-		{"status", "UNUSED", false, false, lipgloss.Yellow},
-		{"chunkhound", "yes", false, false, lipgloss.Green},
-		{"chunkhound", "partial", false, false, lipgloss.Yellow},
-		{"mcp", "-", false, true, nil},
-		{"mcp", "n/a", false, true, nil},
-		{"integrations", "ch mc", false, false, nil},
-		{"upstream", "origin/feat", false, false, lipgloss.Green},
-		{"upstream", "-", false, true, nil},
-		{"branch", "(detached)", false, true, nil},
-		{"branch", "main", false, false, nil},
-		{"lastUsed", "never", false, true, nil},
-		{"path", "/x", false, false, nil},
+		{core.ColumnIDStatus, "ACTIVE", true, false, lipgloss.Green},
+		{core.ColumnIDStatus, "UNUSED", false, false, lipgloss.Yellow},
+		{"chunkhound", core.StateWordYes, false, false, lipgloss.Green},
+		{"chunkhound", core.StateWordPartial, false, false, lipgloss.Yellow},
+		{"mcp", core.StateWordAbsent, false, true, nil},
+		{"mcp", core.StateWordNA, false, true, nil},
+		{core.ColumnIDIntegrations, "ch mc", false, false, nil},
+		{core.ColumnIDUpstream, "origin/feat", false, false, lipgloss.Green},
+		{core.ColumnIDUpstream, "-", false, true, nil},
+		{core.ColumnIDBranch, "(detached)", false, true, nil},
+		{core.ColumnIDBranch, "main", false, false, nil},
+		{core.ColumnIDLastUsed, "never", false, true, nil},
+		{core.ColumnIDPath, "/x", false, false, nil},
 	}
 	for _, tc := range cases {
 		s := statusCellStyle(tc.id, tc.value)

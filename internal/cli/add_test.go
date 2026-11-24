@@ -98,7 +98,7 @@ func TestIndexSeedSkipsWithoutChunkHound(t *testing.T) {
 }
 
 // TestWarnIfChunkHoundExpected pins the warn routing directly: silence
-// without a workspace, a warning when a workspace goes unindexed.
+// without a core.Workspace, a warning when a workspace goes unindexed.
 func TestWarnIfChunkHoundExpected(t *testing.T) {
 	if out := CaptureStderr(t, func() { warnIfChunkHoundExpected(t.TempDir()) }); out != "" {
 		t.Fatalf("no workspace must stay silent, got %q", out)
@@ -523,7 +523,7 @@ func TestAddExistingPathFails(t *testing.T) {
 		t.Fatal("existing target content must survive")
 	}
 	if wts, err := git.Worktrees(repo); err != nil || len(wts) != 1 {
-		t.Fatalf("failed add must leave only the main worktree, got %v (err %v)", wts, err)
+		t.Fatalf("failed add must leave only the main core.Worktree, got %v (err %v)", wts, err)
 	}
 	// WHY: git creates the branch ref BEFORE validating the path, so a failed
 	// add leaves a dangling branch that add.go does not roll back. Pin reality.
@@ -697,7 +697,7 @@ func TestAddAttachRejectsOccupiedPath(t *testing.T) {
 		t.Fatalf("branch moved to %s, want %s", got, tip)
 	}
 	if wts, err := git.Worktrees(repo); err != nil || len(wts) != 1 {
-		t.Fatalf("failed attach must leave only the main worktree, got %v (err %v)", wts, err)
+		t.Fatalf("failed attach must leave only the main core.Worktree, got %v (err %v)", wts, err)
 	}
 }
 
@@ -1281,8 +1281,8 @@ func TestAddTempWritesRecord(t *testing.T) {
 	if !ok {
 		t.Fatalf("no temp record for %s", target)
 	}
-	if rec.Branch != "tmp/wt-rec" || rec.TTL != temp.DefaultTempTTL().String() {
-		t.Fatalf("record = %+v, want tmp/wt-rec with %s", rec, temp.DefaultTempTTL())
+	if rec.Branch != "tmp/wt-rec" || rec.TTL != temp.DefaultTempTTL.String() {
+		t.Fatalf("record = %+v, want tmp/wt-rec with %s", rec, temp.DefaultTempTTL)
 	}
 	if rec.CreatedAt.IsZero() {
 		t.Fatal("record createdAt must be set")

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/harness"
 	. "wtm/internal/testutil"
@@ -18,9 +19,9 @@ const claudeAgent = "claude"
 // (agents.go); the harness intentionally does not export them.
 func agentDirs(harnessName string) (string, string) {
 	if harnessName == claudeAgent {
-		return harness.ClaudeAgent.ConfigDir(), "projects"
+		return harness.ClaudeAgent.ConfigDir(), harness.ClaudeSessionSubdir
 	}
-	return harness.PiAgent.ConfigDir(), "sessions"
+	return harness.PiAgent.ConfigDir(), harness.PiSessionSubdir
 }
 
 // safetySessionFor writes one session file under the harness's session root,
@@ -47,7 +48,7 @@ func makeUnreadable(t *testing.T, path string) {
 	}
 }
 
-func discoveryEvidenceFixture(t *testing.T) (string, worktree, string) {
+func discoveryEvidenceFixture(t *testing.T) (string, core.Worktree, string) {
 	t.Helper()
 	repo, temp, _ := idleTempCheckout(t)
 	permanent := CanonicalPath(filepath.Join(filepath.Dir(repo), "permanent"))
@@ -85,18 +86,18 @@ func unknownAgeSession(t *testing.T, harnessName, name string, age time.Time) st
 	return p
 }
 
-func idleGCEvidenceWorkspace(t *testing.T, repo string) (workspace, string) {
+func idleGCEvidenceWorkspace(t *testing.T, repo string) (core.Workspace, string) {
 	t.Helper()
-	var ws workspace
+	var ws core.Workspace
 	var err error
-	warning := CaptureStderr(t, func() { ws, err = loadGCWorkspace(&globals{Root: repo}, nil) })
+	warning := CaptureStderr(t, func() { ws, err = loadGCWorkspace(&core.Globals{Root: repo}, nil) })
 	if err != nil {
 		t.Fatalf("unattributable file aborted idle-GC discovery: %v", err)
 	}
 	return ws, warning
 }
 
-func requireEvidenceCandidates(t *testing.T, ws workspace, temp worktree, permanent, evidence, warning string) {
+func requireEvidenceCandidates(t *testing.T, ws core.Workspace, temp core.Worktree, permanent, evidence, warning string) {
 	t.Helper()
 	if len(ws.Idx[temp.Path]) == 0 {
 		t.Fatal("idle-GC discovery lost the reusable ownership index")
@@ -113,7 +114,7 @@ func requireEvidenceCandidates(t *testing.T, ws workspace, temp worktree, perman
 	}
 }
 
-func runDiscoveryEvidenceGC(t *testing.T, repo string, temp worktree, permanent, evidence string, remove bool) {
+func runDiscoveryEvidenceGC(t *testing.T, repo string, temp core.Worktree, permanent, evidence string, remove bool) {
 	t.Helper()
 	_, warning, rc := RunWTM(t, repo, nil, "gc", "--all", "--yes", "--keep-remote", "--keep-sessions")
 	if rc != 0 {
@@ -134,7 +135,7 @@ func runDiscoveryEvidenceGC(t *testing.T, repo string, temp worktree, permanent,
 func stageFreshPermanentActivity(t *testing.T, path string) time.Time {
 	t.Helper()
 	BackdateGitActivity(t, path, TempTestTime.Add(-2*time.Hour))
-	file := stageWorktreeActivity(t, worktree{Path: path}, "new")
+	file := stageWorktreeActivity(t, core.Worktree{Path: path}, "new")
 	SetMtime(t, file, TempTestTime)
 	// A real staged change makes the index relevant; a pinned mtime avoids
 	// depending on whether a no-change Git command rewrites that file.
@@ -242,7 +243,7 @@ func TestDisplayDiscoveryKeepsLenientSessionWarning(t *testing.T) {
 		t.Run(a, func(t *testing.T) {
 			repo, _, permanent := discoveryEvidenceFixture(t)
 			p := discoveryUnknownSession(t, a, "unknown", TempTestTime)
-			var w worktree
+			var w core.Worktree
 			warning := CaptureStderr(t, func() { w = discovered(t, repo, permanent) })
 			if !strings.Contains(warning, p) || !w.Unused(time.Now(), time.Hour) {
 				t.Fatalf("display must warn without destructive-discovery activity guard: %s, %+v", warning, w)
@@ -257,7 +258,7 @@ func TestIdleGCDiscoveryStructuralSessionErrorsRemainFatal(t *testing.T) {
 			t.Run(a+"/"+kind, func(t *testing.T) {
 				repo, temp, permanent := discoveryEvidenceFixture(t)
 				bad := discoveryStructuralFailure(t, a, kind)
-				_, err := loadGCWorkspace(&globals{Root: repo}, nil)
+				_, err := loadGCWorkspace(&core.Globals{Root: repo}, nil)
 				if err == nil || !strings.Contains(err.Error(), bad) {
 					t.Fatalf("structural failure did not abort discovery: %v", err)
 				}
@@ -279,7 +280,7 @@ func TestIdleGCDiscoveryScopedPermanentProtection(t *testing.T) {
 	BackdateGitActivity(t, fresh, TempNow.Add(-time.Minute))
 	discoveryUnknownSession(t, claudeAgent, "unknown", TempTestTime.Add(30*time.Minute))
 	ws, _ := idleGCEvidenceWorkspace(t, repo)
-	var stale, active worktree
+	var stale, active core.Worktree
 	for _, w := range ws.Wts {
 		if w.Path == permanent {
 			stale = w
@@ -318,7 +319,7 @@ func TestIdleGCDiscoveryScopedPermanentProtection(t *testing.T) {
 
 // mustFindWorktree returns the discovered worktree for path. Guard tests pin
 // per-worktree LastUsed, so a missing entry must fail loudly.
-func mustFindWorktree(t *testing.T, ws workspace, path string) worktree {
+func mustFindWorktree(t *testing.T, ws core.Workspace, path string) core.Worktree {
 	t.Helper()
 	for _, w := range ws.Wts {
 		if w.Path == path {
@@ -326,12 +327,12 @@ func mustFindWorktree(t *testing.T, ws workspace, path string) worktree {
 		}
 	}
 	t.Fatalf("worktree not discovered: %s", path)
-	return worktree{}
+	return core.Worktree{}
 }
 
 // requireProtectedNow pins guardPermanentActivity's ACTIVE bump: LastUsed
 // lands inside a ±1min window around wall-clock now.
-func requireProtectedNow(t *testing.T, w worktree) {
+func requireProtectedNow(t *testing.T, w core.Worktree) {
 	t.Helper()
 	now := time.Now()
 	if !w.LastUsed.After(now.Add(-time.Minute)) || w.LastUsed.After(now.Add(time.Minute)) {
@@ -341,7 +342,7 @@ func requireProtectedNow(t *testing.T, w worktree) {
 
 // requireNotProtected pins that the guard left LastUsed at its backdated time,
 // far below wall-clock now.
-func requireNotProtected(t *testing.T, w worktree) {
+func requireNotProtected(t *testing.T, w core.Worktree) {
 	t.Helper()
 	if w.LastUsed.After(time.Now().Add(-time.Minute)) {
 		t.Fatalf("permanent was incorrectly protected: %s %+v", w.Path, w.LastUsed)

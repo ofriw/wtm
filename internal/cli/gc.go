@@ -15,7 +15,7 @@ import (
 	"wtm/internal/ui"
 )
 
-// gc.go — remove UNUSED git.Worktrees and their agent session history.
+// gc.go — remove UNUSED worktrees and their agent session history.
 
 type gcOptions struct {
 	all          bool
@@ -212,7 +212,7 @@ func promptGC(g *core.Globals, selected []core.Worktree, plan remotePlan) (bool,
 	return confirmGC(selected, plan)
 }
 
-// selectAndConfirmGC picks the git.Worktrees to remove and gets consent. The
+// selectAndConfirmGC picks the worktrees to remove and gets consent. The
 // candidate scan runs under the progress renderer; the huh picker and ui.Confirm
 // run after it exits, because two tea programs must never share the tty. The
 // remote plan is computed once here so ui.Confirm and purge share one source.
@@ -310,7 +310,7 @@ func reportResult(g *core.Globals, res gcResult, runErr error) error {
 	return runErr
 }
 
-// runGCRemove removes the selected git.Worktrees under the renderer, then prints the
+// runGCRemove removes the selected worktrees under the renderer, then prints the
 // report only after the renderer exits: a raw stdout write would land mid-frame
 // and corrupt the inline display.
 func runGCRemove(g *core.Globals, root string, selected []core.Worktree, plan remotePlan, o gcOptions, idx core.SessionIndex, now time.Time) error {
@@ -386,7 +386,7 @@ func gcPickerPolicy(keepRemote, hasTemp bool) string {
 	return local + "Remote upstream branches will be deleted; pass --keep-remote to keep them."
 }
 
-// gcSelection scans UNUSED, non-main git.Worktrees: explicit --path wins, --all
+// gcSelection scans UNUSED, non-main worktrees: explicit --path wins, --all
 // takes every scanned candidate. The ui.Interactive choice is deferred to
 // chooseCandidates so it runs outside any progress renderer.
 func gcSelection(wts []core.Worktree, o gcOptions, ttl time.Duration, now time.Time, p *ui.Progress) ([]core.Worktree, error) {
@@ -398,7 +398,7 @@ func gcSelection(wts []core.Worktree, o gcOptions, ttl time.Duration, now time.T
 	return candidates, nil
 }
 
-// unusedCandidates filters to non-main UNUSED git.Worktrees; the main worktree is
+// unusedCandidates filters to non-main UNUSED worktrees; the main worktree is
 // never a candidate — losing it would destroy the repo itself.
 func unusedCandidates(wts []core.Worktree, now time.Time, ttl time.Duration) []core.Worktree {
 	var candidates []core.Worktree
@@ -613,7 +613,7 @@ func survivingUpstreamTracked(surviving []core.Worktree, u git.Upstream) (string
 	return "", false
 }
 
-// survivingWorktrees returns git.Worktrees from all that are not in selected. Used
+// survivingWorktrees returns worktrees from all that are not in selected. Used
 // both for pre-removal planning (all minus selected) and post-removal protection
 // (selected minus removed) — the function is generic over both.
 func survivingWorktrees(all, selected []core.Worktree) []core.Worktree {
@@ -821,7 +821,7 @@ func printGCHuman(res gcResult) {
 
 func gcReport(g *core.Globals, res gcResult) error {
 	if g.JSON {
-		return fs.PrintJSON(res)
+		return ui.PrintJSON(res)
 	}
 	if len(res.Removed) == 0 && len(res.Failed) == 0 && len(res.Skipped) == 0 && len(res.RemoteDeleted) == 0 && len(res.DeletedBranches) == 0 && res.DeletedBranch == "" {
 		fmt.Println("nothing to do")

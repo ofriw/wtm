@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"wtm/internal/core"
 	. "wtm/internal/testutil"
 )
 
 // Keep the fixture idle without changing the binary's clock or removal paths.
-func gcTempTUIFixture(t *testing.T) (string, worktree, string) {
+func gcTempTUIFixture(t *testing.T) (string, core.Worktree, string) {
 	t.Helper()
 	repo, path, session := gcTUIFixture(t)
 	branch := "tmp/gc-consent"
@@ -22,7 +24,7 @@ func gcTempTUIFixture(t *testing.T) (string, worktree, string) {
 }
 
 // Consent keys follow the complete branch disclosure, not merely the picker.
-func runGCTempConsent(t *testing.T, repo string, w worktree, answer string) (string, string) {
+func runGCTempConsent(t *testing.T, repo string, w core.Worktree, answer string) (string, string) {
 	t.Helper()
 	prompt := "Remove 1 worktree(s); force-delete temp LOCAL branches: " + w.Branch + "?"
 	stdout, stderr, rc := runGCTTY(t, repo, gcTTYWidth, []gcTUIStep{

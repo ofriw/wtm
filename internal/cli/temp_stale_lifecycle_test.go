@@ -5,13 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	"wtm/internal/temp"
 	. "wtm/internal/testutil"
 )
 
-func staleCheckout(t *testing.T, change string) (string, string, worktree) {
+func staleCheckout(t *testing.T, change string) (string, string, core.Worktree) {
 	t.Helper()
 	repo, path, old := identityCheckout(t)
 	path = CanonicalPath(path)
@@ -63,7 +64,7 @@ func runStaleCleanup(t *testing.T, command, repo, path, branch string) gcResult 
 	t.Helper()
 	var err error
 	out := CaptureStdout(t, func() {
-		g := &globals{Root: repo, JSON: true, Yes: true}
+		g := &core.Globals{Root: repo, JSON: true, Yes: true}
 		if command == "delete" {
 			err = cmdDelete(g, []string{branch})
 		} else {

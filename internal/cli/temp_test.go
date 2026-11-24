@@ -27,7 +27,7 @@ const fixtureTempIdentity = "0123456789abcdef0123456789abcdef0123456789abcdef012
 // mutateTempStore applies fn to the registry and writes the whole map back
 // atomically; fn returning false skips the write. Fixtures are seeded before
 // any subprocess starts, so a plain unlocked write is safe here.
-func mutateTempStore(fn func(tempStore) bool) error {
+func mutateTempStore(fn func(temp.Store) bool) error {
 	store, err := temp.ReadTempStoreUnlocked()
 	if err != nil {
 		return err
@@ -38,14 +38,14 @@ func mutateTempStore(fn func(tempStore) bool) error {
 	return temp.WriteTempStoreUnlocked(store)
 }
 
-func storeTempFixture(path string, rec tempRecord) error {
-	return mutateTempStore(func(s tempStore) bool { s[path] = rec; return true })
+func storeTempFixture(path string, rec temp.Record) error {
+	return mutateTempStore(func(s temp.Store) bool { s[path] = rec; return true })
 }
 
 // Raw missing-path fixtures test registry cleanup; live Git paths get identity.
 func seedTempRecord(t *testing.T, path, branch, ttl string, createdAt time.Time) {
 	t.Helper()
-	rec := tempRecord{CreatedAt: createdAt, TTL: ttl, Branch: branch}
+	rec := temp.Record{CreatedAt: createdAt, TTL: ttl, Branch: branch}
 	var err error
 	if _, gitErr := git.PrivateDir(path); gitErr == nil {
 		_, err = temp.AddTempRecord(CanonicalPath(path), rec)
@@ -58,7 +58,7 @@ func seedTempRecord(t *testing.T, path, branch, ttl string, createdAt time.Time)
 	}
 }
 
-func mustReadTempStore(t *testing.T) tempStore {
+func mustReadTempStore(t *testing.T) temp.Store {
 	t.Helper()
 	store, err := temp.ReadTempStoreUnlocked()
 	if err != nil {
@@ -69,7 +69,7 @@ func mustReadTempStore(t *testing.T) tempStore {
 
 // clearTempRecord removes path's record; an absent record is a no-op success.
 func clearTempRecord(path string) error {
-	return mutateTempStore(func(s tempStore) bool {
+	return mutateTempStore(func(s temp.Store) bool {
 		if _, ok := s[path]; !ok {
 			return false
 		}
@@ -79,7 +79,7 @@ func clearTempRecord(path string) error {
 }
 
 // verifyTempWorktree is the test view of the pre-removal snapshot.
-func verifyTempWorktree(w worktree) error {
+func verifyTempWorktree(w core.Worktree) error {
 	if !w.Temp {
 		return nil
 	}
@@ -180,11 +180,11 @@ func TestCompactWindow(t *testing.T) {
 	}
 }
 
-func fixtureRecord(branch string) tempRecord {
-	return tempRecord{CreatedAt: TempTestTime, TTL: "1h", Branch: branch, Identity: fixtureTempIdentity}
+func fixtureRecord(branch string) temp.Record {
+	return temp.Record{CreatedAt: TempTestTime, TTL: "1h", Branch: branch, Identity: fixtureTempIdentity}
 }
 
-func assertTempStore(t *testing.T, want tempStore) {
+func assertTempStore(t *testing.T, want temp.Store) {
 	t.Helper()
 	got := mustReadTempStore(t)
 	if len(got) != len(want) {
@@ -210,7 +210,7 @@ func TestDiscoveryLenientOnCorruptStore(t *testing.T) {
 	WriteFile(t, p, "{not json", 0o600)
 	var ws core.Workspace
 	var derr error
-	warnings := CaptureStderr(t, func() { ws, derr = core.LoadWorkspace(&globals{Root: repo}, false, defaultHooks()) })
+	warnings := CaptureStderr(t, func() { ws, derr = core.LoadWorkspace(&core.Globals{Root: repo}, false, defaultHooks()) })
 	wts := ws.Wts
 	if derr != nil {
 		t.Fatalf("discover on corrupt store: %v", derr)
@@ -292,7 +292,7 @@ func TestPrintStatusJSONTempFields(t *testing.T) {
 	now := TempTestTime
 	ttl := 10 * time.Hour
 	created := TempTestTime.Add(123456789 * time.Nanosecond)
-	wts := []worktree{
+	wts := []core.Worktree{
 		{Path: "/perm", Branch: "main"},
 		{Path: "/temp", Branch: "tmp/x", Temp: true, TempCreated: created, TempTTL: 2*time.Hour + 1*time.Nanosecond},
 	}
@@ -328,7 +328,7 @@ func TestReadCommandsLeaveNoRegistryState(t *testing.T) {
 			env := Sandbox(t)
 			repo := NativeRepo(t)
 			CaptureStdout(t, func() {
-				if err := dispatch(cmd, &globals{Root: repo, JSON: true}, nil); err != nil {
+				if err := dispatch(cmd, &core.Globals{Root: repo, JSON: true}, nil); err != nil {
 					t.Logf("%s error: %v", cmd, err)
 				}
 			})

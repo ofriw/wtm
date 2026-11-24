@@ -4,11 +4,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	"wtm/internal/harness"
 	"wtm/internal/temp"
 	. "wtm/internal/testutil"
+	"wtm/internal/ui"
 )
 
 func TestRemoveTempWorktree(t *testing.T) {
@@ -123,7 +125,7 @@ func assertTempPromotion(t *testing.T, path string, want bool) {
 	}
 }
 
-func assertTempRemoval(t *testing.T, w worktree, want bool) {
+func assertTempRemoval(t *testing.T, w core.Worktree, want bool) {
 	t.Helper()
 	before := mustReadTempStore(t)
 	removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
@@ -143,10 +145,10 @@ func assertTempRemoval(t *testing.T, w worktree, want bool) {
 	}
 }
 
-func assertTempRegistration(t *testing.T, w worktree, want bool) {
+func assertTempRegistration(t *testing.T, w core.Worktree, want bool) {
 	t.Helper()
 	before := mustReadTempStore(t)
-	_, err := temp.AddTempRecord(w.Path, tempRecord{CreatedAt: TempNow, TTL: "1h", Branch: w.Branch})
+	_, err := temp.AddTempRecord(w.Path, temp.Record{CreatedAt: TempNow, TTL: "1h", Branch: w.Branch})
 	if (err == nil) != want {
 		t.Fatalf("registration error = %v; want success %v", err, want)
 	}
@@ -203,7 +205,7 @@ func TestTempRemovalConcurrentRegistration(t *testing.T) {
 			removal <- tempRemovalOutcome{ok, err}
 		},
 		func() {
-			_, err := temp.AddTempRecord(path, tempRecord{CreatedAt: TempNow, TTL: "1h", Branch: w.Branch})
+			_, err := temp.AddTempRecord(path, temp.Record{CreatedAt: TempNow, TTL: "1h", Branch: w.Branch})
 			registration <- err
 		},
 	)
@@ -216,7 +218,7 @@ func TestTempRemovalConcurrentRegistration(t *testing.T) {
 	}
 }
 
-func assertRegisteredCheckout(t *testing.T, path string, old worktree) {
+func assertRegisteredCheckout(t *testing.T, path string, old core.Worktree) {
 	t.Helper()
 	rec := mustReadTempStore(t)[old.Path]
 	if rec.Identity == old.TempIdentity {
@@ -356,8 +358,8 @@ func TestIdleCheckContention(t *testing.T) {
 	startContender(func() {
 		var res gcResult
 		var err error
-		err = withProgress(&globals{JSON: true}, true, func(p *progress) error {
-			res, err = gcCleanup(repo, []worktree{w}, remotePlan{keep: true}, false, idx, gcMode{deleteTemp: true, idleOnly: true}, TempNow, p)
+		err = withProgress(&core.Globals{JSON: true}, true, func(p *ui.Progress) error {
+			res, err = gcCleanup(repo, []core.Worktree{w}, remotePlan{keep: true}, false, idx, gcMode{deleteTemp: true, idleOnly: true}, TempNow, p)
 			return err
 		})
 		if err != nil {

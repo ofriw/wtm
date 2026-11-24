@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	"wtm/internal/harness"
@@ -12,7 +13,7 @@ import (
 	. "wtm/internal/testutil"
 )
 
-func stageWorktreeActivity(t *testing.T, w worktree, kind string) string {
+func stageWorktreeActivity(t *testing.T, w core.Worktree, kind string) string {
 	t.Helper()
 	path := filepath.Join(w.Path, "tracked.txt")
 	if kind == "new" {
@@ -27,7 +28,7 @@ func stageWorktreeActivity(t *testing.T, w worktree, kind string) string {
 	return path
 }
 
-func pinStagedActivity(t *testing.T, w worktree, kind, source string) {
+func pinStagedActivity(t *testing.T, w core.Worktree, kind, source string) {
 	t.Helper()
 	path := stageWorktreeActivity(t, w, kind)
 	recent := TempNow.Add(-30 * time.Minute)
@@ -68,7 +69,7 @@ func TestGCProtectsStagedActivity(t *testing.T) {
 	}
 }
 
-func inspectIdleRepeatedly(t *testing.T, repo string, w worktree) {
+func inspectIdleRepeatedly(t *testing.T, repo string, w core.Worktree) {
 	t.Helper()
 	for i := 0; i < 3; i++ {
 		if !discovered(t, repo, w.Path).Unused(TempNow, time.Hour) {

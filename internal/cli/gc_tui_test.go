@@ -289,7 +289,7 @@ func TestGCTUIDefaultNothingSelected(t *testing.T) {
 }
 
 // TestGCTUIToggleAcceptRemoves pins the space-toggle flow: toggling wt1 and
-// accepting the confirm removes the worktree, prunes and purges its session.
+// accepting the confirm removes the core.Worktree, prunes and purges its session.
 func TestGCTUIToggleAcceptRemoves(t *testing.T) {
 	repo, wt1, session := gcTUIFixture(t)
 

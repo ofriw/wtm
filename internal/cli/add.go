@@ -81,7 +81,7 @@ func tempTTL(o addOptions) (time.Duration, error) {
 		return 0, nil
 	}
 	if o.ttl == "" {
-		return temp.DefaultTempTTL(), nil
+		return temp.DefaultTempTTL, nil
 	}
 	return temp.ParseTTL(o.ttl)
 }
@@ -145,7 +145,7 @@ type seedSource struct {
 // Otherwise the worktree at the start-point wins, with the main worktree as
 // fallback. A differing tree is disclosed after indexing, when index state is
 // known. defaultName is empty for an explicit start-point and for attach.
-func resolveAddSource(root string, wts []git.GWorktree, base, from, target, defaultName string) (seedSource, error) {
+func resolveAddSource(root string, wts []git.Worktree, base, from, target, defaultName string) (seedSource, error) {
 	if from != "" {
 		src, err := fs.CanonicalAbs(from)
 		if err != nil {
@@ -175,7 +175,7 @@ func resolveAddSource(root string, wts []git.GWorktree, base, from, target, defa
 // the committed trees differ. Equal committed trees stay silent and report
 // differs=false, so no caller can claim staleness from wording. It compares
 // base^{tree} with the source HEAD^{tree}; live and ignored files are out of
-// scope because git cannot carry them between git.Worktrees.
+// scope because git cannot carry them between worktrees.
 func seedNotice(root, src, base, branch string) (string, bool) {
 	want, err := git.Run(root, "rev-parse", "--verify", "--quiet", "--end-of-options", base+"^{tree}")
 	if err != nil {
@@ -192,7 +192,7 @@ func seedNotice(root, src, base, branch string) (string, bool) {
 
 // seedable reports whether w can be a seed source: it needs a directory to copy
 // from, a usable .git backlink, and must not be the checkout being created.
-func seedable(w git.GWorktree, target string) bool {
+func seedable(w git.Worktree, target string) bool {
 	return !w.Prunable &&
 		fs.Exists(w.Path) &&
 		!git.WorktreeLinkMissing(w.Path) &&
@@ -202,13 +202,13 @@ func seedable(w git.GWorktree, target string) bool {
 // defaultBranchWorktree returns the first usable worktree that has branch
 // checked out. Entries arrive primary-first, then linked by path (git.go), so
 // the primary wins; otherwise the lowest path wins.
-func defaultBranchWorktree(wts []git.GWorktree, branch, target string) (git.GWorktree, bool) {
+func defaultBranchWorktree(wts []git.Worktree, branch, target string) (git.Worktree, bool) {
 	for _, w := range wts {
 		if w.Branch == branch && seedable(w, target) {
 			return w, true
 		}
 	}
-	return git.GWorktree{}, false
+	return git.Worktree{}, false
 }
 
 // warnSeedSource discloses the real seed source. A missing checkout is normal
@@ -235,7 +235,7 @@ func warnSeedSource(source seedSource, base string, attach, noIndex, hadIndex bo
 // both require a commit match, so a diverged branch of the same name never
 // masquerades as the start-point. The checkout being created and unusable
 // entries are excluded by seedable.
-func worktreeAt(root string, wts []git.GWorktree, base, target string) (string, bool) {
+func worktreeAt(root string, wts []git.Worktree, base, target string) (string, bool) {
 	commit, err := git.Run(root, "rev-parse", "--verify", "--quiet", base+"^{commit}")
 	if err != nil {
 		return "", false
@@ -279,11 +279,11 @@ func baseBranchName(root, base string) string {
 	return ""
 }
 
-// locationBase is where sibling git.Worktrees live: the parent of the worktree the
+// locationBase is where sibling worktrees live: the parent of the worktree the
 // user is in when it belongs to the target repo, else the parent of the repo's
 // main worktree. Never the cwd itself — a worktree created under the cwd nests
 // inside another and breaks IDE watchers and test runners.
-func locationBase(root string, wts []git.GWorktree) string {
+func locationBase(root string, wts []git.Worktree) string {
 	fallback := filepath.Dir(fs.Canonical(root))
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -302,9 +302,9 @@ func locationBase(root string, wts []git.GWorktree) string {
 	return fallback
 }
 
-// resolveAddTarget picks the checkout directory: fs.Canonical --path or a derived
-// sibling, then one nesting guard shared by both.
-func resolveAddTarget(root string, wts []git.GWorktree, branch, override string) (string, error) {
+// resolveAddTarget picks the checkout directory: the --path flag (canonicalized
+// via fs.Canonical) or a derived sibling, then one nesting guard shared by both.
+func resolveAddTarget(root string, wts []git.Worktree, branch, override string) (string, error) {
 	var target string
 	if override != "" {
 		abs, err := fs.CanonicalAbs(override)
@@ -351,7 +351,7 @@ func rollbackAdd(root, path, branch string, attached bool, seedErr error) error 
 
 func reportAddResult(g *core.Globals, res addResult, ttl time.Duration) error {
 	if g.JSON {
-		return fs.PrintJSON(res)
+		return ui.PrintJSON(res)
 	}
 	origin := "local"
 	if strings.HasPrefix(res.Base, "refs/remotes/") {
@@ -372,7 +372,7 @@ func reportAddResult(g *core.Globals, res addResult, ttl time.Duration) error {
 type addParams struct {
 	root, path, branch, base string
 	source                   seedSource
-	attach                   bool // branch fs.Exists and will be attached
+	attach                   bool // branch exists (fs.Exists) and will be attached
 	temp                     bool
 	ttl                      time.Duration
 }
@@ -482,8 +482,8 @@ func verifyAttachStart(root, branch, start string) error {
 
 // occupiedErr names the blocking worktree and a repair the tool itself allows.
 // fs.Canonical() gives one spelling: git emits forward slashes on Windows and may
-// report 8.3 aliases, while every other wtm path is fs.Canonical.
-func occupiedErr(branch string, w git.GWorktree) error {
+// report 8.3 aliases, while every other wtm path is canonical.
+func occupiedErr(branch string, w git.Worktree) error {
 	path := fs.Canonical(w.Path)
 	if w.Prunable || !fs.Exists(path) {
 		return fmt.Errorf("add: branch %q is already checked out at %s (missing; run git worktree prune)", branch, path)

@@ -132,7 +132,7 @@ func configTestMode(t *testing.T, path string, want os.FileMode) {
 
 func TestCmdConfigSetCreatesRestrictedDirs(t *testing.T) {
 	Sandbox(t)
-	if err := cmdConfig(&globals{}, []string{"set", "unusedTTL", "7d"}); err != nil {
+	if err := cmdConfig(&core.Globals{}, []string{"set", "unusedTTL", "7d"}); err != nil {
 		t.Fatalf("cmdConfig set: %v", err)
 	}
 	s, _, err := core.LoadSettings()
@@ -151,7 +151,7 @@ func TestCmdConfigJSONShape(t *testing.T) {
 	Sandbox(t)
 	SetTTL(t, "12d")
 	out := CaptureStdout(t, func() {
-		if err := cmdConfig(&globals{JSON: true}, nil); err != nil {
+		if err := cmdConfig(&core.Globals{JSON: true}, nil); err != nil {
 			t.Errorf("cmdConfig: %v", err)
 		}
 	})
@@ -173,13 +173,13 @@ func TestCmdConfigJSONShape(t *testing.T) {
 func TestCmdConfigUsageError(t *testing.T) {
 	Sandbox(t)
 	for _, args := range [][]string{{"bogus"}, {"set", "unusedTTL"}, {"set", "foo", "1d"}, {"a", "b", "c", "d"}} {
-		var ue usageError
-		if err := cmdConfig(&globals{}, args); !errors.As(err, &ue) {
+		var ue core.UsageError
+		if err := cmdConfig(&core.Globals{}, args); !errors.As(err, &ue) {
 			t.Fatalf("cmdConfig(%v) = %v, want usageError", args, err)
 		}
 	}
 	// Invalid TTL is a usage error (exit 2): rejected before any write.
-	if err := cmdConfig(&globals{}, []string{"set", "unusedTTL", "0d"}); !isUsage(err) {
+	if err := cmdConfig(&core.Globals{}, []string{"set", "unusedTTL", "0d"}); !isUsage(err) {
 		t.Fatalf("invalid TTL = %v, want usageError", err)
 	}
 	if fs.Exists(SettingsFile(t)) {
@@ -192,7 +192,7 @@ func TestCmdConfigUsageError(t *testing.T) {
 func TestCmdConfigSetPreservesUnknownKey(t *testing.T) {
 	Sandbox(t)
 	WriteFile(t, SettingsFile(t), "{\"unusedTTL\":\"30d\",\"futureKey\":true}\n", 0o600)
-	if err := cmdConfig(&globals{}, []string{"set", "unusedTTL", "7d"}); err != nil {
+	if err := cmdConfig(&core.Globals{}, []string{"set", "unusedTTL", "7d"}); err != nil {
 		t.Fatalf("cmdConfig set: %v", err)
 	}
 	raw, err := os.ReadFile(SettingsFile(t))
@@ -227,7 +227,7 @@ func TestCmdConfigSetConcurrentWriters(t *testing.T) {
 		wg.Add(1)
 		go func(window string) {
 			defer wg.Done()
-			if err := cmdConfig(&globals{}, []string{"set", "unusedTTL", window}); err != nil {
+			if err := cmdConfig(&core.Globals{}, []string{"set", "unusedTTL", window}); err != nil {
 				t.Errorf("config set %s: %v", window, err)
 			}
 		}(window)
@@ -282,7 +282,7 @@ func TestCmdConfigConcurrentReadWrite(t *testing.T) {
 		wg.Add(1)
 		go func(window string) {
 			defer wg.Done()
-			writeErr <- cmdConfig(&globals{}, []string{"set", "unusedTTL", window})
+			writeErr <- cmdConfig(&core.Globals{}, []string{"set", "unusedTTL", window})
 		}(window)
 	}
 	wg.Wait()
@@ -312,7 +312,7 @@ func TestCmdConfigConcurrentReadWrite(t *testing.T) {
 // the same inode (never removed or replaced).
 func TestSettingsKilledHolderReleasesLock(t *testing.T) {
 	sandboxTempProcesses(t)
-	if err := cmdConfig(&globals{}, []string{"set", "unusedTTL", "30d"}); err != nil {
+	if err := cmdConfig(&core.Globals{}, []string{"set", "unusedTTL", "30d"}); err != nil {
 		t.Fatal(err)
 	}
 	lock, err := settingsLockPath()
@@ -326,7 +326,7 @@ func TestSettingsKilledHolderReleasesLock(t *testing.T) {
 	holder := startTempProcess(t, "hold-settings-lock", "")
 	holder.expect(t, "locked")
 	killTempProcess(t, holder)
-	if err := cmdConfig(&globals{}, []string{"set", "unusedTTL", "7d"}); err != nil {
+	if err := cmdConfig(&core.Globals{}, []string{"set", "unusedTTL", "7d"}); err != nil {
 		t.Fatalf("config set after kill: %v", err)
 	}
 	after, err := os.Stat(lock)
