@@ -20,7 +20,7 @@ import (
 func TestOpenSharedAllowsReplaceAndRemove(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "store.json")
 	mustWriteWindowsStore(t, p, `{"v":"old"}`)
-	f := openWindowsReader(t, p, OpenShared)
+	f := openWindowsReader(t, p, openShared)
 	mustWriteWindowsStore(t, p, `{"v":"new"}`)
 	assertWindowsSnapshots(t, f, p, `{"v":"old"}`, `{"v":"new"}`)
 
@@ -29,7 +29,7 @@ func TestOpenSharedAllowsReplaceAndRemove(t *testing.T) {
 
 func assertWindowsRemoveSnapshot(t *testing.T, path, want string) {
 	t.Helper()
-	current := openWindowsReader(t, path, OpenShared)
+	current := openWindowsReader(t, path, openShared)
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove while held open: %v", err)
 	}
@@ -46,17 +46,17 @@ func assertWindowsRemoveSnapshot(t *testing.T, path, want string) {
 // TestExtendedPath pins long paths get the extended prefix, including UNC form.
 func TestExtendedPath(t *testing.T) {
 	longDrive := `C:\` + strings.Repeat("dir\\", 60) + "store.json"
-	if got := ExtendedPath(longDrive); !strings.HasPrefix(got, `\\?\C:\`) {
+	if got := extendedPath(longDrive); !strings.HasPrefix(got, `\\?\C:\`) {
 		t.Fatalf("drive path = %q, want \\\\?\\C:\\ prefix", got)
 	}
 
 	longUNC := `\\server\share\` + strings.Repeat("dir\\", 60) + "store.json"
-	if got := ExtendedPath(longUNC); !strings.HasPrefix(got, `\\?\UNC\server\share\`) {
+	if got := extendedPath(longUNC); !strings.HasPrefix(got, `\\?\UNC\server\share\`) {
 		t.Fatalf("UNC path = %q, want \\\\?\\UNC\\ prefix", got)
 	}
 
 	prefixed := `\\?\C:\already-extended`
-	if got := ExtendedPath(prefixed); got != prefixed {
+	if got := extendedPath(prefixed); got != prefixed {
 		t.Fatalf("prefixed path = %q, want unchanged", got)
 	}
 }
@@ -74,7 +74,7 @@ func TestReadFileSharedLongPath(t *testing.T) {
 func TestWriteFileAtomicLongPathOverSharedHandle(t *testing.T) {
 	p := longWindowsStorePath(t, "store-世界-😀.json")
 	mustWriteWindowsStore(t, p, "old")
-	f := openWindowsReader(t, p, OpenShared)
+	f := openWindowsReader(t, p, openShared)
 	mustWriteWindowsStore(t, p, "new")
 	assertWindowsSnapshots(t, f, p, "old", "new")
 }
@@ -112,8 +112,8 @@ func TestIsOpenHandleReplaceErr(t *testing.T) {
 		{"wrapped link", &os.LinkError{Op: "rename", Old: "a", New: "b", Err: windows.ERROR_ACCESS_DENIED}, true},
 	}
 	for _, tc := range cases {
-		if got := IsOpenHandleReplaceErr(tc.err); got != tc.want {
-			t.Errorf("%s: fs.IsOpenHandleReplaceErr = %v, want %v", tc.name, got, tc.want)
+		if got := isOpenHandleReplaceErr(tc.err); got != tc.want {
+			t.Errorf("%s: fs.isOpenHandleReplaceErr = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
@@ -127,9 +127,9 @@ func TestRenameReplaceJoinsBothCauses(t *testing.T) {
 	openWindowsReader(t, dest, os.Open)
 	src := mustTempRenameSrc(t, "new")
 	want := blockedRenameCauses(t, src, dest)
-	err := RenameReplace(src, dest)
+	err := renameReplace(src, dest)
 	if err == nil {
-		t.Fatal("fs.RenameReplace succeeded over a reader without delete sharing")
+		t.Fatal("fs.renameReplace succeeded over a reader without delete sharing")
 	}
 	assertJoinedPair(t, err, want)
 	assertWindowsStoreContents(t, dest, "old")
@@ -137,11 +137,11 @@ func TestRenameReplaceJoinsBothCauses(t *testing.T) {
 }
 
 // Success after premise failure proves the POSIX fallback ran: MoveFileEx
-// alone refuses the held destination, so only fs.PosixRename can complete it.
+// alone refuses the held destination, so only fs.posixRename can complete it.
 func TestRenameReplaceUsesPosixFallbackOverSharedHandle(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "store.json")
 	mustWriteWindowsStore(t, dest, "old")
-	held := openWindowsReader(t, dest, OpenShared)
+	held := openWindowsReader(t, dest, openShared)
 	premise := mustTempRenameSrc(t, "new")
 	if err := os.Rename(premise, dest); err == nil {
 		t.Skip("premise failed: os.Rename replaced a held destination, env does not enforce share semantics")
@@ -150,8 +150,8 @@ func TestRenameReplaceUsesPosixFallbackOverSharedHandle(t *testing.T) {
 		t.Fatalf("remove premise source: %v", err)
 	}
 	src := mustTempRenameSrc(t, "new")
-	if err := RenameReplace(src, dest); err != nil {
-		t.Fatalf("fs.RenameReplace over shared handle: %v", err)
+	if err := renameReplace(src, dest); err != nil {
+		t.Fatalf("fs.renameReplace over shared handle: %v", err)
 	}
 	assertWindowsSnapshots(t, held, dest, "old", "new")
 }
@@ -161,8 +161,8 @@ func TestRenameReplaceHappyPathWithoutOpenHandle(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "store.json")
 	mustWriteWindowsStore(t, dest, "old")
 	src := mustTempRenameSrc(t, "new")
-	if err := RenameReplace(src, dest); err != nil {
-		t.Fatalf("fs.RenameReplace without open handle: %v", err)
+	if err := renameReplace(src, dest); err != nil {
+		t.Fatalf("fs.renameReplace without open handle: %v", err)
 	}
 	assertWindowsStoreContents(t, dest, "new")
 	if _, err := os.Stat(src); !os.IsNotExist(err) {
@@ -183,7 +183,7 @@ func mustTempRenameSrc(t *testing.T, contents string) string {
 func blockedRenameCauses(t *testing.T, src, dest string) []error {
 	t.Helper()
 	var causes []error
-	for _, rename := range []func(string, string) error{os.Rename, PosixRename} {
+	for _, rename := range []func(string, string) error{os.Rename, posixRename} {
 		err := rename(src, dest)
 		if !errors.Is(err, windows.ERROR_ACCESS_DENIED) && !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 			t.Fatalf("expected blocked rename, got %v", err)

@@ -30,8 +30,8 @@ var (
 	buildEnvErr error
 )
 
-// canonical resolves symlinks on the deepest existing ancestor, mirroring the
-// production fs helper without importing it (testutil must stay a leaf).
+// CanonicalPath resolves symlinks on the deepest existing ancestor, mirroring
+// the production fs helper without importing it (testutil must stay a leaf).
 func CanonicalPath(p string) string {
 	p = filepath.Clean(p)
 	if r, err := filepath.EvalSymlinks(p); err == nil {
@@ -130,9 +130,9 @@ func MustGit(t *testing.T, dir string, args ...string) string {
 	return out
 }
 
-// GitWorktrees returns git's worktree listing with all paths normalized to
+// gitWorktrees returns git's worktree listing with all paths normalized to
 // forward slashes, matching the format required for cross-platform comparisons.
-func GitWorktrees(t *testing.T, repo string) string {
+func gitWorktrees(t *testing.T, repo string) string {
 	t.Helper()
 	return filepath.ToSlash(MustGit(t, repo, "worktree", "list", "--porcelain"))
 }
@@ -143,7 +143,7 @@ func GitWorktrees(t *testing.T, repo string) string {
 // git itself always emits the long canonical form.
 func worktreeListed(t *testing.T, repo, wt string) (bool, string) {
 	t.Helper()
-	list := GitWorktrees(t, repo)
+	list := gitWorktrees(t, repo)
 	return strings.Contains(list, filepath.ToSlash(CanonicalPath(wt))), list
 }
 
@@ -225,8 +225,8 @@ func GitWorktreeAdd(t *testing.T, repo, path, branch, start string) {
 	MustGit(t, repo, "worktree", "add", "-b", branch, path, start)
 }
 
-// SandboxEnv carries the sandboxed home/agent dirs.
-type SandboxEnv struct {
+// sandboxEnv carries the sandboxed home/agent dirs.
+type sandboxEnv struct {
 	Home      string
 	AgentDir  string
 	ClaudeDir string
@@ -234,7 +234,7 @@ type SandboxEnv struct {
 
 // Sandbox isolates HOME/agent dirs and pins locale/timezone. On Windows
 // os.UserHomeDir reads USERPROFILE/HOMEDRIVE.
-func Sandbox(t *testing.T) SandboxEnv {
+func Sandbox(t *testing.T) sandboxEnv {
 	t.Helper()
 	home := t.TempDir()
 	agent := filepath.Join(home, "pi-agent")
@@ -250,7 +250,7 @@ func Sandbox(t *testing.T) SandboxEnv {
 	t.Setenv("CLAUDE_CONFIG_DIR", claude)
 	t.Setenv("TZ", "UTC")
 	t.Setenv("LC_ALL", "C")
-	return SandboxEnv{Home: home, AgentDir: agent, ClaudeDir: claude}
+	return sandboxEnv{Home: home, AgentDir: agent, ClaudeDir: claude}
 }
 
 // SettingsFile is the single SSOT for where config persists settings.
@@ -287,10 +287,10 @@ func ClaudeTranscript(wtPath string) string {
 		fmt.Sprintf("{\"type\":\"user\",\"cwd\":%q,\"message\":{\"role\":\"user\",\"content\":\"seed\"}}\n", wtPath)
 }
 
-// MkAgentSession writes one JSONL session header under a harness session
+// mkAgentSession writes one JSONL session header under a harness session
 // subdir, pins its mtime, and returns the file path. Callers pass the harness
 // config dir (e.g. harness.PiAgent.ConfigDir()) so this helper stays leaf.
-func MkAgentSession(t *testing.T, configDir, subdir, wtPath, dirName string, mtime time.Time) string {
+func mkAgentSession(t *testing.T, configDir, subdir, wtPath, dirName string, mtime time.Time) string {
 	t.Helper()
 	p := filepath.Join(configDir, subdir, dirName, dirName+".jsonl")
 	line := fmt.Sprintf("{\"id\":%q,\"cwd\":%q}\n", dirName, wtPath)
@@ -446,14 +446,14 @@ func AgentConfigDir(env string, rel ...string) string {
 // MkSession writes a Pi session header pointing at wtPath and pins its mtime.
 func MkSession(t *testing.T, wtPath, dirName string, mtime time.Time) string {
 	t.Helper()
-	return MkAgentSession(t, AgentConfigDir("PI_CODING_AGENT_DIR", ".pi", "agent"), "sessions", wtPath, dirName, mtime)
+	return mkAgentSession(t, AgentConfigDir("PI_CODING_AGENT_DIR", ".pi", "agent"), "sessions", wtPath, dirName, mtime)
 }
 
 // MkClaudeSession writes Claude metadata before the cwd-bearing conversation
 // record, matching transcripts where the first record cannot identify an owner.
 func MkClaudeSession(t *testing.T, wtPath, dirName string, mtime time.Time) string {
 	t.Helper()
-	return MkAgentSession(t, AgentConfigDir("CLAUDE_CONFIG_DIR", ".claude"), "projects", wtPath, dirName, mtime)
+	return mkAgentSession(t, AgentConfigDir("CLAUDE_CONFIG_DIR", ".claude"), "projects", wtPath, dirName, mtime)
 }
 
 // GitAdminDir resolves the per-worktree private admin dir ($GIT_DIR), mirroring
