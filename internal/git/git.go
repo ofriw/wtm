@@ -28,7 +28,7 @@ import (
 //	HEAD 0123456789012345678901234567890123456789
 //	branch refs/heads/locked
 //	locked user reason
-type GWorktree struct {
+type Worktree struct {
 	Path     string
 	HEAD     string // resolved commit; keys start-point matching in add.go
 	Branch   string // "" when detached or bare
@@ -38,7 +38,7 @@ type GWorktree struct {
 	Main     bool
 }
 
-func ApplyPorcelainField(cur *GWorktree, key, val string) {
+func applyPorcelainField(cur *Worktree, key, val string) {
 	if cur == nil {
 		return
 	}
@@ -56,7 +56,7 @@ func ApplyPorcelainField(cur *GWorktree, key, val string) {
 	}
 }
 
-func ParsePorcelainLine(line string, cur **GWorktree, out *[]GWorktree) {
+func parsePorcelainLine(line string, cur **Worktree, out *[]Worktree) {
 	line = strings.TrimRight(line, "\r")
 	if line == "" {
 		if *cur != nil {
@@ -70,18 +70,18 @@ func ParsePorcelainLine(line string, cur **GWorktree, out *[]GWorktree) {
 		if *cur != nil {
 			*out = append(*out, **cur)
 		}
-		*cur = &GWorktree{Path: val}
+		*cur = &Worktree{Path: val}
 		return
 	}
-	ApplyPorcelainField(*cur, key, val)
+	applyPorcelainField(*cur, key, val)
 }
 
-// ParseWorktrees is pure so the porcelain format lives here once.
-func ParseWorktrees(porcelain string) []GWorktree {
-	var out []GWorktree
-	var cur *GWorktree
+// parseWorktrees is pure so the porcelain format lives here once.
+func parseWorktrees(porcelain string) []Worktree {
+	var out []Worktree
+	var cur *Worktree
 	for _, line := range strings.Split(porcelain, "\n") {
-		ParsePorcelainLine(line, &cur, &out)
+		parsePorcelainLine(line, &cur, &out)
 	}
 	if cur != nil {
 		out = append(out, *cur)
@@ -110,12 +110,12 @@ func Run(dir string, args ...string) (string, error) {
 }
 
 // Worktrees lists all worktrees of the repo containing dir, main first.
-func Worktrees(dir string) ([]GWorktree, error) {
+func Worktrees(dir string) ([]Worktree, error) {
 	out, err := Run(dir, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, err
 	}
-	if wts := ParseWorktrees(out); len(wts) > 0 {
+	if wts := parseWorktrees(out); len(wts) > 0 {
 		return wts, nil
 	}
 	return nil, fmt.Errorf("no git worktrees found in %s", dir)
@@ -163,7 +163,7 @@ func TopLevel(dir string) (string, error) {
 // WorktreeAdd checks out branch at path. A new branch starts at baseRef with
 // --no-track, so a bare `git push` can never target the base branch. An attached
 // branch already exists: no -b and no --no-track, because git forbids --no-track
-// without -b and the branch must keep its configured Upstream.
+// without -b and the branch must keep its configured upstream.
 func WorktreeAdd(repoDir, path, branch, baseRef string, attach bool) error {
 	if !attach {
 		_, err := Run(repoDir, "worktree", "add", "--no-track", "-b", branch, path, baseRef)
@@ -219,11 +219,13 @@ func WorktreeLinkMissing(path string) bool {
 
 // WorktreeRepair re-creates missing/corrupt .git backlinks for the repo's
 // linked worktrees — the git-sanctioned way to make a broken worktree removable.
+// WorktreeRepair runs git worktree repair on the repo.
 func WorktreeRepair(repoDir string) error {
 	_, err := Run(repoDir, "worktree", "repair")
 	return err
 }
 
+// WorktreePrune runs git worktree prune on the repo.
 func WorktreePrune(repoDir string) error {
 	_, err := Run(repoDir, "worktree", "prune")
 	return err
@@ -256,10 +258,10 @@ func IsIgnored(dir, rel string) bool {
 	return cmd.Run() == nil
 }
 
-// RemoteDefaultRef returns the remote HEAD symref target, e.g.
+// remoteDefaultRef returns the remote HEAD symref target, e.g.
 // refs/remotes/origin/main; origin is preferred when several exist. Only local
 // refs are inspected — `git remote show` would hit the network.
-func RemoteDefaultRef(dir string) string {
+func remoteDefaultRef(dir string) string {
 	// Full %(refname): %(refname:short) shortens refs/remotes/<r>/HEAD to the
 	// bare remote name (git ref_rev_parse_rules ends with "refs/remotes/%.*s/HEAD"),
 	// which would hide which remote a HEAD belongs to and break the origin check.
@@ -283,7 +285,7 @@ func RemoteDefaultRef(dir string) string {
 	return best
 }
 
-func DefaultLocalCandidate(dir string) string {
+func defaultLocalCandidate(dir string) string {
 	for _, c := range []string{"main", "master", "develop", "trunk"} {
 		if RefExists(dir, "refs/heads/"+c) {
 			return c
@@ -310,14 +312,14 @@ func DefaultLocalCandidate(dir string) string {
 //  4. the main worktree's checked-out branch
 //  5. "main"
 func DefaultBranch(dir string) (name, remote string) {
-	if sym := RemoteDefaultRef(dir); sym != "" {
+	if sym := remoteDefaultRef(dir); sym != "" {
 		if rest := strings.TrimPrefix(sym, "refs/remotes/"); rest != sym {
 			if r, b, ok := strings.Cut(rest, "/"); ok && b != "" {
 				return b, r
 			}
 		}
 	}
-	return DefaultLocalCandidate(dir), ""
+	return defaultLocalCandidate(dir), ""
 }
 
 // BaseRefForDefault resolves the start-point for a new branch from an already
@@ -348,13 +350,13 @@ type Upstream struct {
 	Ref    string // refs/heads/feat
 }
 
-// Present reports whether an Upstream is configured; the zero value is "none".
-// A local-branch Upstream (branch.X.remote=".") also counts as Present: status
+// Present reports whether an upstream is configured; the zero value is "none".
+// A local-branch upstream (branch.X.remote=".") also counts as present: status
 // shows the configured truth, while gc deletes only what OnRemote() allows.
 func (u Upstream) Present() bool { return u.Remote != "" && u.Ref != "" }
 
-// OnRemote reports whether the Upstream branch lives on a git remote, i.e. is
-// safe to delete with push --delete. Remote "." is git's marker for an Upstream
+// OnRemote reports whether the upstream branch lives on a git remote, i.e. is
+// safe to delete with push --delete. Remote "." is git's marker for an upstream
 // that is another LOCAL branch, which a push-delete would destroy as a local
 // branch — gc must skip it, not "clean it up".
 func (u Upstream) OnRemote() bool { return u.Present() && u.Remote != "." }
@@ -362,7 +364,7 @@ func (u Upstream) OnRemote() bool { return u.Present() && u.Remote != "." }
 // Key identifies the push-delete target for dedup; tab cannot appear in a ref.
 func (u Upstream) Key() string { return u.Remote + "\t" + u.Ref }
 
-// BranchUpstreams maps each local branch to its configured Upstream in one
+// BranchUpstreams maps each local branch to its configured upstream in one
 // offline call. Tab separates fields because a refname can hold neither tab nor
 // newline; the %(upstream:*) atoms expand empty for a branch without one.
 func BranchUpstreams(dir string) (map[string]Upstream, error) {

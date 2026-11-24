@@ -40,7 +40,7 @@ func gitTestRepoRoot(t *testing.T, dir string) string {
 type parseCase struct {
 	name string
 	in   string
-	want []GWorktree
+	want []Worktree
 }
 
 func parseWorktreeCases() []parseCase {
@@ -51,7 +51,7 @@ func parseWorktreeCases() []parseCase {
 HEAD 1111111111111111111111111111111111111111
 branch refs/heads/main
 `,
-			want: []GWorktree{{Path: "/repo/main", HEAD: "1111111111111111111111111111111111111111", Branch: "main", Main: true}},
+			want: []Worktree{{Path: "/repo/main", HEAD: "1111111111111111111111111111111111111111", Branch: "main", Main: true}},
 		},
 		{
 			name: "main and linked, Main only on first",
@@ -63,7 +63,7 @@ worktree /repo/linked
 HEAD 2222222222222222222222222222222222222222
 branch refs/heads/feature
 `,
-			want: []GWorktree{
+			want: []Worktree{
 				{Path: "/repo/main", HEAD: "1111111111111111111111111111111111111111", Branch: "main", Main: true},
 				{Path: "/repo/linked", HEAD: "2222222222222222222222222222222222222222", Branch: "feature"},
 			},
@@ -74,7 +74,7 @@ branch refs/heads/feature
 HEAD 3333333333333333333333333333333333333333
 detached
 `,
-			want: []GWorktree{{Path: "/repo/detached", HEAD: "3333333333333333333333333333333333333333", Main: true}},
+			want: []Worktree{{Path: "/repo/detached", HEAD: "3333333333333333333333333333333333333333", Main: true}},
 		},
 		{
 			name: "bare",
@@ -82,7 +82,7 @@ detached
 HEAD 4444444444444444444444444444444444444444
 bare
 `,
-			want: []GWorktree{{Path: "/repo/bare", HEAD: "4444444444444444444444444444444444444444", Bare: true, Main: true}},
+			want: []Worktree{{Path: "/repo/bare", HEAD: "4444444444444444444444444444444444444444", Bare: true, Main: true}},
 		},
 		{
 			name: "locked without reason",
@@ -91,7 +91,7 @@ HEAD 5555555555555555555555555555555555555555
 branch refs/heads/locked
 locked
 `,
-			want: []GWorktree{{Path: "/repo/locked", HEAD: "5555555555555555555555555555555555555555", Branch: "locked", Locked: true, Main: true}},
+			want: []Worktree{{Path: "/repo/locked", HEAD: "5555555555555555555555555555555555555555", Branch: "locked", Locked: true, Main: true}},
 		},
 		{
 			name: "locked with reason",
@@ -100,7 +100,7 @@ HEAD 5555555555555555555555555555555555555555
 branch refs/heads/locked
 locked user reason
 `,
-			want: []GWorktree{{Path: "/repo/locked", HEAD: "5555555555555555555555555555555555555555", Branch: "locked", Locked: true, Main: true}},
+			want: []Worktree{{Path: "/repo/locked", HEAD: "5555555555555555555555555555555555555555", Branch: "locked", Locked: true, Main: true}},
 		},
 		{
 			name: "prunable",
@@ -109,12 +109,12 @@ HEAD 6666666666666666666666666666666666666666
 branch refs/heads/dead
 prunable gitdir file points to non-existent location
 `,
-			want: []GWorktree{{Path: "/repo/prunable", HEAD: "6666666666666666666666666666666666666666", Branch: "dead", Prunable: true, Main: true}},
+			want: []Worktree{{Path: "/repo/prunable", HEAD: "6666666666666666666666666666666666666666", Branch: "dead", Prunable: true, Main: true}},
 		},
 		{
 			name: "CRLF line endings",
 			in:   "worktree /repo/main\r\nHEAD 1\r\nbranch refs/heads/main\r\n\r\nworktree /repo/linked\r\nHEAD 2\r\nbranch refs/heads/x\r\n",
-			want: []GWorktree{
+			want: []Worktree{
 				{Path: "/repo/main", HEAD: "1", Branch: "main", Main: true},
 				{Path: "/repo/linked", HEAD: "2", Branch: "x"},
 			},
@@ -129,7 +129,7 @@ branch refs/heads/main
 
 
 `,
-			want: []GWorktree{{Path: "/repo/main", HEAD: "1111111111111111111111111111111111111111", Branch: "main", Main: true}},
+			want: []Worktree{{Path: "/repo/main", HEAD: "1111111111111111111111111111111111111111", Branch: "main", Main: true}},
 		},
 		{
 			name: "path containing spaces",
@@ -137,7 +137,7 @@ branch refs/heads/main
 HEAD 1111111111111111111111111111111111111111
 branch refs/heads/main
 `,
-			want: []GWorktree{{Path: "/repo/my main", HEAD: "1111111111111111111111111111111111111111", Branch: "main", Main: true}},
+			want: []Worktree{{Path: "/repo/my main", HEAD: "1111111111111111111111111111111111111111", Branch: "main", Main: true}},
 		},
 		{
 			name: "empty input yields nil",
@@ -150,8 +150,8 @@ branch refs/heads/main
 func TestParseWorktrees(t *testing.T) {
 	for _, tc := range parseWorktreeCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ParseWorktrees(tc.in); !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("ParseWorktrees(%q) = %#v, want %#v", tc.in, got, tc.want)
+			if got := parseWorktrees(tc.in); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("parseWorktrees(%q) = %#v, want %#v", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -241,8 +241,8 @@ func TestRemoteDefaultRef(t *testing.T) {
 			if tc.seed != nil {
 				tc.seed(t, repo)
 			}
-			if got := RemoteDefaultRef(repo); got != tc.want {
-				t.Fatalf("RemoteDefaultRef() = %q, want %q", got, tc.want)
+			if got := remoteDefaultRef(repo); got != tc.want {
+				t.Fatalf("remoteDefaultRef() = %q, want %q", got, tc.want)
 			}
 		})
 	}
