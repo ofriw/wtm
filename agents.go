@@ -566,9 +566,6 @@ type ownerRead struct {
 	err       error
 }
 
-// resolve reads owners in a bounded pool: the kernel and the disk, not the CPU,
-// bound this walk. Reads merge in candidate order, so the index and its
-// warnings never depend on completion order.
 // readOwners looks up owners in a bounded pool: the kernel and disk, not the
 // CPU, bound this walk. Reads stay in candidate order for the merge.
 func (s *sessionScan) readOwners(a agent, cands []sessionCandidate) []ownerRead {
