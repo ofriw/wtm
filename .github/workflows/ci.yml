@@ -83,7 +83,14 @@ jobs:
         if: matrix.runner == 'macos-15'
         env:
           WTM_REQUIRE_BTIME: "1"
-        run: go test -count=1 -run 'TestFileBirthTime|TestWorktreeCreated' .
+        run: |
+          # Fail when the -run pattern matches no tests: a rename would retire
+          # the btime proof silently (go test exits 0 with "[no tests to run]").
+          if [ -z "$(go test -list 'TestFileBirthTime|TestWorktreeCreated' .)" ]; then
+            echo "btime guard: -run pattern matched no tests; refusing to run" >&2
+            exit 1
+          fi
+          go test -count=1 -run 'TestFileBirthTime|TestWorktreeCreated' .
 
   # Tier 2: container golden filesystem diff, authoritative for integration.
   # Native arm64 (not QEMU) keeps this fast.
