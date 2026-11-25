@@ -15,13 +15,39 @@ import (
 const claudeAgent = "claude"
 
 // agentDirs maps a harness name to its config dir and session subdir. The
-// subdir literals mirror the harness agents' private sessionSubdir fields
-// (agents.go); the harness intentionally does not export them.
+// subdir constants are exported by the harness (agents.go) and pinned to the
+// agent descriptors by TestAgentSessionSubdirsMatchConstants, so the fixtures
+// cannot drift from the real session roots.
 func agentDirs(harnessName string) (string, string) {
 	if harnessName == claudeAgent {
 		return harness.ClaudeAgent.ConfigDir(), harness.ClaudeSessionSubdir
 	}
 	return harness.PiAgent.ConfigDir(), harness.PiSessionSubdir
+}
+
+// discoveryAgents is the explicit fixture matrix; the guard below pins it to the registry.
+var discoveryAgents = []string{"pi", "claude"}
+
+// nonHarnessCapabilities are registered integrations that are not harnesses.
+var nonHarnessCapabilities = map[string]bool{"chunkhound": true, "mcp": true}
+
+func TestDiscoveryAgentsMatchCapabilities(t *testing.T) {
+	registered := map[string]bool{}
+	for _, c := range core.Capabilities() {
+		registered[c.ID] = true
+	}
+	matrix := map[string]bool{}
+	for _, name := range discoveryAgents {
+		if !registered[name] {
+			t.Fatalf("fixture agent %q is not a registered capability", name)
+		}
+		matrix[name] = true
+	}
+	for id := range registered {
+		if !nonHarnessCapabilities[id] && !matrix[id] {
+			t.Fatalf("registered harness capability %q is not in the fixture matrix", id)
+		}
+	}
 }
 
 // safetySessionFor writes one session file under the harness's session root,
@@ -145,7 +171,7 @@ func stageFreshPermanentActivity(t *testing.T, path string) time.Time {
 }
 
 func TestIdleGCDiscoveryOlderFileEvidenceReachesFreshTempCheck(t *testing.T) {
-	for _, a := range []string{"pi", "claude"} {
+	for _, a := range discoveryAgents {
 		for _, kind := range []string{"unknown", "unreadable"} {
 			t.Run(a+"/"+kind, func(t *testing.T) {
 				repo, temp, permanent := discoveryEvidenceFixture(t)
@@ -170,7 +196,7 @@ func TestIdleGCDiscoveryOlderFileEvidenceReachesFreshTempCheck(t *testing.T) {
 }
 
 func TestIdleGCDiscoveryNewOrUnknownAgeEvidenceBlocksFreshTempCheck(t *testing.T) {
-	for _, a := range []string{"pi", "claude"} {
+	for _, a := range discoveryAgents {
 		for _, kind := range []string{"unknown", "unknown-age"} {
 			t.Run(a+"/"+kind, func(t *testing.T) {
 				repo, temp, permanent := discoveryEvidenceFixture(t)
@@ -189,7 +215,7 @@ func TestIdleGCDiscoveryNewOrUnknownAgeEvidenceBlocksFreshTempCheck(t *testing.T
 }
 
 func TestExplicitGCPathFailsClosedOnUnreadableSession(t *testing.T) {
-	for _, a := range []string{"pi", "claude"} {
+	for _, a := range discoveryAgents {
 		t.Run(a, func(t *testing.T) {
 			repo, temp, permanent := discoveryEvidenceFixture(t)
 			p := discoveryUnknownSession(t, a, "unreadable", TempTestTime.Add(-time.Hour))
@@ -239,7 +265,7 @@ func makeUnreadableDirectory(t *testing.T, dir string) {
 }
 
 func TestDisplayDiscoveryKeepsLenientSessionWarning(t *testing.T) {
-	for _, a := range []string{"pi", "claude"} {
+	for _, a := range discoveryAgents {
 		t.Run(a, func(t *testing.T) {
 			repo, _, permanent := discoveryEvidenceFixture(t)
 			p := discoveryUnknownSession(t, a, "unknown", TempTestTime)
