@@ -231,7 +231,7 @@ func legendStyle() lipgloss.Style { return lipgloss.NewStyle().Faint(true) }
 
 // printLegend writes explanatory lines below a table through the resolved
 // profile, so a legend dims on a color terminal and stays byte-clean when the
-// output is piped. Styling is skipped on NoTTY, matching printTable, so pipes,
+// output is piped. Styling is skipped on NoTTY, matching emitGrid, so pipes,
 // --json and goldens remain byte-stable.
 func printLegend(lines []string, colorMode string) {
 	profile := resolveColorProfile(colorMode)
@@ -248,7 +248,7 @@ func printLegend(lines []string, colorMode string) {
 // green, partial yellow, absent faint. Shape (via the shared markers) carries
 // the state; color only reinforces it.
 func groupedCellStyle(value string) string {
-	if value == "-" {
+	if value == dashValue {
 		return capStateStyle(capAbsent).Render(value)
 	}
 	tokens := strings.Fields(value)
@@ -264,14 +264,10 @@ func groupedCellStyle(value string) string {
 	return strings.Join(tokens, " ")
 }
 
-// printTable renders a width-fitted table. Deterministic output is a test
-// contract: the caller supplies the budget, and cells are sized
-// and middle-elided here — never by the table resizer, whose end-elision and
-// shrink-column choice we cannot observe or pin. Styles are applied only when
-// the resolved profile supports them; NoTTY output stays pure ASCII so pipes,
-// --json and goldens remain byte-stable.
-func printTable(headers []string, rows [][]string, colorMode string, render cellRenderer, rightAlign []string, budget int) {
-	headers, rows, widths, aligns := sizedGrid(headers, rows, budget, rightAlign)
+// emitGrid renders a pre-sized grid: style when the profile supports it, then
+// split and write. printStatusTable and the detail block all end
+// here, so every table shares one pipeline.
+func emitGrid(headers []string, rows [][]string, widths []int, aligns []lipgloss.Position, colorMode string, render cellRenderer) {
 	profile := resolveColorProfile(colorMode)
 	// A nil renderer renders plain text: the guard keeps that a no-op instead of
 	// relying on the profile to skip the call.
@@ -284,7 +280,7 @@ func printTable(headers []string, rows [][]string, colorMode string, render cell
 
 // printKeyValues renders a headerless two-column block: label, then value. It
 // shares renderTable's sizing, two-cell gutter, trimming and width budget with
-// printTable, so a key/value block lines up with the tables around it instead
+// emitGrid, so a key/value block lines up with the tables around it instead
 // of introducing a third layout. The first titleRows labels carry the title
 // style; the rest are faint; values stay plain except a non-value ("-"/
 // "unknown"), which recedes with faint. Styles apply after sizing and elision,
@@ -347,12 +343,14 @@ func styleKeyValues(rows [][]string, titleRows int) [][]string {
 }
 
 // sizedGrid resolves a grid against a width budget: columns are sized, then
-// middle-elided, and alignment is resolved from the plain headers before
-// elision so ANSI decoration can never change which columns are right-aligned.
-// Return order matches renderGrid's parameters, so renderGrid(sizedGrid(...))
-// composes.
+// laid out by layoutGrid.
 func sizedGrid(headers []string, rows [][]string, budget int, rightAlign []string) ([]string, [][]string, []int, []lipgloss.Position) {
-	widths := columnWidths(headers, rows, budget)
+	return layoutGrid(headers, rows, columnWidths(headers, rows, budget), rightAlign)
+}
+
+// layoutGrid is the shared drop/align/elide pipeline for a pre-sized grid;
+// sizedGrid and fittedGrid both end here, so one pipeline serves every table.
+func layoutGrid(headers []string, rows [][]string, widths []int, rightAlign []string) ([]string, [][]string, []int, []lipgloss.Position) {
 	headers, rows, widths = dropZeroColumns(headers, rows, widths)
 	aligns := columnAligns(headers, rightAlign)
 	headers, rows = elideCells(headers, rows, widths)

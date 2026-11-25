@@ -14,14 +14,17 @@ import (
 
 // detailFit is the breakdown block's width fit and its legend needs. One fit
 // serves the renderer and the legend pass, so the two cannot disagree about
-// what the block renders.
+// what the block renders. It carries the fitted widths, the summary drop
+// decision, and the token-group tokens flag, so no caller re-fits to answer a
+// kept-column or legend question.
 type detailFit struct {
-	cols    []worktreeColumn
-	rows    [][]string
+	tokenGroupFit
 	reasons estimateReasons
 	list    bool
 	partial bool
-	dropped bool
+	tokens  bool       // token group survives and has tokens (legend)
+	sum     [][]string // summary rows after hiding elided groups
+	hidden  [][]string // hidden summary label-groups, disclosed by the renderer
 }
 
 // fitDetailBlock fits the block at the budget silently; the caller discloses a
@@ -32,48 +35,75 @@ type detailFit struct {
 // so a column the block actually renders is never judged dropped here.
 func fitDetailBlock(cur worktree, now time.Time, budget int) detailFit {
 	var f detailFit
-	if !summaryCostElided(detailSummaryRows(cur, now), budget) {
+	summary := detailSummaryRows(cur, now)
+	f.hidden = summaryHiddenGroups(summary, budget)
+	f.sum = dropHiddenSummaryRows(summary, f.hidden)
+	if !groupHidden(f.hidden, detailCostLabel) {
 		f.reasons = f.reasons.merge(cur.cost().reasons())
 	}
 	if cur.Usage == nil {
 		return f
 	}
 	cols, rows := detailSchema(cur.Usage)
-	f.cols, f.rows, f.dropped = fitTokenGroupPlan(cols, rows, budget)
-	if costColumnKept(f.cols, f.rows, budget) {
+	f.tokenGroupFit = fitTokenGroupPlan(cols, rows, budget)
+	if keptAt(f.cols, f.widths, colCost.header) {
 		f.reasons = f.reasons.merge(modelsEstimated(cur.Usage))
 	}
-	f.list = columnKept(f.cols, f.rows, colList.header, budget)
-	f.partial = detailPartial(cur, f.cols, f.rows, now, budget)
+	f.list = keptAt(f.cols, f.widths, colList.header)
+	f.tokens = tokenGroupKept(f.cols) && detailHasTokens(cur.Usage)
+	f.partial = detailPartial(cur, f)
 	return f
+}
+
+// keptAt reports whether the named column survived the fit, straight from the
+// stored widths — no re-fit.
+func keptAt(cols []worktreeColumn, widths []int, header string) bool {
+	for i, c := range cols {
+		if c.header == header {
+			return widths[i] != 0
+		}
+	}
+	return false
+}
+
+// groupHidden reports whether any hidden summary group carries label.
+func groupHidden(groups [][]string, label string) bool {
+	for _, g := range groups {
+		if slices.Contains(g, label) {
+			return true
+		}
+	}
+	return false
 }
 
 // detailPartial reports whether the fitted detail block renders a partial
 // marker: the summary ACTIVE value, a surviving ratio row, a model time, or a
 // surviving token cell. A total loss renders only "unknown", so it needs no
-// dangling "~" legend.
-func detailPartial(cur worktree, cols []worktreeColumn, rows [][]string, now time.Time, budget int) bool {
+// dangling "~" legend. All decisions come from the single fit — hidden summary
+// groups and the fitted widths — so nothing is re-derived.
+func detailPartial(cur worktree, f detailFit) bool {
 	if cur.Usage == nil || !cur.Usage.partial {
 		return false
 	}
-	if detailSummaryPartial(cur, now, budget) {
+	if detailSummaryPartial(cur, f.hidden) {
 		return true
 	}
-	return detailModelPartial(cur.Usage, cols, rows, budget)
+	return detailModelPartial(cur.Usage, f.cols, f.widths)
 }
 
 // detailSummaryPartial reports a partial marker in the summary: the ACTIVE value
-// or a ratio row that survives the width fit.
-func detailSummaryPartial(cur worktree, now time.Time, budget int) bool {
+// or a ratio row that survives the width fit (via the stored hidden groups).
+func detailSummaryPartial(cur worktree, hidden [][]string) bool {
 	if _, marked := activeCellValue(cur); marked {
 		return true
 	}
-	return cur.Usage.tokens().ratiosDefined() && !summaryRatioHidden(detailSummaryRows(cur, now), budget)
+	return cur.Usage.tokens().ratiosDefined() && !groupHidden(hidden, detailRatioMeta[0].label)
 }
 
-// detailModelPartial reports a partial model row whose TIME or token cell survives.
-func detailModelPartial(u *worktreeUsage, cols []worktreeColumn, rows [][]string, budget int) bool {
-	timeKept := columnKept(cols, rows, colTime.header, budget)
+// detailModelPartial reports a partial model row whose TIME or token cell
+// survives, from the fitted widths.
+func detailModelPartial(u *worktreeUsage, cols []worktreeColumn, widths []int) bool {
+	timeKept := keptAt(cols, widths, colTime.header)
 	tokensKept := tokenGroupKept(cols)
 	for _, m := range u.mergedModels() {
 		if m.partial && ((timeKept && m.active() > 0) || (tokensKept && m.tokensKnown())) {
@@ -149,26 +179,32 @@ func printStatusDetail(wts []worktree, current string, now time.Time, colorMode 
 		return
 	}
 	fmt.Println()
-	printDetailSummary(*cur, now, colorMode, budget)
+	f := fitDetailBlock(*cur, now, budget)
+	printDetailSummary(f, colorMode, budget)
 	if cur.Usage == nil {
 		fmt.Println("no agent usage recorded")
 		return
 	}
 	fmt.Println()
-	printDetailTable(*cur, now, colorMode, budget)
+	printDetailTable(f, colorMode, budget)
 }
 
-// printDetailSummary prints the identity and measure rows above the breakdown.
-func printDetailSummary(cur worktree, now time.Time, colorMode string, budget int) {
-	printKeyValues(dropElidedSummaryRows(detailSummaryRows(cur, now), budget), detailTitleRows, colorMode, budget)
+// printDetailSummary prints the identity and measure rows above the breakdown,
+// from the single fit: the hidden summary groups are disclosed once here, then
+// the surviving rows render.
+func printDetailSummary(f detailFit, colorMode string, budget int) {
+	for _, group := range f.hidden {
+		warnHiddenColumns(group)
+	}
+	printKeyValues(f.sum, detailTitleRows, colorMode, budget)
 }
 
 // printDetailTable prints the fitted model rows and their legend. An activity-
 // only worktree has no model rows: a header-only grid and the width warning for
 // token columns it cannot render would both disclose nothing real, so only the
-// applicable legend prints.
-func printDetailTable(cur worktree, now time.Time, colorMode string, budget int) {
-	f := fitDetailBlock(cur, now, budget)
+// applicable legend prints. The grid renders from the fit's stored widths via
+// the shared pipeline, so it is byte-identical to the table path.
+func printDetailTable(f detailFit, colorMode string, budget int) {
 	if len(f.rows) == 0 {
 		printDetailLegend(f.reasons, f.list, f.partial, false, colorMode, budget)
 		return
@@ -176,8 +212,9 @@ func printDetailTable(cur worktree, now time.Time, colorMode string, budget int)
 	if f.dropped {
 		warnHiddenColumns(tokenColumnNames())
 	}
-	printTable(columnHeaders(f.cols), f.rows, colorMode, statusCell, columnRightAligns(f.cols), budget)
-	printDetailLegend(f.reasons, f.list, f.partial, tokenGroupKept(f.cols) && detailHasTokens(cur.Usage), colorMode, budget)
+	headers, rows, widths, aligns := fittedGrid(f.cols, f.rows, f.widths)
+	emitGrid(headers, rows, widths, aligns, colorMode, statusCellRenderer(columnRegistry()))
+	printDetailLegend(f.reasons, f.list, f.partial, f.tokens, colorMode, budget)
 }
 
 // tokenHeaderSet is the set of detail headers owned by the token group.
@@ -200,12 +237,23 @@ func tokenColumnNames() []string {
 	return names
 }
 
+// tokenGroupFit is the token group's fit verdict: surviving schema and rows,
+// fitted widths, and whether the group dropped whole.
+type tokenGroupFit struct {
+	cols    []worktreeColumn
+	rows    [][]string
+	widths  []int
+	dropped bool
+}
+
 // fitTokenGroupPlan is the token group's pure fit decision: the schema and
 // rows that survive (the group drops whole, so the grid stays index-aligned),
-// and whether anything was dropped. It is silent, so the renderer discloses
-// once and the legend pass can ask the same question without repeating the
-// disclosure.
-func fitTokenGroupPlan(cols []worktreeColumn, rows [][]string, budget int) ([]worktreeColumn, [][]string, bool) {
+// the fitted widths of the surviving schema, and whether anything was dropped.
+// It is silent, so the renderer discloses once and the legend pass can ask the
+// same question without repeating the disclosure. When the group drops, the
+// widths are re-fit on the surviving schema: dropping frees width, so a
+// survivor may grow.
+func fitTokenGroupPlan(cols []worktreeColumn, rows [][]string, budget int) tokenGroupFit {
 	widths := columnWidths(columnHeaders(cols), rows, budget)
 	token := tokenHeaderSet()
 	drop := false
@@ -213,10 +261,10 @@ func fitTokenGroupPlan(cols []worktreeColumn, rows [][]string, budget int) ([]wo
 		drop = drop || (token[c.header] && widths[i] == 0)
 	}
 	if !drop {
-		return cols, rows, false
+		return tokenGroupFit{cols: cols, rows: rows, widths: widths}
 	}
 	kept, out := withoutTokenGroup(cols, rows)
-	return kept, out, true
+	return tokenGroupFit{cols: kept, rows: out, widths: columnWidths(columnHeaders(kept), out, budget), dropped: true}
 }
 
 func withoutTokenGroup(cols []worktreeColumn, rows [][]string) ([]worktreeColumn, [][]string) {
@@ -318,31 +366,18 @@ func findWorktree(wts []worktree, path string) *worktree {
 	return nil
 }
 
-// dropElidedSummaryRows drops the summary rows the fitted value column cannot
-// hold whole: the cost row alone, and the ratio group as a unit. A middle-cut
-// number reads as a wrong one, and a partial set of shares reads as arbitrary,
-// so each drop is disclosed on stderr instead of rendered elided.
-func dropElidedSummaryRows(rows [][]string, budget int) [][]string {
-	groups := summaryHiddenGroups(rows, budget)
+// dropHiddenSummaryRows drops the summary rows the fitted value column cannot
+// hold whole: the cost row alone, and the ratio group as a unit. It is silent;
+// the renderer discloses the dropped groups once. A middle-cut number reads as
+// a wrong one, and a partial set of shares reads as arbitrary.
+func dropHiddenSummaryRows(rows [][]string, groups [][]string) [][]string {
 	var hidden []string
 	for _, group := range groups {
-		warnHiddenColumns(group)
 		hidden = append(hidden, group...)
 	}
 	return slices.DeleteFunc(slices.Clone(rows), func(row []string) bool {
 		return slices.Contains(hidden, row[0])
 	})
-}
-
-// summaryRatioHidden reports whether the ratio group is hidden by the summary's
-// width fit, so the detail legend never explains a marker that cannot render.
-func summaryRatioHidden(rows [][]string, budget int) bool {
-	for _, group := range summaryHiddenGroups(rows, budget) {
-		if slices.Contains(group, detailRatioMeta[0].label) {
-			return true
-		}
-	}
-	return false
 }
 
 // summaryHiddenGroups is the shared, silent decision for rendering and legends.
@@ -388,18 +423,6 @@ func summaryValueElided(rows [][]string, label string, fitted int) bool {
 	for _, r := range rows {
 		if r[0] == label {
 			return dispWidth(r[1]) > fitted
-		}
-	}
-	return false
-}
-
-// summaryCostElided reports whether the summary's fitted value column cannot
-// hold the cost value whole. A middle-cut pair reads as a wrong number, so the
-// caller hides the row instead of eliding it.
-func summaryCostElided(rows [][]string, budget int) bool {
-	for _, group := range summaryHiddenGroups(rows, budget) {
-		if slices.Contains(group, detailCostLabel) {
-			return true
 		}
 	}
 	return false

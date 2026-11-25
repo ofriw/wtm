@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"charm.land/lipgloss/v2"
 )
 
 // status_table.go — the status table: the column registry and cell grammar,
@@ -383,9 +385,19 @@ func withListColumn(cols []worktreeColumn, show bool) []worktreeColumn {
 	return append(append(out, colList), cols[i+1:]...)
 }
 
-func printStatusTable(cols []worktreeColumn, wts []worktree, now time.Time, ttl time.Duration, colorMode string, budget int) {
-	ctx := columnContext{now: now, ttl: ttl}
-	printTable(columnHeaders(cols), gridRows(cols, wts, ctx), colorMode, statusCell, columnRightAligns(cols), budget)
+// printStatusTable renders the fitted status table from one fit. The caller
+// computes the fit once and passes it to both this renderer and the legend, so
+// grid projection and column sizing happen once and the legend explains exactly
+// the columns that render. Styling and elision follow the same pipeline as
+// emitGrid, so output is byte-identical to the un-shared path.
+func printStatusTable(fit tableFit, colorMode string) {
+	headers, rows, widths, aligns := fittedGrid(fit.cols, fit.rows, fit.widths)
+	emitGrid(headers, rows, widths, aligns, colorMode, statusCellRenderer(columnRegistry()))
+}
+
+// fittedGrid lays out a precomputed fit through the shared layoutGrid pipeline.
+func fittedGrid(cols []worktreeColumn, rows [][]string, widths []int) ([]string, [][]string, []int, []lipgloss.Position) {
+	return layoutGrid(columnHeaders(cols), rows, widths, columnRightAligns(cols))
 }
 
 // costLegend is the disclosure the rendered cost columns need: the "~"
@@ -399,28 +411,46 @@ type costLegend struct {
 	partial      bool
 }
 
-// costLegendNeeded reports what the table-level cost disclosure must explain.
-// It reuses the same width fit as the renderer, so a dropped column cannot leave
-// a legend with nothing to explain. The detail block's legend is computed by
-// printStatusDetail from the same fit it renders with, so no detail fields are
-// needed here.
-func costLegendNeeded(cols []worktreeColumn, wts []worktree, now time.Time, ttl time.Duration, budget int) costLegend {
-	var l costLegend
-	l.table(cols, wts, columnContext{now: now, ttl: ttl}, budget)
-	return l
+// tableFit is the status table's width fit plus its legend needs. One fit
+// serves the renderer and the legend pass, so the two cannot disagree about
+// what the table renders.
+type tableFit struct {
+	cols    []worktreeColumn // the schema the fit resolved
+	rows    [][]string       // projected rows (aligned to cols)
+	widths  []int            // fitted widths; 0 means the column dropped
+	reasons estimateReasons  // estimate reasons among the visible cost cells
+	list    bool             // the LIST column survives
+	partial bool             // a partial "~" ACTIVE marker renders
 }
 
-// table folds the status table's needs in: the reasons its rendered cells carry
-// and its LIST column, when the width fit keeps it.
-func (l *costLegend) table(cols []worktreeColumn, wts []worktree, ctx columnContext, budget int) {
-	rows := gridRows(cols, wts, ctx)
-	if costColumnKept(cols, rows, budget) {
+// fitTable fits the status schema once: project the rows, size the columns,
+// then fold the legend needs into the same result. Callers pass one fit to
+// both the renderer and the legend, so a dropped column cannot leave a legend
+// with nothing to explain.
+func fitTable(cols []worktreeColumn, wts []worktree, ctx columnContext, budget int) tableFit {
+	var f tableFit
+	f.cols = cols
+	f.rows = gridRows(cols, wts, ctx)
+	f.widths = columnWidths(columnHeaders(cols), f.rows, budget)
+	if f.kept(colCost.header) {
 		for _, w := range wts {
-			l.tableReasons = l.tableReasons.merge(w.cost().reasons())
+			f.reasons = f.reasons.merge(w.cost().reasons())
 		}
 	}
-	l.list = columnKept(cols, rows, colList.header, budget)
-	l.partial = columnKept(cols, rows, colActive.header, budget) && anyPartialActive(wts)
+	f.list = f.kept(colList.header)
+	f.partial = f.kept(colActive.header) && anyPartialActive(wts)
+	return f
+}
+
+// kept reports whether the named column survived the width fit. It delegates
+// to keptAt, the single kept-column implementation shared with the detail block.
+func (f tableFit) kept(header string) bool {
+	return keptAt(f.cols, f.widths, header)
+}
+
+// legend narrows the fit to the cost disclosure it needs.
+func (f tableFit) legend() costLegend {
+	return costLegend{tableReasons: f.reasons, list: f.list, partial: f.partial}
 }
 
 // anyPartialActive reports whether any table row renders a partial "~" ACTIVE
@@ -429,24 +459,6 @@ func anyPartialActive(wts []worktree) bool {
 	for _, w := range wts {
 		if _, marked := activeCellValue(w); marked {
 			return true
-		}
-	}
-	return false
-}
-
-// costColumnKept reports whether the COST column survives the width fit, so a
-// caller can know whether a cost cell will actually render.
-func costColumnKept(cols []worktreeColumn, rows [][]string, budget int) bool {
-	return columnKept(cols, rows, colCost.header, budget)
-}
-
-// columnKept reports whether a named column survives the width fit, so a caller
-// can know whether that column's cells (and any legend explaining them) render.
-func columnKept(cols []worktreeColumn, rows [][]string, header string, budget int) bool {
-	widths := columnWidths(columnHeaders(cols), rows, budget)
-	for i, c := range cols {
-		if c.header == header {
-			return widths[i] != 0
 		}
 	}
 	return false

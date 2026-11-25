@@ -45,11 +45,13 @@ func statusProgressOptions(g *globals) progressOptions {
 }
 
 // renderStatus prints the table, its legend then the detail block in that order.
+// One fit serves the renderer and the legend, so both describe the same grid.
 func renderStatus(ws workspace, wide bool, now time.Time, current, colorMode string) {
 	budget := widthBudget()
 	cols := statusSchema(wide, ws.wts)
-	printStatusTable(cols, ws.wts, now, ws.ttl, colorMode, budget)
-	printCostLegend(costLegendNeeded(cols, ws.wts, now, ws.ttl, budget), colorMode, budget)
+	fit := fitTable(cols, ws.wts, columnContext{now: now, ttl: ws.ttl}, budget)
+	printStatusTable(fit, colorMode)
+	printCostLegend(fit.legend(), colorMode, budget)
 	printStatusDetail(ws.wts, current, now, colorMode, budget)
 }
 

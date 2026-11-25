@@ -53,7 +53,7 @@ func TestExplicitRenderBudgetSurvivesCapture(t *testing.T) {
 	for _, budget := range []int{0, 20, 80} {
 		render := func() {
 			rows := [][]string{{"path", "/a/long/checkout/path"}}
-			printTable([]string{"LABEL", "VALUE"}, rows, colorNever, nil, nil, budget)
+			emitSizedGrid([]string{"LABEL", "VALUE"}, rows, colorNever, nil, nil, budget)
 			printKeyValues(rows, 1, colorNever, budget)
 		}
 		want := captureStdout(t, render)
@@ -104,9 +104,10 @@ func TestExplicitBudgetSurvivesCapture(t *testing.T) {
 	wts := []worktree{{Path: "/with", Usage: estimatedUsage()}}
 	cols := statusSchema(false, wts)
 	withStdout(t, slave, func() {
-		before := costLegendNeeded(cols, wts, at(0), 10*time.Hour, 0)
+		ctx := columnContext{now: at(0), ttl: 10 * time.Hour}
+		before := fitTable(cols, wts, ctx, 0).legend()
 		captureStdout(t, func() {
-			after := costLegendNeeded(cols, wts, at(0), 10*time.Hour, 0)
+			after := fitTable(cols, wts, ctx, 0).legend()
 			if before != after || !after.tableReasons.any() {
 				t.Fatalf("capture changed explicit unbounded layout: before=%+v after=%+v", before, after)
 			}

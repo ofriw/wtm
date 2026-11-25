@@ -188,6 +188,47 @@ func TestStatusCostLegend(t *testing.T) {
 	}
 }
 
+// TestLegendFlagsEqualRendered pins the renderer/legend single-fit contract: the
+// legend printed under the table must explain exactly what the table rendered. A
+// clause the renderer cannot show (or silence beside a rendered marker) would
+// re-open the mis-disclosure this fit was built to close.
+func TestLegendFlagsEqualRendered(t *testing.T) {
+	est := worktree{Path: "/est", Usage: estimatedUsage()}
+	list := worktree{Path: "/sub", Usage: subscriptionUsage(at(0), 41.20)}
+	partial := worktree{Path: "/mix", Usage: &worktreeUsage{
+		partial: true,
+		harnesses: map[string]*harnessUsage{"pi": {
+			partial: true,
+			spans:   []span{{start: at(0), end: at(10)}},
+			models: map[string]*modelUsage{"m": {
+				partial: true,
+				spans:   []span{{start: at(0), end: at(10)}},
+			}},
+		}},
+	}}
+	for _, budget := range []int{0, 10, 40} {
+		wts := []worktree{est, list, partial}
+		fit := fitTable(statusSchema(false, wts), wts, columnContext{now: at(0), ttl: 10 * time.Hour}, budget)
+		tableOut := captureStdout(t, func() { captureStderr(t, func() { printStatusTable(fit, colorNever) }) })
+		legendOut := captureStdout(t, func() { printCostLegend(fit.legend(), colorNever, budget) })
+		header, _, _ := strings.Cut(tableOut, "\n")
+		costRendered := strings.Contains(header, colCost.header)
+		listRendered := strings.Contains(header, colList.header)
+		activeRendered := strings.Contains(header, colActive.header)
+		estimateMarker := strings.Contains(tableOut, "~$")
+		partialMarker := strings.Count(tableOut, "~") > strings.Count(tableOut, "~$")
+		if got := strings.Contains(legendOut, listLegend.text); got != listRendered {
+			t.Errorf("budget %d: list legend=%v, LIST rendered=%v\n%s", budget, got, listRendered, tableOut)
+		}
+		if got := strings.Contains(legendOut, estimateLabel); got != (costRendered && estimateMarker) {
+			t.Errorf("budget %d: estimate legend=%v, COST estimate rendered=%v\n%s", budget, got, costRendered && estimateMarker, tableOut)
+		}
+		if got := strings.Contains(legendOut, partialLabel); got != (activeRendered && partialMarker) {
+			t.Errorf("budget %d: partial legend=%v, ACTIVE partial rendered=%v\n%s", budget, got, activeRendered && partialMarker, tableOut)
+		}
+	}
+}
+
 // TestEstimateLegendNeededFollowsRenderedCells pins the anti-dangle rule: the
 // legend is needed only when a "~" cell actually renders, so a dropped COST
 // column suppresses it. The estimated worktree is not the current one, so only
@@ -195,10 +236,10 @@ func TestStatusCostLegend(t *testing.T) {
 func TestCostLegendNeededFollowsRenderedCells(t *testing.T) {
 	with := worktree{Path: "/with", Usage: estimatedUsage()}
 	cols := statusSchema(false, []worktree{with})
-	if r := costLegendNeeded(cols, []worktree{with}, at(0), 10*time.Hour, 0); !r.tableReasons.any() {
+	if r := fitTable(cols, []worktree{with}, columnContext{now: at(0), ttl: 10 * time.Hour}, 0).legend(); !r.tableReasons.any() {
 		t.Fatal("an estimated table total must ask for the legend")
 	}
-	if r := costLegendNeeded(cols, []worktree{with}, at(0), 10*time.Hour, 5); r.tableReasons.any() {
+	if r := fitTable(cols, []worktree{with}, columnContext{now: at(0), ttl: 10 * time.Hour}, 5).legend(); r.tableReasons.any() {
 		t.Fatal("a dropped COST column must not ask for the legend")
 	}
 }
@@ -238,7 +279,7 @@ func TestCostLegendSelectivity(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w := worktree{Path: "/with", Usage: pairUsage(tc.pair)}
-			r := costLegendNeeded(cols, []worktree{w}, at(0), 10*time.Hour, 0).tableReasons
+			r := fitTable(cols, []worktree{w}, columnContext{now: at(0), ttl: 10 * time.Hour}, 0).legend().tableReasons
 			if r.cache != tc.wantCache || r.overage != tc.wantOver {
 				t.Fatalf("reasons = %+v, want cache=%v overage=%v", r, tc.wantCache, tc.wantOver)
 			}
@@ -259,7 +300,7 @@ func TestCostLegendSelectivity(t *testing.T) {
 		both := overageEst
 		both.list = cacheEst
 		w := worktree{Path: "/with", Usage: pairUsage(both)}
-		r := costLegendNeeded(cols, []worktree{w}, at(0), 10*time.Hour, 0).tableReasons
+		r := fitTable(cols, []worktree{w}, columnContext{now: at(0), ttl: 10 * time.Hour}, 0).legend().tableReasons
 		if !r.cache || !r.overage {
 			t.Fatalf("reasons = %+v, want both", r)
 		}
@@ -532,7 +573,7 @@ func TestCostLegendSplitsTableAndDetail(t *testing.T) {
 	env := sandbox(t)
 	tableWT := worktree{Path: filepath.Join(env.Home, "wt-table"), Usage: estimatedUsage()}
 	cols := statusSchema(false, []worktree{tableWT})
-	l := costLegendNeeded(cols, []worktree{tableWT}, now, 10*time.Hour, 0)
+	l := fitTable(cols, []worktree{tableWT}, columnContext{now: now, ttl: 10 * time.Hour}, 0).legend()
 	if !l.tableReasons.any() {
 		t.Fatal("estimated table total must set tableReasons")
 	}
@@ -900,7 +941,7 @@ func TestStatusPartialLegendNeedsRenderedMarker(t *testing.T) {
 	}
 	lostWts := []worktree{lost}
 	lostCols := statusSchema(false, lostWts)
-	lostLegend := costLegendNeeded(lostCols, lostWts, at(0), 0, 0)
+	lostLegend := fitTable(lostCols, lostWts, columnContext{now: at(0)}, 0).legend()
 	if lostLegend.partial {
 		t.Error("table legend must not print a partial clause without a marker")
 	}
@@ -931,7 +972,7 @@ func TestStatusPartialLegendNeedsRenderedMarker(t *testing.T) {
 		t.Error("a readable partial span must claim the ACTIVE marker")
 	}
 	mixedCols := statusSchema(false, mixedWts)
-	mixedLegend := costLegendNeeded(mixedCols, mixedWts, at(0), 0, 0)
+	mixedLegend := fitTable(mixedCols, mixedWts, columnContext{now: at(0)}, 0).legend()
 	if !mixedLegend.partial {
 		t.Error("table legend must explain the rendered partial marker")
 	}

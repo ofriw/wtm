@@ -16,6 +16,14 @@ import (
 
 func statusHeaders() []string { return columnHeaders(statusColumns) }
 
+// emitSizedGrid renders a width-fitted table through the production pipeline; it
+// replaces the deleted printTable as the test-only convenience for asserting
+// rendered table bytes.
+func emitSizedGrid(headers []string, rows [][]string, colorMode string, render cellRenderer, rightAlign []string, budget int) {
+	h, r, w, a := sizedGrid(headers, rows, budget, rightAlign)
+	emitGrid(h, r, w, a, colorMode, render)
+}
+
 func TestWidthBudget(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -380,7 +388,7 @@ func TestPrintTableRightAlign(t *testing.T) {
 	headers := []string{"A", "BB"}
 	rows := [][]string{{"x", "y"}}
 	// colorNever is NoTTY and the renderer is nil, so the table renders plain.
-	out := captureStdout(t, func() { printTable(headers, rows, colorNever, nil, []string{"BB"}, 0) })
+	out := captureStdout(t, func() { emitSizedGrid(headers, rows, colorNever, nil, []string{"BB"}, 0) })
 	want := "A  BB\nx   y\n"
 	if out != want {
 		t.Fatalf("right-aligned table = %q, want %q", out, want)

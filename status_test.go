@@ -438,10 +438,10 @@ func TestDisplayPath(t *testing.T) {
 func TestPrintTable(t *testing.T) {
 	headers := []string{"A", "BB"}
 	rows := [][]string{{"x", "y"}, {"long", "z"}}
-	out := captureStdout(t, func() { printTable(headers, rows, colorAuto, nil, nil, 0) })
+	out := captureStdout(t, func() { emitSizedGrid(headers, rows, colorAuto, nil, nil, 0) })
 	want := "A     BB\nx     y\nlong  z\n"
 	if out != want {
-		t.Fatalf("printTable = %q, want %q", out, want)
+		t.Fatalf("emitSizedGrid = %q, want %q", out, want)
 	}
 }
 
@@ -519,15 +519,15 @@ func TestWideColumnsShrinkable(t *testing.T) {
 	}
 }
 
-// TestRenderGridMatchesPrintTable pins the extraction: printTable's bytes must
+// TestRenderGridMatchesEmitGrid pins the extraction: emitGrid's bytes must
 // equal the shared grid engine's header+body rejoined under a no-color profile.
-func TestRenderGridMatchesPrintTable(t *testing.T) {
+func TestRenderGridMatchesEmitGrid(t *testing.T) {
 	headers := []string{"A", "BB", "CCC"}
 	rows := [][]string{{"x", "yy", "zzz"}, {"longer", "y", "z"}}
-	out := captureStdout(t, func() { printTable(headers, rows, colorNever, nil, []string{"CCC"}, 0) })
+	out := captureStdout(t, func() { emitSizedGrid(headers, rows, colorNever, nil, []string{"CCC"}, 0) })
 	header, body := renderGrid(sizedGrid(headers, rows, 0, []string{"CCC"}))
 	if got := gridString(header, body) + "\n"; got != out {
-		t.Fatalf("renderGrid = %q, printTable = %q", got, out)
+		t.Fatalf("renderGrid = %q, emitSizedGrid = %q", got, out)
 	}
 }
 
@@ -542,7 +542,9 @@ func TestPrintStatusTableFits(t *testing.T) {
 		Upstream: upstream{Short: "origin/feature/a-rather-long-branch-name", Remote: "origin", Ref: "refs/heads/x"},
 		Caps:     map[string]capState{"chunkhound": capPresent, "mcp": capPresent},
 	}}
-	out := captureStdout(t, func() { printStatusTable(statusColumns, wts, at(0), 10*time.Hour, colorNever, 80) })
+	out := captureStdout(t, func() {
+		printStatusTable(fitTable(statusColumns, wts, columnContext{now: at(0), ttl: 10 * time.Hour}, 80), colorNever)
+	})
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		if w := dispWidth(line); w > 80 {
 			t.Errorf("line exceeds 80 cells: %d\n%q", w, line)
@@ -585,7 +587,7 @@ func TestStatusNarrowKeepsCostColumns(t *testing.T) {
 			var errOut string
 			out := captureStdout(t, func() {
 				errOut = captureStderr(t, func() {
-					printStatusTable(statusColumns, wts, now, 10*time.Hour, colorNever, width)
+					printStatusTable(fitTable(statusColumns, wts, columnContext{now: now, ttl: 10 * time.Hour}, width), colorNever)
 				})
 			})
 			headerLine, _, _ := strings.Cut(out, "\n")
@@ -666,7 +668,7 @@ func TestStatusNarrowKeepsProvenPrices(t *testing.T) {
 					var errOut string
 					out := captureStdout(t, func() {
 						errOut = captureStderr(t, func() {
-							printStatusTable(cols, wts, now, 10*time.Hour, colorNever, width)
+							printStatusTable(fitTable(cols, wts, columnContext{now: now, ttl: 10 * time.Hour}, width), colorNever)
 						})
 					})
 					for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
@@ -741,7 +743,7 @@ func TestStatusNarrowWidthSweep(t *testing.T) {
 			var errOut string
 			out := captureStdout(t, func() {
 				errOut = captureStderr(t, func() {
-					printStatusTable(cols, wts, now, 10*time.Hour, colorNever, width)
+					printStatusTable(fitTable(cols, wts, columnContext{now: now, ttl: 10 * time.Hour}, width), colorNever)
 				})
 			})
 			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
@@ -822,7 +824,7 @@ func TestTokenGroupDisclosurePrintsOnce(t *testing.T) {
 	wts := []worktree{cur}
 	errOut := captureStderr(t, func() {
 		captureStdout(t, func() {
-			costLegendNeeded(statusSchema(false, wts), wts, now, 10*time.Hour, 40)
+			fitTable(statusSchema(false, wts), wts, columnContext{now: now, ttl: 10 * time.Hour}, 40).legend()
 			printStatusDetail(wts, cur.Path, now, colorNever, 40)
 		})
 	})
