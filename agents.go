@@ -905,6 +905,50 @@ func deeperWorktree(cwd, root string, wts []worktree) bool {
 	return false
 }
 
+// worktreePartitions assigns every session cwd to its deepest owning worktree,
+// computed once per run instead of re-scanning for every harness check and
+// worktree fold.
+type worktreePartitions map[string][]sessionRef
+
+// partitionSessions maps each indexed cwd to the deepest worktree that owns
+// it. Exact cwd==root refs keep index order; descendant refs follow in cwd
+// order, so each partition matches sessionsForWorktree's per-fold result.
+func partitionSessions(wts []worktree, idx sessionIndex) worktreePartitions {
+	roots := make([]string, len(wts))
+	for i, w := range wts {
+		roots[i] = canonical(w.Path)
+	}
+	parts := make(worktreePartitions, len(roots))
+	rootSet := make(map[string]bool, len(roots))
+	for _, root := range roots {
+		parts[root] = slices.Clone(idx[root])
+		rootSet[root] = true
+	}
+	desc := make(map[string][]string, len(roots))
+	for cwd := range idx {
+		if rootSet[cwd] {
+			continue
+		}
+		owner := ""
+		for _, root := range roots {
+			if pathInside(cwd, root) && len(root) > len(owner) {
+				owner = root
+			}
+		}
+		if owner != "" {
+			desc[owner] = append(desc[owner], cwd)
+		}
+	}
+	for _, root := range roots {
+		cwds := desc[root]
+		slices.Sort(cwds)
+		for _, cwd := range cwds {
+			parts[root] = append(parts[root], idx[cwd]...)
+		}
+	}
+	return parts
+}
+
 // parseWorktreeSessions reads every owned session, remembering unreadable files
 // and dropped records so the fold can taint the total.
 func parseWorktreeSessions(refs []sessionRef, cat catalog, proofs *proofCache) ([]parsedSession, usageLoss) {
@@ -1290,12 +1334,12 @@ func agentByName(name string) (agent, bool) {
 	return agent{}, false
 }
 
-// hasHarness reports whether any of the given worktrees owns a session from
-// the named harness. Status uses it to load the catalog only when it can be
-// needed, so a Pi-only repo never touches the network.
-func (idx sessionIndex) hasHarness(wts []worktree, name string) bool {
-	for _, w := range wts {
-		for _, r := range sessionsForWorktree(w.Path, wts, idx) {
+// hasHarness reports whether any part owns a session from the named harness.
+// Status uses it to load the catalog only when it can be needed, so a Pi-only
+// repo never touches the network.
+func (p worktreePartitions) hasHarness(name string) bool {
+	for _, refs := range p {
+		for _, r := range refs {
 			if r.harness == name {
 				return true
 			}

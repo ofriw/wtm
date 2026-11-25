@@ -61,6 +61,34 @@ func TestSessionsForWorktreeIgnoresSiblingPrefix(t *testing.T) {
 	}
 }
 
+// TestPartitionSessionsMatchesPerFold pins that the run-once deepest-owner
+// partition assigns every worktree exactly the sessions sessionsForWorktree
+// would return per fold, so the status path cannot drift from the nested
+// checkout rules.
+func TestPartitionSessionsMatchesPerFold(t *testing.T) {
+	base := t.TempDir()
+	root := canonical(filepath.Join(base, "repo"))
+	sub := canonical(filepath.Join(root, "website"))
+	nested := canonical(filepath.Join(root, "nested"))
+	deep := canonical(filepath.Join(nested, "deep"))
+	other := canonical(filepath.Join(base, "other"))
+	idx := sessionIndex{
+		root:   {{path: "root"}},
+		sub:    {{path: "sub"}},
+		nested: {{path: "nested"}},
+		deep:   {{path: "deep"}},
+		other:  {{path: "other"}},
+	}
+	wts := []worktree{{Path: root}, {Path: nested}}
+	parts := partitionSessions(wts, idx)
+	for _, w := range wts {
+		r := canonical(w.Path)
+		if got, want := refPaths(parts[r]), refPaths(sessionsForWorktree(r, wts, idx)); !slices.Equal(got, want) {
+			t.Errorf("partition[%s] = %v, want %v", r, got, want)
+		}
+	}
+}
+
 // piTurnBody is one Pi session with a prompt at start and a stop at end, so its
 // causal block is exactly the interval and its billed cost is the given value.
 func piTurnBody(cwd, start, end string, cost float64) string {
