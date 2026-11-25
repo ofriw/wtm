@@ -50,9 +50,11 @@ func assertPiEvent(t *testing.T, e usageEvent, model string, cost *float64) {
 	}
 }
 
-// TestPiUsageReadErrorReturnsEmpty pins the same policy as Claude: a failed
-// read yields no result, so a partial session can never read as complete.
-func TestPiUsageReadErrorReturnsEmpty(t *testing.T) {
+// TestPiUsageReadErrorKeepsCompletedRecords pins the record-level loss contract:
+// an interrupted read (io.ErrUnexpectedEOF) keeps the completed records and the
+// caller taints only the tail, so a partial session never reads as complete but
+// the readable cost survives.
+func TestPiUsageReadErrorKeepsCompletedRecords(t *testing.T) {
 	good := `{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}`
 	r := bufio.NewReader(io.MultiReader(
 		strings.NewReader(good+"\n"),
@@ -62,22 +64,26 @@ func TestPiUsageReadErrorReturnsEmpty(t *testing.T) {
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
 	}
-	if parsed.events != nil || parsed.activity != nil || parsed.dropped != 0 {
-		t.Fatalf("parsed = %+v, want the zero result", parsed)
+	if len(parsed.events) != 1 {
+		t.Fatalf("completed record lost: got %+v", parsed)
 	}
+	assertPiEvent(t, parsed.events[0], "m", fptr(1))
 }
 
-// TestPiUsageTruncatedFinalRecordFails pins the same EOF contract for Pi.
-func TestPiUsageTruncatedFinalRecordFails(t *testing.T) {
+// TestPiUsageTruncatedFinalRecordKeepsCompleted pins the tail-loss contract for
+// Pi: a record cut before its newline keeps the completed records; only the cut
+// tail is lost, so the caller taints the total partial.
+func TestPiUsageTruncatedFinalRecordKeepsCompleted(t *testing.T) {
 	good := `{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}`
 	cut := `{"type":"message","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"hel`
 	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(good + "\n" + cut)))
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
 	}
-	if parsed.events != nil || parsed.activity != nil || parsed.dropped != 0 {
-		t.Fatalf("parsed = %+v, want the zero result", parsed)
+	if len(parsed.events) != 1 {
+		t.Fatalf("completed record lost: got %+v", parsed)
 	}
+	assertPiEvent(t, parsed.events[0], "m", fptr(1))
 }
 
 func TestPiUsageEvents(t *testing.T) {

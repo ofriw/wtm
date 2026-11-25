@@ -340,12 +340,22 @@ func sessionRecord(r *bufio.Reader) (line []byte, oversized bool, prefix []byte,
 	}
 }
 
-// sessionRecordErr maps an unterminated final record to io.ErrUnexpectedEOF:
-// a killed writer leaves bytes without the JSONL newline; the parse then fails
-// so the lost turn can never read as a complete total.
+// tailLossError marks a truncated final record: the parse kept the completed
+// records before the cut, and only the tail is lost. It unwraps to
+// io.ErrUnexpectedEOF so callers can tell record-level loss from a whole-session
+// open failure with errors.Is.
+type tailLossError struct{}
+
+func (tailLossError) Error() string { return "session ends mid-record; completed records kept" }
+func (tailLossError) Unwrap() error { return io.ErrUnexpectedEOF }
+
+// sessionRecordErr maps an unterminated final record to the tail-loss sentinel:
+// a killed writer leaves bytes without the JSONL newline; the parse keeps the
+// completed records and reports the tail as a record-level loss, so the lost
+// turn can never read as a complete total.
 func sessionRecordErr(line []byte, oversized bool, err error) error {
 	if err == io.EOF && (len(line) > 0 || oversized) {
-		return io.ErrUnexpectedEOF
+		return tailLossError{}
 	}
 	return err
 }
@@ -721,14 +731,15 @@ type parsedSession struct {
 // usageLoss accumulates what a parse walk lost, so folding can taint the total
 // after every readable session has been seen.
 type usageLoss struct {
-	lost        map[string]bool
+	lost        map[string]bool // whole-session failures: cost blanks to unknown
+	tailLost    map[string]bool // record-level tail loss: completed cost survives, partial
 	firstErr    error
 	dropped     int
 	unsupported map[string]int
 }
 
 func newUsageLoss() usageLoss {
-	return usageLoss{lost: map[string]bool{}, unsupported: map[string]int{}}
+	return usageLoss{lost: map[string]bool{}, tailLost: map[string]bool{}, unsupported: map[string]int{}}
 }
 
 func (l *usageLoss) fail(harness string, err error) {
@@ -745,6 +756,24 @@ func (l *usageLoss) recordDropped(harness string, n int, unsupported map[string]
 	// The readable records still fold; the dropped ones only taint the
 	// total, so a partial sum never reads as exact.
 	l.lost[harness] = true
+	l.dropped += n
+	for t, c := range unsupported {
+		l.unsupported[t] += c
+	}
+}
+
+// recordTailLoss keeps the completed records of a session whose final record was
+// cut (io.ErrUnexpectedEOF). The tail itself counts as at least one lost record;
+// the harness taints partial but keeps its measured cost, unlike a whole-session
+// failure that blanks everything unknown.
+func (l *usageLoss) recordTailLoss(harness string, n int, unsupported map[string]int, err error) {
+	l.tailLost[harness] = true
+	if l.firstErr == nil {
+		l.firstErr = err
+	}
+	if n < 1 {
+		n = 1 // the cut tail itself is at least one lost record
+	}
 	l.dropped += n
 	for t, c := range unsupported {
 		l.unsupported[t] += c
@@ -769,6 +798,7 @@ func buildUsageSessionsReport(wtPath string, refs []sessionRef, cat catalog, sub
 	var u worktreeUsage
 	foldParsedSessions(&u, sessions, now)
 	markPartial(&u, loss.lost)
+	markTailPartial(&u, loss.tailLost)
 	return u, proofs.warnings, usageLossErr(loss.firstErr, loss.dropped, loss.unsupported)
 }
 
@@ -905,12 +935,18 @@ func parseWorktreeSession(ref sessionRef, cat catalog, proofs *proofCache, loss 
 	return parsedSession{harness: ref.harness, events: parsed.events, activity: parsed.activity, price: price, proof: sessionProof(ref, subs)}, true
 }
 
-// readSession reads one session file and records any loss: an unreadable file
-// sorts anywhere, so the loss is tainted after the fold joins every session;
-// dropped records are the parse's own disclosure count.
+// readSession reads one session file and records any loss: a whole-session open
+// failure drops the session (an unreadable file sorts anywhere, so the loss is
+// tainted after the fold joins every session); a cut final record is a
+// record-level loss that keeps the completed records and taints only the tail.
+// Dropped records are the parse's own disclosure count.
 func readSession(a agent, ref sessionRef, loss *usageLoss) (sessionParse, bool) {
 	parsed, err := readUsage(a, ref.path)
 	if err != nil {
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			loss.recordTailLoss(ref.harness, parsed.dropped, parsed.unsupported, err)
+			return parsed, true
+		}
 		loss.fail(ref.harness, err)
 		return sessionParse{}, false
 	}
@@ -1076,6 +1112,26 @@ func markPartial(u *worktreeUsage, lost map[string]bool) {
 		for _, m := range h.models {
 			m.partial = true
 			m.cost.addUnknown()
+		}
+	}
+}
+
+// markTailPartial taints a harness partial after record-level tail loss without
+// blanking its measured cost: the completed records survived, so only the lost
+// tail makes the total inexact.
+func markTailPartial(u *worktreeUsage, tailLost map[string]bool) {
+	if len(tailLost) == 0 {
+		return
+	}
+	u.partial = true
+	for name := range tailLost {
+		h, ok := u.harnesses[name]
+		if !ok {
+			continue
+		}
+		h.partial = true
+		for _, m := range h.models {
+			m.partial = true
 		}
 	}
 }

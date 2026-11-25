@@ -807,3 +807,54 @@ func TestStatusEmptyClaudeModelRendersUnknown(t *testing.T) {
 		}
 	}
 }
+
+// TestPiUsageTailLossKeepsCompletedRecords pins the record-level loss at the
+// report boundary: a cut final record keeps the completed records' cost and
+// active time and taints the total partial; a file-open failure still drops the
+// whole session.
+func TestPiUsageTailLossKeepsCompletedRecords(t *testing.T) {
+	dir := t.TempDir()
+	good := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":[]}}` + "\n" +
+		`{"type":"message","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":0.5}}}}`
+	cut := "\n" + `{"type":"message","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"hel`
+	p := filepath.Join(dir, "s.jsonl")
+	writeFile(t, p, good+cut, 0o644)
+	idx := sessionIndex{canonical(dir): {{path: p, harness: piAgent.name}}}
+	u, err := buildUsageForTest(dir, idx, nil, loadSubscriptions(false))
+	if err == nil {
+		t.Fatal("tail loss must still disclose the dropped record")
+	}
+	if !u.partial {
+		t.Error("tail loss must taint the total partial")
+	}
+	h := u.harnesses[piAgent.name]
+	if h == nil {
+		t.Fatal("completed harness lost")
+	}
+	if got := h.cost.cell(); got != "$0.50" {
+		t.Errorf("harness cost = %q, want $0.50 (completed record survives)", got)
+	}
+	if !h.partial {
+		t.Error("harness must carry the partial flag")
+	}
+	if h.active() <= 0 {
+		t.Errorf("completed record's active time lost: %+v", h)
+	}
+}
+
+// TestPiUsageOpenFailureStillDropsSession pins that only record-level tail loss
+// keeps completed records; a file-open failure keeps today's whole-session drop.
+func TestPiUsageOpenFailureStillDropsSession(t *testing.T) {
+	dir := t.TempDir()
+	idx := sessionIndex{canonical(dir): {{path: filepath.Join(dir, "missing.jsonl"), harness: piAgent.name}}}
+	u, err := buildUsageForTest(dir, idx, nil, loadSubscriptions(false))
+	if err == nil {
+		t.Fatal("open failure must surface an error")
+	}
+	if !u.partial {
+		t.Error("open failure must taint the total partial")
+	}
+	if len(u.harnesses) != 0 {
+		t.Errorf("harnesses = %d, want none (whole-session drop)", len(u.harnesses))
+	}
+}

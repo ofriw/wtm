@@ -173,10 +173,11 @@ type failReader struct{ err error }
 
 func (f failReader) Read([]byte) (int, error) { return 0, f.err }
 
-// TestClaudeUsageReadErrorReturnsEmpty pins the one error policy: a failed read
-// yields no result, so a partial session can never read as complete. buildUsageForTest
-// drops the session and taints the total.
-func TestClaudeUsageReadErrorReturnsEmpty(t *testing.T) {
+// TestClaudeUsageReadErrorKeepsCompletedRecords pins the record-level loss
+// contract: an interrupted read (io.ErrUnexpectedEOF) keeps the completed
+// records and the caller taints only the tail, so a partial session never reads
+// as complete but the readable cost survives.
+func TestClaudeUsageReadErrorKeepsCompletedRecords(t *testing.T) {
 	first := `{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","requestId":"r2","message":{"id":"b","model":"m","usage":{"input_tokens":2}}}`
 	r := bufio.NewReader(io.MultiReader(
 		strings.NewReader(first+"\n"),
@@ -186,22 +187,23 @@ func TestClaudeUsageReadErrorReturnsEmpty(t *testing.T) {
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
 	}
-	if parsed.events != nil || parsed.activity != nil || parsed.dropped != 0 {
-		t.Fatalf("parsed = %+v, want the zero result", parsed)
+	if len(parsed.events) != 1 {
+		t.Fatalf("completed record lost: got %+v", parsed)
 	}
 }
 
-// TestClaudeUsageTruncatedFinalRecordFails pins EOF handling: a record cut
-// before its newline is a failed read, never a complete total.
-func TestClaudeUsageTruncatedFinalRecordFails(t *testing.T) {
+// TestClaudeUsageTruncatedFinalRecordKeepsCompleted pins the tail-loss contract
+// for Claude: a record cut before its newline keeps the completed records; only
+// the cut tail is lost, so the caller taints the total partial.
+func TestClaudeUsageTruncatedFinalRecordKeepsCompleted(t *testing.T) {
 	good := `{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"r1","message":{"id":"a","model":"m","usage":{"input_tokens":2}}}`
 	cut := `{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","requestId":"r2","message":{"id":"b","model":"m","content":[{"type":"text","text":"hel`
 	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(good + "\n" + cut)))
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("err = %v, want io.ErrUnexpectedEOF", err)
 	}
-	if parsed.events != nil || parsed.activity != nil || parsed.dropped != 0 {
-		t.Fatalf("parsed = %+v, want the zero result", parsed)
+	if len(parsed.events) != 1 {
+		t.Fatalf("completed record lost: got %+v", parsed)
 	}
 }
 

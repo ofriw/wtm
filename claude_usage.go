@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"sort"
 )
@@ -117,8 +118,14 @@ func claudeUsageEvents(r *bufio.Reader) (sessionParse, error) {
 			return out, nil
 		}
 		if err != nil {
-			// One error policy: the caller drops the session and taints the
-			// total, so a partial result must never read as complete.
+			if errors.Is(err, io.ErrUnexpectedEOF) {
+				// A killed writer cut the final record mid-line. The completed
+				// records survive; the tail is a record-level loss the caller
+				// taints, instead of dropping the whole session.
+				return out, err
+			}
+			// One error policy: any other read failure drops the session and
+			// taints the total, so a partial result must never read as complete.
 			return sessionParse{}, err
 		}
 	}

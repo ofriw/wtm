@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -199,8 +200,14 @@ func piUsageEvents(r *bufio.Reader) (sessionParse, error) {
 			return s.result(), nil
 		}
 		if err != nil {
-			// One error policy: the caller drops the session and taints the
-			// total, so a partial result must never read as complete.
+			if errors.Is(err, io.ErrUnexpectedEOF) {
+				// A killed writer cut the final record mid-line. The completed
+				// records survive; the tail is a record-level loss the caller
+				// taints, instead of dropping the whole session.
+				return s.result(), err
+			}
+			// One error policy: any other read failure drops the session and
+			// taints the total, so a partial result must never read as complete.
 			return sessionParse{}, err
 		}
 	}
