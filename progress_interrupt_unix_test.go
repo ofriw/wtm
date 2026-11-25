@@ -11,34 +11,39 @@ import (
 	"time"
 )
 
-func TestRunProgressProgramInterruptIsBounded(t *testing.T) {
-	interruptGrace = 50 * time.Millisecond
-	defer func(old time.Duration) { interruptGrace = old }(interruptGrace)
+func TestProgressInterruptRunIsBounded(t *testing.T) {
 	keep := watchInterrupts() // keeps self-delivery harmless after the renderer stops
 	defer signal.Stop(keep)
 	release, returned := make(chan struct{}), make(chan error, 1)
 	defer close(release)
 	go func() {
-		returned <- runProgressProgram(io.Discard, progressOptions{}, func(*progress) error {
+		returned <- runProgressProgram(io.Discard, progressOptions{interruptGrace: 50 * time.Millisecond}, func(*progress) error {
 			<-release
 			return nil
 		})
 	}()
+	if err := interruptUntilKill(t, returned, "interrupted run"); err != errInterrupted {
+		t.Fatalf("interrupted run = %v, want errInterrupted", err)
+	}
+}
+
+// interruptUntilKill self-delivers SIGTERM until the run reports, driving the
+// renderer's interrupt path without a PTY.
+func interruptUntilKill(t *testing.T, res <-chan error, what string) error {
+	t.Helper()
 	for deadline := time.Now().Add(5 * time.Second); ; {
 		select {
-		case err := <-returned:
-			if err != errInterrupted {
-				t.Fatalf("interrupted run = %v, want errInterrupted", err)
-			}
-			return
+		case err := <-res:
+			return err
 		case <-time.After(5 * time.Millisecond):
 			if time.Now().After(deadline) {
-				t.Fatal("interrupted run did not return within the grace bound")
+				t.Fatalf("%s did not return within the grace bound", what)
 			}
 			_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 		}
 	}
 }
+
 func TestChildCommandDiesOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	childCtx.Store(&ctx)
