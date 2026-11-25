@@ -200,12 +200,12 @@ func TestWorktreeLastUsed(t *testing.T) {
 func TestNowFunc(t *testing.T) {
 	// t.Setenv restores the original value at cleanup; unset here to hit the
 	// true absent-env path, not just the empty-value one.
-	t.Setenv("WTM_NOW", "")
-	_ = os.Unsetenv("WTM_NOW")
+	t.Setenv(nowEnv, "")
+	_ = os.Unsetenv(nowEnv)
 	if got := nowFunc(); got.Before(time.Now().Add(-time.Minute)) {
 		t.Errorf("absent env = %v, want the wall clock", got)
 	}
-	t.Setenv("WTM_NOW", "2026-01-01T00:00:00Z")
+	t.Setenv(nowEnv, "2026-01-01T00:00:00Z")
 	if got := nowFunc(); !got.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Errorf("valid env = %v, want 2026-01-01T00:00:00Z", got)
 	}
@@ -215,7 +215,7 @@ func TestNowFunc(t *testing.T) {
 // must land before any renderer starts, so dispatch owns it and nowFunc stays
 // silent (a raw write inside a frame would be erased by the next frame).
 func TestMalformedNowDisclosedOnceAtDispatch(t *testing.T) {
-	t.Setenv("WTM_NOW", "nope")
+	t.Setenv(nowEnv, "nope")
 	warned := captureStderr(t, func() {
 		_ = dispatch("bogus", &globals{color: colorAuto, progress: progressAuto}, nil)
 	})

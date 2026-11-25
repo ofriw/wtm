@@ -1495,7 +1495,7 @@ func TestStatusJSONAllMalformedExactRateStaysUnknown(t *testing.T) {
 func TestLoadUsageUsesReportInstant(t *testing.T) {
 	dir := t.TempDir()
 	report := at(120)
-	t.Setenv("WTM_NOW", at(60).Format(time.RFC3339))
+	t.Setenv(nowEnv, at(60).Format(time.RFC3339))
 	session := filepath.Join(dir, "s.jsonl")
 	writeFile(t, session, `{"type":"message","timestamp":"2026-01-01T00:01:50Z","message":{"role":"assistant","model":"m","usage":{"input":10,"output":1,"cost":{"total":1}}}}
 {"type":"message","timestamp":"2026-01-01T00:02:00Z","message":{"role":"assistant","model":"m","usage":{"input":10,"output":1,"cost":{"total":1}}}}
@@ -1640,7 +1640,7 @@ func TestStatusUsageSingleReportInstant(t *testing.T) {
 func TestStatusUsageNonStatusUnchanged(t *testing.T) {
 	sandbox(t)
 	repo := nativeRepo(t)
-	t.Setenv("WTM_NOW", "2026-01-01T12:00:00Z")
+	t.Setenv(nowEnv, "2026-01-01T12:00:00Z")
 	orig := nowFunc
 	reads := 0
 	nowFunc = func() time.Time {

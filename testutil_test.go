@@ -208,7 +208,7 @@ func sandbox(t *testing.T) sandboxEnv {
 	}
 	// Clear every host override that changes a price, a proof, or the clock:
 	// a developer's pinned catalog or fake time must never leak into a test.
-	for _, k := range []string{"WTM_NOW", createdAtEnv, ratesEnv, "WTM_CLAUDE_PARENT_SCOPE", "CLAUDE_CODE_CUSTOM_OAUTH_URL", progressDelayEnv} {
+	for _, k := range []string{nowEnv, createdAtEnv, ratesEnv, claudeParentScopeEnv, "CLAUDE_CODE_CUSTOM_OAUTH_URL", progressDelayEnv} {
 		t.Setenv(k, "")
 	}
 	// Point the managed-settings list at a path that does not exist, so a
@@ -403,5 +403,5 @@ func statusTier(t *testing.T, model map[string]any, name string) map[string]any 
 // time elapsed since 2026-01-01.
 func pinClock(t *testing.T) {
 	t.Helper()
-	t.Setenv("WTM_NOW", time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC).Format(time.RFC3339))
+	t.Setenv(nowEnv, time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC).Format(time.RFC3339))
 }

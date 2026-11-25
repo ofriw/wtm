@@ -86,15 +86,20 @@ var nowFunc = func() time.Time {
 	return time.Now()
 }
 
+// nowEnv is the WTM_NOW clock seam. The container test suite pins it so
+// worktree ages and the gc TTL boundary are byte-stable; production never sets
+// it.
+const nowEnv = "WTM_NOW"
+
 // parseNowEnv parses the WTM_NOW seam. An absent or malformed value reports
 // ok=false, so nowFunc falls back to the wall clock.
 func parseNowEnv() (time.Time, bool) {
-	return parseRFC3339(os.Getenv("WTM_NOW"))
+	return parseRFC3339(os.Getenv(nowEnv))
 }
 
 // warnNowEnv runs at dispatch, before any subcommand can open a renderer.
 func warnNowEnv() {
-	raw := os.Getenv("WTM_NOW")
+	raw := os.Getenv(nowEnv)
 	if raw == "" {
 		return
 	}

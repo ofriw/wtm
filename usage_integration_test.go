@@ -477,7 +477,7 @@ func TestLoadUsagePiOnlyNeedsNoRatesCatalog(t *testing.T) {
 	// A missing pinned catalog makes any catalog load fail and warn, so this test
 	// proves the loader is never reached instead of depending on network state.
 	t.Setenv(ratesEnv, filepath.Join(t.TempDir(), "missing.json"))
-	t.Setenv("WTM_NOW", "2026-01-01T01:00:00Z")
+	t.Setenv(nowEnv, "2026-01-01T01:00:00Z")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s.jsonl")
 	writeFile(t, path, piProviderLine("", 1.5)+"\n", 0o644)
@@ -504,7 +504,7 @@ func TestLoadUsagePiOnlyNeedsNoRatesCatalog(t *testing.T) {
 func TestStatusClaudeCatalogOutageWarnsAndReportsUnknown(t *testing.T) {
 	sandbox(t)
 	t.Setenv(ratesEnv, filepath.Join(t.TempDir(), "missing.json"))
-	t.Setenv("WTM_NOW", "2026-01-01T01:00:00Z")
+	t.Setenv(nowEnv, "2026-01-01T01:00:00Z")
 	repo := nativeRepo(t)
 	path := mkClaudeSession(t, repo, "outage", time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC))
 	writeFile(t, path, claudeTranscript(repo)+claudeUsageLine(`{"input_tokens":1000}`)+"\n", 0o644)
@@ -542,7 +542,7 @@ func TestStatusClaudeCatalogOutageWarnsAndReportsUnknown(t *testing.T) {
 func TestStatusDisclosesPartialPiUsage(t *testing.T) {
 	sandbox(t)
 	t.Setenv(ratesEnv, "")
-	t.Setenv("WTM_NOW", "2026-01-01T01:00:00Z")
+	t.Setenv(nowEnv, "2026-01-01T01:00:00Z")
 	repo := nativeRepo(t)
 	path := mkSession(t, repo, "partial", time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC))
 	body := fmt.Sprintf("{\"type\":\"session\",\"cwd\":%q}\n", repo)

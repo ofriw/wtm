@@ -304,7 +304,7 @@ func TestFreshCacheTooLargeIsRefused(t *testing.T) {
 
 func TestCacheFreshness(t *testing.T) {
 	pinned := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	t.Setenv("WTM_NOW", pinned.Format(time.RFC3339))
+	t.Setenv(nowEnv, pinned.Format(time.RFC3339))
 	path := filepath.Join(t.TempDir(), "rates.json")
 	writeFile(t, path, testCatalog, 0o644)
 	old := pinned.Add(-ratesCacheTTL - time.Hour)
@@ -363,7 +363,7 @@ func TestLoadCatalogFreshCacheSkipsNetwork(t *testing.T) {
 
 func TestFetchCoolingDown(t *testing.T) {
 	pinned := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	t.Setenv("WTM_NOW", pinned.Format(time.RFC3339))
+	t.Setenv(nowEnv, pinned.Format(time.RFC3339))
 	path := filepath.Join(t.TempDir(), "rates.json")
 	if cooling, _ := fetchCoolingDown(path); cooling {
 		t.Fatal("no marker must not cool down")
@@ -424,9 +424,9 @@ func serveRatesCounting(t *testing.T, status int, body string) (string, *atomic.
 func isolatedRatesCache(t *testing.T) string {
 	t.Helper()
 	t.Setenv(ratesEnv, "") // A local override would bypass the fetch under test.
-	// pinStaleCatalog stamps mtimes with the wall clock; a host-pinned WTM_NOW
+	// pinStaleCatalog stamps mtimes with the wall clock; a host-pinned nowEnv
 	// would make a deliberately stale cache look fresh.
-	t.Setenv("WTM_NOW", "")
+	t.Setenv(nowEnv, "")
 	home := t.TempDir()
 	setHomeEnv(t, home)
 	return filepath.Join(home, ".wtm", "rates.json")

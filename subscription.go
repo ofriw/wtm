@@ -375,10 +375,14 @@ func claudeProjectMetered(root string) (bool, error) {
 	return settingsMetered(filepath.Join(root, claudeLocalSettingsFile))
 }
 
+// claudeParentScopeEnv is the operator kill switch for the ancestor-settings
+// proof walk (see README).
+const claudeParentScopeEnv = "WTM_CLAUDE_PARENT_SCOPE"
+
 // claudeParentScopeEnabled reports whether ancestor settings void the proof.
 // Fail-closed by default: WTM_CLAUDE_PARENT_SCOPE=0 disables the ancestor walk
 // only when the operator proves the harness never merges parent settings.
-func claudeParentScopeEnabled() bool { return os.Getenv("WTM_CLAUDE_PARENT_SCOPE") != "0" }
+func claudeParentScopeEnabled() bool { return os.Getenv(claudeParentScopeEnv) != "0" }
 
 // claudeParentsMetered reports a metered settings file in any ancestor of the
 // worktree: a helper above the repo bills every request when the harness
@@ -408,14 +412,20 @@ func claudeParentsMetered(root string) (bool, error) {
 	}
 }
 
+// managedSettingsEnv replaces the enterprise managed-settings list, so
+// sandboxed tests never read a real machine's file. It is a test/override
+// seam that moves the subscription verdict, so README documents it beside the
+// sibling kill switches.
+const managedSettingsEnv = "WTM_MANAGED_SETTINGS"
+
 // managedSettingsPaths lists every enterprise managed-settings.json location
 // Claude Code reads. All OS variants are checked on every platform (no GOOS
 // gate) so one binary stays fail-safe everywhere. A non-empty
-// WTM_MANAGED_SETTINGS replaces the OS list, so sandboxed tests never read a
-// real machine's file; an empty value or an all-empty list means "use the
-// defaults", so a stray empty variable cannot hide an enterprise override.
+// WTM_MANAGED_SETTINGS replaces the OS list; an empty value or an all-empty
+// list means "use the defaults", so a stray empty variable cannot hide an
+// enterprise override.
 func managedSettingsPaths() []string {
-	if raw := os.Getenv("WTM_MANAGED_SETTINGS"); raw != "" {
+	if raw := os.Getenv(managedSettingsEnv); raw != "" {
 		var paths []string
 		for _, p := range filepath.SplitList(raw) {
 			if p != "" {

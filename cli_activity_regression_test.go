@@ -95,12 +95,12 @@ func TestThreeTurnAnswerModelAttribution(t *testing.T) {
 }
 
 // TestPre2000ClockAccepted pins the f13 split: plausibility belongs to
-// transcript timestamps alone, so the WTM_NOW clock seam accepts a pre-2000
+// transcript timestamps alone, so the nowEnv clock seam accepts a pre-2000
 // value without the misleading "not RFC3339" warning.
 func TestPre2000ClockAccepted(t *testing.T) {
 	sandbox(t)
 	repo := nativeRepo(t)
-	t.Setenv("WTM_NOW", "1999-12-31T00:00:00Z")
+	t.Setenv(nowEnv, "1999-12-31T00:00:00Z")
 	writePiSession(t, repo, "pre2000-clock",
 		`{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}`,
 		`{"type":"message","timestamp":"2026-01-01T00:00:30Z","message":{"role":"assistant","model":"m","stopReason":"stop","usage":{"cost":{"total":0.1}}}}`,
@@ -183,7 +183,7 @@ func TestFutureStampsClampActiveTime(t *testing.T) {
 	sandbox(t)
 	repo := nativeRepo(t)
 	now := time.Date(2026, 1, 1, 1, 0, 0, 0, time.UTC)
-	t.Setenv("WTM_NOW", now.Format(time.RFC3339))
+	t.Setenv(nowEnv, now.Format(time.RFC3339))
 	path := mkSession(t, repo, "future", now)
 	body := fmt.Sprintf("{\"id\":\"future\",\"cwd\":%q}\n", repo) +
 		`{"type":"message","timestamp":"2026-01-01T00:50:00Z","message":{"role":"user","content":"hi"}}` + "\n" +
@@ -211,7 +211,7 @@ func TestFutureStampsClampActiveTime(t *testing.T) {
 func TestCorruptTimestampTimeExcludedFromActiveTime(t *testing.T) {
 	sandbox(t)
 	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
-	t.Setenv("WTM_NOW", now.Format(time.RFC3339))
+	t.Setenv(nowEnv, now.Format(time.RFC3339))
 	repo := nativeRepo(t)
 	writePiSession(t, repo, "corrupt-time",
 		`{"type":"message","timestamp":"0001-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}`,
@@ -263,7 +263,7 @@ func TestTurnOpeningAttribute(t *testing.T) {
 	user := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}`
 	cases := []struct {
 		name    string
-		now     time.Time // zero = leave WTM_NOW unset
+		now     time.Time // zero = leave nowEnv unset
 		lines   []string
 		harness float64
 		models  map[string]float64
@@ -319,7 +319,7 @@ func TestTurnOpeningAttribute(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sandbox(t)
 			if !tc.now.IsZero() {
-				t.Setenv("WTM_NOW", tc.now.Format(time.RFC3339))
+				t.Setenv(nowEnv, tc.now.Format(time.RFC3339))
 			}
 			repo := nativeRepo(t)
 			writePiSession(t, repo, "opening-"+tc.name, tc.lines...)
@@ -488,7 +488,7 @@ func TestPiStatusLargeTranscriptTotals(t *testing.T) {
 	const turns = 20000
 	sandbox(t)
 	repo := nativeRepo(t)
-	t.Setenv("WTM_NOW", writePiTurns(t, repo, "large", turns).Format(time.RFC3339))
+	t.Setenv(nowEnv, writePiTurns(t, repo, "large", turns).Format(time.RFC3339))
 	out, stderr, rc := runWTM(t, repo, nil, "status", "--json")
 	if rc != 0 {
 		t.Fatalf("status exit %d: %s", rc, stderr)
