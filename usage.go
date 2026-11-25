@@ -494,14 +494,12 @@ func (f rawFields) count(key string) *int64 {
 	return v
 }
 
-// amount reads one optional price figure; an unreadable one keeps NaN, which
-// invalidAmount rejects by field name. A negative-zero parse (a negative
-// underflow like -1e-999 that rounds to -0) is unreadable too: it is not an
-// exact figure, and passing it would price a real charge at a silent zero.
-// Explicit numeric zero stays a valid, exact free class.
-// amount reads one optional price figure; an unreadable one keeps NaN, which
-// invalidAmount rejects by field name. A numeric overflow (a value this build
-// cannot hold) keeps +Inf so it reports as out of range, not as a non-number.
+// amount reads one optional price figure; an unreadable one keeps +Inf for a
+// JSON number and NaN for a non-number, both rejected by invalidAmount. A
+// negative-zero parse (a negative underflow like -1e-999 that rounds to -0)
+// is unreadable too: it is not an exact figure, and passing it would price a
+// real charge at a silent zero. Explicit numeric zero stays a valid, exact
+// free class.
 func (f rawFields) amount(key string) *float64 {
 	raw, ok := f.value(key)
 	if !ok {
@@ -1092,7 +1090,7 @@ func bestScores(sessions [][]usageEvent, covered []coveredProof) map[string]dedu
 // electBilledMask marks the billed occurrence of each key. When a metered
 // (uncovered) copy exists, the first copy at the best uncovered score wins the
 // slot and covered copies are skipped: only a metered copy can prove the
-// charge, regardless of which copy supplied the overall best score . When
+// charge, regardless of which copy supplied the overall best score. When
 // every copy is covered, the first copy at the best score wins, so equal
 // duplicates later in the walk drop.
 func electBilledMask(events []usageEvent, best map[string]dedupeBest, covered coveredProof) []bool {

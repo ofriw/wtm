@@ -191,12 +191,6 @@ func sessionTurns(activity []activityEvent, events []usageEvent) []turn {
 	return buildTurns(activity)
 }
 
-// maxSpanWidth once bounded a span's width as corrupt time. Transcript timestamps
-// are plausibility-checked at parse (see transcriptTimestamp), so no span can
-// exceed a century; the blanket-drop is unreachable and was silently discarding
-// spans without tainting the total. Dropped corrupt records taint the total at
-// the parse boundary instead, where the drop is counted and disclosed.
-
 // clampSpans bounds every span by the report clock. A span wholly after now is
 // dropped; a straddling span ends at now. It clones its input like mergeSpans,
 // so callers keep ownership of the slice they pass.

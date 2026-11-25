@@ -943,8 +943,8 @@ func sessionProof(ref sessionRef, subs subscriptions) coveredProof {
 // warning names it, so a corrupt-count warning never prints the raw sentinel;
 // a sentinel tier stays unknown (ratesFor has no match) but is now named
 // instead of silent. A corrupt web-search count warns here even when no catalog
-// can resolve the event, so a missing catalog never suppresses the disclosure
-// ; the pricing path warns with identical text, which the per-run dedupe
+// can resolve the event, so a missing catalog never suppresses the disclosure;
+// the pricing path warns with identical text, which the per-run dedupe
 // collapses to one line. A rejected self-priced Pi cost warns here once per
 // cause without mutating the event, so a bad price in a forked transcript is
 // disclosed before the duplicate election picks the winning copy unchanged; the

@@ -507,7 +507,7 @@ func priceClass(m *money, rate *float64, n int64, model, class string, warn warn
 }
 
 // classProduct validates one class's count, rate, and amount; ok reports whether a price exists.
-// The rate is revalidated at this pricing boundary , so a rate that reached
+// The rate is revalidated at this pricing boundary, so a rate that reached
 // multiplication without catalog validation can never produce a wrong exact price.
 func classProduct(m *money, rate *float64, n int64, model, class string, warn warnSink) (float64, bool) {
 	cause := invalidCount(n)

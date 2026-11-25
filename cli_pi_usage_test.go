@@ -278,7 +278,7 @@ func TestPiUnreadableFigureKeepsSiblings(t *testing.T) {
 	}
 }
 
-// TestPiCorruptCountsWarnOncePerCause pins the f9 worker dedupe: many identical
+// TestPiCorruptCountsWarnOncePerCause pins the worker dedupe: many identical
 // corrupt token counts in one transcript retain one warning per cause, so a
 // large corrupt session stays memory-bound in the worker.
 func TestPiCorruptCountsWarnOncePerCause(t *testing.T) {
