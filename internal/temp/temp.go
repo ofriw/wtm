@@ -242,14 +242,17 @@ func writeTempStore(path string, store Store) error {
 	return fs.WriteFileAtomic(path, append(data, '\n'), 0o600)
 }
 
-// WriteTempStoreUnlocked persists the registry with the exact serialization
-// ReadTempStoreUnlocked reads; callers hold the exclusive registry lock.
-func WriteTempStoreUnlocked(store Store) error {
-	p, err := tempPath()
-	if err != nil {
-		return err
-	}
-	return writeTempStore(p, store)
+// WithLockedTempStore runs fn under the exclusive registry lock and persists
+// the store when fn returns nil. It is the only exported way to mutate the
+// registry from outside package temp: the lock guarantees a concurrent writer
+// can never lose a whole-map update.
+func WithLockedTempStore(fn func(Store) error) error {
+	return withLockedTempStore(func(store Store, p string) error {
+		if err := fn(store); err != nil {
+			return err
+		}
+		return writeTempStore(p, store)
+	})
 }
 
 func validTempIdentity(identity string) bool {

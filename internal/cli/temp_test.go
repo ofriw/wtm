@@ -24,22 +24,18 @@ var tempActivation = TempTestTime.Add(90 * time.Minute)
 
 const fixtureTempIdentity = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-// mutateTempStore applies fn to the registry and writes the whole map back
-// atomically; fn returning false skips the write. Add/remove role callers
-// supply the registry lock; seed calls run before any subprocess starts.
-func mutateTempStore(fn func(temp.Store) bool) error {
-	store, err := temp.ReadTempStoreUnlocked()
-	if err != nil {
-		return err
-	}
-	if !fn(store) {
+// mutateTempStore applies fn to the registry under the exclusive registry lock
+// and persists the result atomically: every mutation is a locked
+// read-modify-write.
+func mutateTempStore(fn func(temp.Store)) error {
+	return temp.WithLockedTempStore(func(s temp.Store) error {
+		fn(s)
 		return nil
-	}
-	return temp.WriteTempStoreUnlocked(store)
+	})
 }
 
 func storeTempFixture(path string, rec temp.Record) error {
-	return mutateTempStore(func(s temp.Store) bool { s[path] = rec; return true })
+	return mutateTempStore(func(s temp.Store) { s[path] = rec })
 }
 
 // Raw missing-path fixtures test registry cleanup; live Git paths get identity.
@@ -69,13 +65,7 @@ func mustReadTempStore(t *testing.T) temp.Store {
 
 // clearTempRecord removes path's record; an absent record is a no-op success.
 func clearTempRecord(path string) error {
-	return mutateTempStore(func(s temp.Store) bool {
-		if _, ok := s[path]; !ok {
-			return false
-		}
-		delete(s, path)
-		return true
-	})
+	return mutateTempStore(func(s temp.Store) { delete(s, path) })
 }
 
 // verifyTempWorktree is the test view of the pre-removal snapshot.

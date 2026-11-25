@@ -269,11 +269,11 @@ func tempProcessOperation(role, path string) error {
 	case "add-deadline":
 		return cmdAdd(&globals{Root: path, JSON: true}, []string{"deadline", "--no-index", "--ttl", "1.5s"})
 	case "add":
-		// Registry mutations hold the exclusive lock; unlocked writes would race the holder.
-		return withTempRegistryLock(func() error { return storeTempFixture(path, fixtureRecord("tmp/added")) })
+		// storeTempFixture acquires the exclusive lock itself (mutateTempStore).
+		return storeTempFixture(path, fixtureRecord("tmp/added"))
 	case "remove":
-		// Registry mutations hold the exclusive lock; unlocked writes would race the holder.
-		return withTempRegistryLock(func() error { return clearTempRecord(path) })
+		// clearTempRecord acquires the exclusive lock itself (mutateTempStore).
+		return clearTempRecord(path)
 	case "read-snapshot", "read-many":
 		return readTempProcessStore(role)
 	default:
@@ -362,25 +362,12 @@ func holdSettingsLockProcess() error {
 	})
 }
 
-func withTempRegistryLock(fn func() error) error {
-	lock, err := temp.LockPath()
-	if err != nil {
-		return err
-	}
-	return fs.WithFileLock(lock, fn)
-}
-
 // hold-add mutates in memory, then commits only after the release signal, so a
 // concurrent reader observes the pre-commit seed-only store.
 func holdTempTransaction(role, path string) error {
-	return withTempRegistryLock(func() (err error) {
+	return temp.WithLockedTempStore(func(store temp.Store) error {
 		if role == "hold-add" {
-			store, readErr := temp.ReadTempStoreUnlocked()
-			if readErr != nil {
-				return readErr
-			}
 			store[path] = fixtureRecord("tmp/first")
-			defer func() { err = errors.Join(err, temp.WriteTempStoreUnlocked(store)) }()
 		}
 		fmt.Println("locked")
 		return waitTempProcessRelease()

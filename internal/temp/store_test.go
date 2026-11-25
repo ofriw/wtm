@@ -28,11 +28,11 @@ func fixtureStoreRecord(branch string) Record {
 // seedStore writes recs through the exclusive lock and returns the stored map.
 func seedStore(t *testing.T, recs map[string]Record) Store {
 	t.Helper()
-	if err := withLockedTempStore(func(store Store, _ string) error {
+	if err := withLockedTempStore(func(store Store, p string) error {
 		for k, v := range recs {
 			store[fs.Canonical(k)] = v
 		}
-		return WriteTempStoreUnlocked(store)
+		return writeTempStore(p, store)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -80,9 +80,9 @@ func TestTempStoreRoundTrip(t *testing.T) {
 	}
 	// Mutation under the lock drops one record and persists it.
 	drop := fs.Canonical(filepath.Join(base, "a"))
-	if err := withLockedTempStore(func(s Store, _ string) error {
+	if err := withLockedTempStore(func(s Store, p string) error {
 		delete(s, drop)
-		return WriteTempStoreUnlocked(s)
+		return writeTempStore(p, s)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -109,9 +109,9 @@ func TestTempStoreConcurrentAdds(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			name := fmt.Sprintf("wt-%d", i)
-			errs <- withLockedTempStore(func(store Store, _ string) error {
+			errs <- withLockedTempStore(func(store Store, p string) error {
 				store[fs.Canonical(filepath.Join(base, name))] = fixtureStoreRecord("tmp/" + name)
-				return WriteTempStoreUnlocked(store)
+				return writeTempStore(p, store)
 			})
 		}(i)
 	}
@@ -227,7 +227,11 @@ func TestTempStoreReaderSnapshotsWhileWriterHoldsLock(t *testing.T) {
 				if i%2 == 1 {
 					s = storeB
 				}
-				if err := WriteTempStoreUnlocked(s); err != nil {
+				p, err := tempPath()
+				if err != nil {
+					return err
+				}
+				if err := writeTempStore(p, s); err != nil {
 					return err
 				}
 				if i == 0 {
