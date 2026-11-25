@@ -795,9 +795,10 @@ func TestPiUsageTokensAndTierCost(t *testing.T) {
 	}
 }
 
-// TestPiOversizedNonBilledRecordsDoNotDrop pins the precise-loss fix: a huge
-// user message and a huge non-spawn tool result cannot carry usage, so they
-// must not taint the cost.
+// TestPiOversizedNonBilledRecordsDoNotDrop pins the fail-closed loss contract: a
+// huge user message is provably free, so it must not taint; a huge non-spawn
+// tool result is unknowable (the 8 KiB prefix cannot prove the >4 MiB body has
+// no usage), so it fails closed and drops.
 func TestPiOversizedNonBilledRecordsDoNotDrop(t *testing.T) {
 	pad := strings.Repeat("a", maxSessionHeader)
 	user := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":[{"type":"text","text":"` + pad + `"}]}}`
@@ -807,8 +808,8 @@ func TestPiOversizedNonBilledRecordsDoNotDrop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.dropped != 0 {
-		t.Fatalf("dropped = %d, want 0 for non-billed oversized records", parsed.dropped)
+	if parsed.dropped != 1 {
+		t.Fatalf("dropped = %d, want 1 (non-spawn toolResult fails closed)", parsed.dropped)
 	}
 	if len(parsed.events) != 1 {
 		t.Fatalf("events = %d, want the good record", len(parsed.events))
@@ -818,10 +819,10 @@ func TestPiOversizedNonBilledRecordsDoNotDrop(t *testing.T) {
 // TestOversizedPiBillable pins the classifier for a discarded record. A body
 // may hold any text, so only structured evidence bills: escaped words must not,
 // but visible usage, spawn details, or an unknown type must.
-// TestOversizedPiMessageBillable pins the classifier for a discarded message.
-// A tool result body may contain any text, so only structured evidence counts:
-// escaped body words must not bill, but a real `usage` field must, because
-// appendPiToolResult prices non-spawn tool results too.
+// TestOversizedPiMessageBillable pins the fail-closed classifier for a discarded
+// message. Only a readable user message is provably free: the 8 KiB prefix
+// cannot prove a >4 MiB record has no usage, so assistant and toolResult (even
+// with a visible non-spawn toolName) bill, and an unreadable prefix bills.
 func TestOversizedPiMessageBillable(t *testing.T) {
 	pad := strings.Repeat("a", maxSessionPrefix)
 	for _, tc := range []struct {
@@ -832,12 +833,12 @@ func TestOversizedPiMessageBillable(t *testing.T) {
 		{
 			name:   "toolResult body mentions stats",
 			prefix: `{"type":"message","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"{\"stats\":1}"}]}}`,
-			want:   false,
+			want:   true,
 		},
 		{
 			name:   "toolResult structured details without usage",
 			prefix: `{"type":"message","message":{"role":"toolResult","toolName":"bash","details":{"stats":{"cost":0}},"content":[]}}`,
-			want:   false,
+			want:   true,
 		},
 		{
 			name:   "toolResult real usage",
@@ -879,8 +880,10 @@ func TestOversizedPiMessageBillable(t *testing.T) {
 	}
 }
 
-// TestPiOversizedToolResultTextDoesNotDrop pins end-to-end that escaped body
-// text mentioning every key word cannot taint a cost that is fully read.
+// TestPiOversizedToolResultTextDoesNotDrop pins the fail-closed loss contract:
+// escaped body text mentioning every key word is not billing evidence, but the
+// non-spawn oversized toolResult still drops because the 8 KiB prefix cannot
+// prove the >4 MiB body has no usage; the good record still prices.
 func TestPiOversizedToolResultTextDoesNotDrop(t *testing.T) {
 	pad := strings.Repeat(`\"stats\":1,\"usage\":{},\"details\":{`, maxSessionHeader/16)
 	result := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"` + pad + `"}]}}`
@@ -892,8 +895,8 @@ func TestPiOversizedToolResultTextDoesNotDrop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.dropped != 0 {
-		t.Fatalf("dropped = %d, want 0: escaped body text is not billing", parsed.dropped)
+	if parsed.dropped != 1 {
+		t.Fatalf("dropped = %d, want 1: non-spawn toolResult fails closed", parsed.dropped)
 	}
 	if len(parsed.events) != 1 {
 		t.Fatalf("events = %d, want the good record", len(parsed.events))
@@ -1007,5 +1010,38 @@ func TestPiFailOpenCornersStayClosed(t *testing.T) {
 				t.Error("a billed event must carry a cost")
 			}
 		})
+	}
+}
+
+// TestPiEscapedUsageKeyAlternateSpellingBills pins the escaped-key bypass fix:
+// any valid JSON escape that decodes to "usage" (here u\u0073age) must bill,
+// not just the single \u0075sage spelling the byte filter knew.
+func TestPiEscapedUsageKeyAlternateSpellingBills(t *testing.T) {
+	line := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","u\u0073age":{"cost":{"total":1}}}}`
+	events := parsePi(t, line)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1: %+v", len(events), events)
+	}
+	assertPiEvent(t, events[0], "m", fptr(1))
+}
+
+// TestPiOversizedToolResultUsageAfterPadTaints pins the fail-closed fix for a
+// usage block placed AFTER the long field: the 8 KiB prefix cannot see it, so
+// the non-spawn toolResult must still drop and taint rather than read free.
+func TestPiOversizedToolResultUsageAfterPadTaints(t *testing.T) {
+	pad := strings.Repeat("a", maxSessionHeader)
+	result := `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"` + pad + `"}],"usage":{"cost":{"total":1}}}}`
+	if len(result) <= maxSessionHeader {
+		t.Fatalf("record = %d bytes, want oversized", len(result))
+	}
+	parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(result + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.dropped != 1 {
+		t.Fatalf("dropped = %d, want 1: usage after the pad must still taint", parsed.dropped)
+	}
+	if len(parsed.events) != 0 {
+		t.Fatalf("events = %d, want none", len(parsed.events))
 	}
 }

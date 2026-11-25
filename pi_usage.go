@@ -237,6 +237,15 @@ func (s *piParseState) consume(line []byte, oversized bool, prefix []byte) {
 		return
 	}
 	if !piInteresting(line) {
+		if bytes.Contains(line, piEscapedChar) {
+			// An escaped JSON key can spell "usage"; the byte filter knows only
+			// the plain spelling, so the structural scanner (which decodes all
+			// escapes) decides before the line is declared uninteresting.
+			if _, _, hasUsage, _ := scanRecord(line); hasUsage {
+				s.consumePiRecord(line)
+				return
+			}
+		}
 		if bytes.Contains(line, piMessageKey) {
 			s.consumePiActivity(line)
 		}
@@ -313,33 +322,13 @@ func (s *piParseState) consumePiActivity(line []byte) {
 	}
 }
 
-// oversizedPiMessageBillable decides one oversized message record. The order
-// matters: a spawn checks before the non-spawn exemption, and any visible
-// `usage` bills because appendPiToolResult prices non-spawn tool results too.
-// Only a complete non-spawn tool result without usage is free; everything else
-// fails closed, because a discarded record's billing is unknowable.
+// oversizedPiMessageBillable decides one oversized message record. Only a
+// readable user message is provably free: a discarded record's billing is
+// unknowable, and the 8 KiB prefix cannot prove a >4 MiB record carries no
+// usage, so assistant and toolResult (even with a visible non-spawn toolName)
+// fail closed and taint the total.
 func oversizedPiMessageBillable(prefix []byte) bool {
-	switch {
-	case bytes.Contains(prefix, []byte(`"role":"user"`)):
-		return false
-	case bytes.Contains(prefix, []byte(`"role":"assistant"`)),
-		bytes.Contains(prefix, usageKey):
-		return true
-	case bytes.Contains(prefix, []byte(`"role":"toolResult"`)):
-		name, ok := piToolName(prefix)
-		return !ok || name == "spawn"
-	}
-	return true
-}
-
-// piToolName reads a structurally complete toolName; a cut name reports false.
-func piToolName(prefix []byte) (string, bool) {
-	_, rest, ok := bytes.Cut(prefix, []byte(`"toolName":"`))
-	if !ok {
-		return "", false
-	}
-	name, _, ok := bytes.Cut(rest, []byte(`"`))
-	return string(name), ok
+	return !bytes.Contains(prefix, []byte(`"role":"user"`))
 }
 
 // piActivityFromRecord maps a fully decoded record to its turn state. Only
@@ -806,16 +795,17 @@ var (
 	// a record whose top-level type is not message, so a text value cannot add
 	// activity. Under-matching silently loses billable time.
 	piMessageKey = []byte("\"message\"")
-	// The escaped spelling of the usage key: a serialized key "\u0075sage"
-	// decodes to "usage" but evades the literal usageKey byte scan, so it must
-	// also route to consumePiRecord, where scanRecord's structural scan is the
-	// authority. Without it, an escaped usage key vanishes silently.
+	// Any \u escape can hide a serialized key spelling of "usage" (for example
+	// "u\u0073age"). piInteresting cannot enumerate them; consume routes such a
+	// line through scanRecord, the structural scanner that decodes every escape.
+	piEscapedChar = []byte("\\u")
+	// The escaped spelling of the usage key used by the Claude parser's
+	// malformed-record check; the Pi path now relies on piEscapedChar above.
 	piEscapedUsageKey = []byte("\\u0075sage")
 )
 
 func piInteresting(line []byte) bool {
 	return bytes.Contains(line, usageKey) || bytes.Contains(line, piStatsKey) ||
 		bytes.Contains(line, piModelChangeKey) || bytes.Contains(line, piDetailsKey) ||
-		bytes.Contains(line, piToolCallKey) || bytes.Contains(line, piIsErrorKey) ||
-		bytes.Contains(line, piEscapedUsageKey)
+		bytes.Contains(line, piToolCallKey) || bytes.Contains(line, piIsErrorKey)
 }
