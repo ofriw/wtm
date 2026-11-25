@@ -763,3 +763,47 @@ func TestBuildUsageCorruptTierLosesToValidTierSibling(t *testing.T) {
 		t.Fatalf("cost = %+v, want the stated $1 total", cost.billed)
 	}
 }
+
+// TestStatusEmptyClaudeModelRendersUnknown pins the empty-model contract through
+// the real binary: an assistant record that names no model renders under the
+// shared unknown label in the table and JSON, never reads a catalog price — even
+// when the catalog pins an "unknown" entry — and keeps its readable tokens.
+func TestStatusEmptyClaudeModelRendersUnknown(t *testing.T) {
+	sandbox(t)
+	t.Setenv(nowEnv, "2026-01-01T01:00:00Z")
+	rates := filepath.Join(t.TempDir(), "rates.json")
+	writeFile(t, rates, `{"unknown":{"input_cost_per_token":0.01,"output_cost_per_token":0.02}}`, 0o644)
+	repo := nativeRepo(t)
+	path := mkClaudeSession(t, repo, "unnamed", time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC))
+	writeFile(t, path, claudeTranscript(repo)+`{"type":"assistant","timestamp":"2026-01-01T00:00:05Z","requestId":"r1","message":{"id":"m1","model":"","stop_reason":"end_turn","usage":{"input_tokens":1000,"output_tokens":500}}}`+"\n", 0o644)
+
+	out, stderr, rc := runWTM(t, repo, []string{ratesEnv + "=" + rates, "COLUMNS=200"}, "status", "--color=never")
+	if rc != 0 {
+		t.Fatalf("status exit %d: %s", rc, stderr)
+	}
+	if !strings.Contains(out, unknownValue) {
+		t.Errorf("table detail must render the unknown model label:\n%s", out)
+	}
+
+	jsonOut, jsonErr, rc := runWTM(t, repo, []string{ratesEnv + "=" + rates}, "status", "--json")
+	if rc != 0 {
+		t.Fatalf("status --json exit %d: %s", rc, jsonErr)
+	}
+	rows := statusRows(t, jsonOut)
+	m := statusModel(t, rows[0], claudeAgent.name, unknownValue)
+	if m["cost"] != nil {
+		t.Errorf("unknown model cost = %v, want null: the reserved label must never price", m["cost"])
+	}
+	if got := statusTier(t, m, "input")["tokens"]; got != float64(1000) {
+		t.Errorf("input tier tokens = %v, want 1000", got)
+	}
+	if got := statusTier(t, m, "output")["tokens"]; got != float64(500) {
+		t.Errorf("output tier tokens = %v, want 500", got)
+	}
+	models := subscriptionObject(t, subscriptionObject(t, rows[0]["usage"])[claudeAgent.name])["models"]
+	if models, ok := models.(map[string]any); ok {
+		if _, blank := models[""]; blank {
+			t.Error("models must not carry an empty-name key")
+		}
+	}
+}

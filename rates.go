@@ -534,8 +534,12 @@ func classProduct(m *money, rate *float64, n int64, model, class string, warn wa
 
 // resolveModel finds a rate for a recorded model id. The catalog uses many
 // aliases (provider prefixes, version/date suffixes), so it tries the exact
-// name first, then normalized candidates.
+// name first, then normalized candidates. The reserved unknown label is not a
+// model id: an unnamed session must never borrow a pinned "unknown" catalog entry.
 func resolveModel(c catalog, name string) (modelRate, bool) {
+	if name == unknownValue {
+		return modelRate{}, false
+	}
 	for _, candidate := range modelCandidates(name) {
 		if r, ok := c[candidate]; ok {
 			return r, true

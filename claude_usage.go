@@ -221,6 +221,15 @@ func sortUsageEvents(events []usageEvent) {
 // names no answering model, so it can never own a turn's opening.
 const claudeSyntheticModel = "<synthetic>"
 
+// claudeModelName maps an empty assistant model to the shared unknown label, so
+// a truncated or third-party write never renders a blank model row or JSON key.
+func claudeModelName(model string) string {
+	if model == "" {
+		return unknownValue
+	}
+	return model
+}
+
 // claudeAnswer is the model an activity record proves; the synthetic error
 // record names none.
 func claudeAnswer(model string) string {
@@ -248,7 +257,7 @@ func claudeEvent(rec *claudeUsageRecord, dropped *int) (usageEvent, bool) {
 	}
 	tokens, tier, web := claudeTokensFrom(msg.Usage)
 	return usageEvent{
-		at: at, key: claudeTurnKey(msg.ID, rec.RequestID), model: msg.Model,
+		at: at, key: claudeTurnKey(msg.ID, rec.RequestID), model: claudeModelName(msg.Model),
 		tokens: tokens, tier: tier, webSearch: web,
 	}, true
 }
