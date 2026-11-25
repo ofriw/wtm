@@ -49,8 +49,8 @@ func cmdStatus(g *globals, args []string, hooks core.Hooks) error {
 func printStatusTable(cols []core.WorktreeColumn, wts []core.Worktree, now time.Time, ttl time.Duration, colorMode string) {
 	ctx := core.ColumnContext{Now: now, TTL: ttl}
 	headers := core.ColumnHeaders(cols)
-	ids := core.ColumnIDs(cols)
-	ui.PrintTable(headers, ids, core.GridRows(cols, wts, ctx), colorMode, statusCell, core.ColumnRightAligns(cols), core.GridPolicy(headers))
+	priority, floors := core.ShrinkPolicy(headers)
+	ui.PrintTable(headers, core.GridRows(cols, wts, ctx), colorMode, statusCell, core.ColumnRightAligns(cols), priority, floors, core.IsCapabilityHeader)
 }
 
 // ---------- domain stylings ----------
@@ -64,30 +64,28 @@ func booleanStyle(active bool) lipgloss.Style {
 }
 
 // statusCellStyle maps a status-table cell to its style, keyed off the column's
-// stable ID (core.WorktreeColumn.ID) so a header rename cannot silently disable
-// a column's semantic color. Basic ANSI colors are deliberate: the terminal
-// theme owns the palette, and every profile (16/256/truecolor/NO_COLOR)
-// degrades cleanly. UNUSED is Yellow, not Red: it is the gc candidate, not an
-// error.
-func statusCellStyle(id, value string) lipgloss.Style {
-	switch id {
-	case core.ColumnIDStatus:
+// header. Basic ANSI colors are deliberate: the terminal theme owns the
+// palette, and every profile (16/256/truecolor/NO_COLOR) degrades cleanly.
+// UNUSED is Yellow, not Red: it is the gc candidate, not an error.
+func statusCellStyle(header, value string) lipgloss.Style {
+	switch header {
+	case "STATUS":
 		if value == "ACTIVE" {
 			return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Green)
 		}
 		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
-	case core.ColumnIDTemp:
+	case "TEMP":
 		return tempCellStyle(value)
-	case core.ColumnIDUpstream:
+	case "UPSTREAM":
 		return booleanStyle(value != "-")
-	case core.ColumnIDBranch, core.ColumnIDLastUsed:
+	case "BRANCH", "LAST USED":
 		if value == "(detached)" || value == "never" {
 			return lipgloss.NewStyle().Faint(true)
 		}
 	}
-	// Capability columns only appear in the opt-in --wide view; their ID is
-	// the registration id, so the header lookup still keys off the registry.
-	if core.IsCapabilityHeader(strings.ToUpper(id)) {
+	// Capability columns only appear in the opt-in --wide view; the header
+	// lookup keys off the registry so a new integration colors automatically.
+	if core.IsCapabilityHeader(header) {
 		return capabilityCellStyle(value)
 	}
 	return lipgloss.NewStyle()
@@ -132,11 +130,11 @@ func capStateStyle(s core.CapState) lipgloss.Style {
 
 // statusCell renders one plain status cell with its color. The grouped
 // INTEGRATIONS cell colors token-by-token; every other column takes one style.
-func statusCell(id, value string) string {
-	if id == core.ColumnIDIntegrations {
+func statusCell(header, value string) string {
+	if header == core.IntegrationsHeader {
 		return groupedCellStyle(value)
 	}
-	return statusCellStyle(id, value).Render(value)
+	return statusCellStyle(header, value).Render(value)
 }
 
 // groupedCellStyle colors a grouped INTEGRATIONS cell token by token: present

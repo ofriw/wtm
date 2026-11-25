@@ -26,15 +26,12 @@ type ColumnContext struct {
 	Active []Capability
 }
 
-// WorktreeColumn is one grid column: its stable ID, its header, its projection
-// from a worktree, and its fit policy. ID is the semantic key style routing
-// (cli) keys off — never displayed — so renaming a header cannot silently
-// disable a column's color. ShrinkRank is the elision order (0 = pinned);
+// WorktreeColumn is one grid column: its header, its projection from a
+// worktree, and its fit policy. ShrinkRank is the elision order (0 = pinned);
 // Floor is the smallest width a shrinkable column may be elided to. This
 // registry is the single source of truth for the status table and the gc
 // picker, so the two can never drift.
 type WorktreeColumn struct {
-	ID         string
 	Header     string
 	Cell       func(Worktree, ColumnContext) string
 	RightAlign bool
@@ -75,31 +72,22 @@ func cellIntegrations(w Worktree, c ColumnContext) string {
 
 func cellUncommitted(w Worktree, _ ColumnContext) string { return dirtyCell(w) }
 
-// Column IDs are the stable style-routing keys for status columns. cli styles
-// by ID (never the display header), so a rename here breaks the cli switch at
-// compile time instead of silently dropping a column's color.
-const (
-	ColumnIDPath         = "path"
-	ColumnIDBranch       = "branch"
-	ColumnIDUpstream     = "upstream"
-	ColumnIDLastUsed     = "lastUsed"
-	ColumnIDStatus       = "status"
-	ColumnIDTemp         = "temp"
-	ColumnIDIntegrations = "integrations"
-	columnIDUncommitted  = "uncommitted"
-)
+// IntegrationsHeader is the INTEGRATIONS column header, shared by core's
+// schema and cli's grouped-cell renderer so they cannot disagree about which
+// column carries the grouped capability tokens.
+const IntegrationsHeader = "INTEGRATIONS"
 
 var (
 	// Core shrink ranks start at 2: rank 1 belongs to the --wide capability
 	// columns, which elide before any core column gives up width.
-	colPath         = WorktreeColumn{ID: ColumnIDPath, Header: "PATH", Cell: cellPath, ShrinkRank: 2, Floor: 12}
-	colBranch       = WorktreeColumn{ID: ColumnIDBranch, Header: "BRANCH", Cell: cellBranch, ShrinkRank: 4, Floor: 8}
-	colUpstream     = WorktreeColumn{ID: ColumnIDUpstream, Header: "UPSTREAM", Cell: cellUpstream, ShrinkRank: 3, Floor: 8}
-	colLastUsed     = WorktreeColumn{ID: ColumnIDLastUsed, Header: "LAST USED", Cell: cellLastUsed, RightAlign: true, ShrinkRank: 5, Floor: 10}
-	colStatus       = WorktreeColumn{ID: ColumnIDStatus, Header: "STATUS", Cell: cellStatus}
-	colTemp         = WorktreeColumn{ID: ColumnIDTemp, Header: "TEMP", Cell: cellTemp}
-	colIntegrations = WorktreeColumn{ID: ColumnIDIntegrations, Header: "INTEGRATIONS", Cell: cellIntegrations, ShrinkRank: 6, Floor: 6}
-	colUncommitted  = WorktreeColumn{ID: columnIDUncommitted, Header: "UNCOMMITTED", Cell: cellUncommitted}
+	colPath         = WorktreeColumn{Header: "PATH", Cell: cellPath, ShrinkRank: 2, Floor: 12}
+	colBranch       = WorktreeColumn{Header: "BRANCH", Cell: cellBranch, ShrinkRank: 4, Floor: 8}
+	colUpstream     = WorktreeColumn{Header: "UPSTREAM", Cell: cellUpstream, ShrinkRank: 3, Floor: 8}
+	colLastUsed     = WorktreeColumn{Header: "LAST USED", Cell: cellLastUsed, RightAlign: true, ShrinkRank: 5, Floor: 10}
+	colStatus       = WorktreeColumn{Header: "STATUS", Cell: cellStatus}
+	colTemp         = WorktreeColumn{Header: "TEMP", Cell: cellTemp}
+	colIntegrations = WorktreeColumn{Header: IntegrationsHeader, Cell: cellIntegrations, ShrinkRank: 6, Floor: 6}
+	colUncommitted  = WorktreeColumn{Header: "UNCOMMITTED", Cell: cellUncommitted}
 )
 
 // CoreColumns is the shared prefix of every status schema: identity, tracking
@@ -179,15 +167,6 @@ func ColumnHeaders(cols []WorktreeColumn) []string {
 	return headers
 }
 
-// ColumnIDs returns the stable style-routing ID of each column in order.
-func ColumnIDs(cols []WorktreeColumn) []string {
-	ids := make([]string, len(cols))
-	for i, c := range cols {
-		ids[i] = c.ID
-	}
-	return ids
-}
-
 // ColumnRightAligns returns the headers that right-align.
 func ColumnRightAligns(cols []WorktreeColumn) []string {
 	var right []string
@@ -216,18 +195,13 @@ func GridRows(cols []WorktreeColumn, wts []Worktree, ctx ColumnContext) [][]stri
 	return rows
 }
 
-// GridPolicy computes the complete shrink policy for the given headers from
-// the column registry: elision priority, floors, and the capability-header
-// identifier that discloses dropped --wide columns. ui's generic sizing needs
-// no knowledge of the registry, and both renderers consume this one value so
-// a nil CapHeader can never silently disable the disclosure.
-func GridPolicy(headers []string) ui.Policy {
+// ShrinkPolicy computes the shrink policy for the given headers from the
+// column registry: elision priority and floors. ui's generic sizing needs no
+// knowledge of the registry; the capability-header identifier that discloses
+// dropped --wide columns is core.IsCapabilityHeader.
+func ShrinkPolicy(headers []string) ([]string, map[string]int) {
 	reg := ColumnRegistry()
-	return ui.Policy{
-		Priority:  dynamicShrinkPriority(headers, reg),
-		Floors:    dynamicShrinkFloor(headers, reg),
-		CapHeader: IsCapabilityHeader,
-	}
+	return dynamicShrinkPriority(headers, reg), dynamicShrinkFloor(headers, reg)
 }
 
 // statusColumnsFor picks the schema: the compact grouped default, or the

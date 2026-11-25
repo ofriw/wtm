@@ -11,7 +11,7 @@ import (
 )
 
 // grid_test.go — the grid engine's own contracts (width, elision, drop
-// disclosure, and ids pruned in lockstep with columns), synthetic fixtures only.
+// disclosure), synthetic fixtures only.
 
 func TestWidthBudget(t *testing.T) {
 	cases := []struct {
@@ -131,7 +131,7 @@ func TestPrintTableRightAlign(t *testing.T) {
 	t.Setenv("COLUMNS", "0")
 	headers := []string{"A", "BB"}
 	rows := [][]string{{"x", "y"}}
-	out := testutil.CaptureStdout(t, func() { PrintTable(headers, nil, rows, ColorNever, nil, []string{"BB"}, Policy{}) })
+	out := testutil.CaptureStdout(t, func() { PrintTable(headers, rows, ColorNever, nil, []string{"BB"}, nil, nil, nil) })
 	want := "A  BB\nx   y\n"
 	if out != want {
 		t.Fatalf("right-aligned table = %q, want %q", out, want)
@@ -145,13 +145,9 @@ func TestDropZeroColumns(t *testing.T) {
 		{"a2", "b2", "c2", "d2"},
 	}
 	widths := []int{10, 0, 5, 0}
-	ids := []string{"a", "b", "c", "d"}
-	h, idOut, r, w := dropZeroColumns(headers, ids, rows, widths, nil)
+	h, r, w := dropZeroColumns(headers, rows, widths, nil)
 	if !slices.Equal(h, []string{"A", "C"}) {
 		t.Errorf("headers = %v, want [A C]", h)
-	}
-	if !slices.Equal(idOut, []string{"a", "c"}) {
-		t.Errorf("ids = %v, want [a c]", idOut)
 	}
 	if !slices.Equal(r[0], []string{"a1", "c1"}) || !slices.Equal(r[1], []string{"a2", "c2"}) {
 		t.Errorf("rows = %v", r)
@@ -165,9 +161,9 @@ func TestDropZeroColumnsAllDropped(t *testing.T) {
 	headers := []string{"A", "B"}
 	rows := [][]string{{"a1", "b1"}}
 	widths := []int{0, 0}
-	h, idOut, r, w := dropZeroColumns(headers, nil, rows, widths, nil)
-	if len(h) != 0 || len(r[0]) != 0 || len(w) != 0 || idOut != nil {
-		t.Errorf("all-dropped = %v / %v / %v / %v, want empty and nil ids", h, idOut, r, w)
+	h, r, w := dropZeroColumns(headers, rows, widths, nil)
+	if len(h) != 0 || len(r[0]) != 0 || len(w) != 0 {
+		t.Errorf("all-dropped = %v / %v / %v, want empty", h, r, w)
 	}
 }
 
@@ -179,67 +175,15 @@ func TestDropZeroColumnsWarnsForHiddenCapability(t *testing.T) {
 	headers := []string{"PATH", "CAPX"}
 	rows := [][]string{{"/x", "yes"}}
 	t.Run("capability warns", func(t *testing.T) {
-		errOut := testutil.CaptureStderr(t, func() { dropZeroColumns(headers, nil, rows, []int{10, 0}, capHeader) })
+		errOut := testutil.CaptureStderr(t, func() { dropZeroColumns(headers, rows, []int{10, 0}, capHeader) })
 		if !strings.Contains(errOut, "terminal too narrow; hid CAPX") {
 			t.Fatalf("hidden capability must warn: %q", errOut)
 		}
 	})
 	t.Run("core stays silent", func(t *testing.T) {
-		errOut := testutil.CaptureStderr(t, func() { dropZeroColumns(headers, nil, rows, []int{0, 5}, capHeader) })
+		errOut := testutil.CaptureStderr(t, func() { dropZeroColumns(headers, rows, []int{0, 5}, capHeader) })
 		if errOut != "" {
 			t.Fatalf("hidden core column must not warn: %q", errOut)
 		}
 	})
-}
-
-// TestSizedGridPrunesIDs pins that ids drop in lockstep with headers/rows, so
-// a dropped column leaves no orphan id behind.
-
-func TestSizedGridPrunesIDs(t *testing.T) {
-	headers := []string{"A", "B"}
-	ids := []string{"id-a", "id-b"}
-	rows := [][]string{{"x", "y"}}
-	p := Policy{Priority: []string{"B"}, Floors: map[string]int{"B": 0}}
-	h, idOut, r, _, _ := SizedGrid(headers, ids, rows, 3, nil, p)
-	if !slices.Equal(h, []string{"A"}) || !slices.Equal(idOut, []string{"id-a"}) {
-		t.Fatalf("SizedGrid = headers %v ids %v, want [A] [id-a]", h, idOut)
-	}
-	if !slices.Equal(r[0], []string{"x"}) {
-		t.Fatalf("rows = %v, want [[x]]", r)
-	}
-}
-
-// TestPrintTableRendersPrunedIDs pins the end-to-end invariant: a dropped
-// column leaves the renderer with only the kept ids.
-func TestPrintTableRendersPrunedIDs(t *testing.T) {
-	t.Setenv("COLUMNS", "3")
-	headers := []string{"A", "B"}
-	ids := []string{"id-a", "id-b"}
-	rows := [][]string{{"x", "y"}}
-	p := Policy{Priority: []string{"B"}, Floors: map[string]int{"B": 0}}
-	var seen []string
-	render := func(id, val string) string { seen = append(seen, id); return id }
-	out := testutil.CaptureStdout(t, func() { PrintTable(headers, ids, rows, ColorAlways, render, nil, p) })
-	if !slices.Equal(seen, []string{"id-a"}) {
-		t.Fatalf("render saw ids %v, want [id-a]", seen)
-	}
-	if strings.Contains(out, "id-b") {
-		t.Fatalf("output must not contain dropped id: %q", out)
-	}
-}
-
-// TestRenderCellsRequiresIDsWhenStyled pins the documented guard: a renderer
-// with a nil/short ids panics with a clear message instead of an index-out-of-
-// range.
-func TestRenderCellsRequiresIDsWhenStyled(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic for nil ids with render set")
-		}
-		if s, ok := r.(string); !ok || !strings.Contains(s, "ids length") {
-			t.Fatalf("panic = %v, want ids-length message", r)
-		}
-	}()
-	RenderCells([]string{"A"}, nil, [][]string{{"x"}}, func(id, val string) string { return val })
 }

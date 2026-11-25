@@ -89,22 +89,8 @@ func assertWithin(t *testing.T, widths []int, budget int) {
 }
 
 func widthsFor(headers []string, rows [][]string, budget int) []int {
-	p := GridPolicy(headers)
-	return ui.ColumnWidths(headers, rows, budget, p.Priority, p.Floors, p.CapHeader)
-}
-
-// TestValidateProgress pins the --progress value contract: valid modes are
-// accepted, and an unknown mode is a usage error.
-func TestValidateProgress(t *testing.T) {
-	for _, mode := range []string{"", ui.ProgressAuto, ui.ProgressAlways, ui.ProgressNever} {
-		if err := validateProgress(mode); err != nil {
-			t.Errorf("validateProgress(%q) = %v, want nil", mode, err)
-		}
-	}
-	var ue UsageError
-	if err := validateProgress("sometimes"); !errors.As(err, &ue) {
-		t.Errorf("validateProgress(sometimes) = %v, want usageError", err)
-	}
+	priority, floors := ShrinkPolicy(headers)
+	return ui.ColumnWidths(headers, rows, budget, priority, floors)
 }
 
 // TestCellTemp pins the shared TEMP cell: a dash for permanent worktrees, the

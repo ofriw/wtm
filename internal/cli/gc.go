@@ -347,7 +347,8 @@ func pickerGrid(candidates []core.Worktree, ctx core.ColumnContext, budget int) 
 	cols := core.PickerColumns()
 	headers := core.ColumnHeaders(cols)
 	rows := core.GridRows(cols, candidates, ctx)
-	headers, _, rows, widths, aligns := ui.SizedGrid(headers, nil, rows, budget, core.ColumnRightAligns(cols), core.GridPolicy(headers))
+	priority, floors := core.ShrinkPolicy(headers)
+	headers, rows, widths, aligns := ui.SizedGrid(headers, rows, budget, core.ColumnRightAligns(cols), priority, floors, core.IsCapabilityHeader)
 	header, body := ui.RenderGrid(headers, rows, widths, aligns)
 	return header, body, widths
 }

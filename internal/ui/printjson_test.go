@@ -3,12 +3,12 @@ package ui
 import (
 	"testing"
 
-	. "wtm/internal/testutil"
+	testutil "wtm/internal/testutil"
 )
 
 // TestPrintJSON pins the machine-output contract: indented JSON on stdout.
 func TestPrintJSON(t *testing.T) {
-	out := CaptureStdout(t, func() {
+	out := testutil.CaptureStdout(t, func() {
 		if err := PrintJSON(map[string]any{"a": 1}); err != nil {
 			t.Errorf("PrintJSON: %v", err)
 		}

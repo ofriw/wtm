@@ -185,7 +185,7 @@ func TestPrintTable(t *testing.T) {
 	t.Setenv("COLUMNS", "0") // non-TTY goldens must stay at natural widths
 	headers := []string{"A", "BB"}
 	rows := [][]string{{"x", "y"}, {"long", "z"}}
-	out := CaptureStdout(t, func() { ui.PrintTable(headers, nil, rows, ui.ColorAuto, nil, nil, ui.Policy{}) })
+	out := CaptureStdout(t, func() { ui.PrintTable(headers, rows, ui.ColorAuto, nil, nil, nil, nil, nil) })
 	want := "A     BB\nx     y\nlong  z\n"
 	if out != want {
 		t.Fatalf("printTable = %q, want %q", out, want)
@@ -194,32 +194,15 @@ func TestPrintTable(t *testing.T) {
 
 // TestStatusHeadersSSOT pins the status header literal and proves the shrink
 // policy is derived from the same registry: a rename or a new rank cannot pass
-// without updating this contract. It also pins that every column carries a
-// stable, unique style-routing ID, so cli's ID-keyed styling stays bound to
-// the schema.
+// without updating this contract.
 func TestStatusHeadersSSOT(t *testing.T) {
 	want := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "STATUS", "TEMP", "INTEGRATIONS"}
 	if !slices.Equal(core.ColumnHeaders(core.StatusColumns()), want) {
 		t.Fatalf("status headers = %v, want %v", core.ColumnHeaders(core.StatusColumns()), want)
 	}
-	seen := map[string]bool{}
-	for _, c := range core.AllColumns() {
-		if c.ID == "" {
-			t.Errorf("column %q has no style ID", c.Header)
-		}
-		if seen[c.ID] {
-			t.Errorf("column ID %q is not unique", c.ID)
-		}
-		seen[c.ID] = true
-	}
-	for _, c := range core.Capabilities() {
-		if c.Column().ID != c.ID {
-			t.Errorf("capability column ID = %q, want %q", c.Column().ID, c.ID)
-		}
-	}
 	// The elision order production derives for this table is a contract, not an
 	// implementation detail.
-	priority := core.GridPolicy(want).Priority
+	priority, _ := core.ShrinkPolicy(want)
 	wantShrink := []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED", "INTEGRATIONS"}
 	if !slices.Equal(priority, wantShrink) {
 		t.Errorf("shrink priority = %v, want %v", priority, wantShrink)
@@ -273,7 +256,7 @@ func TestWideColumnsShrinkable(t *testing.T) {
 	}
 	// Dynamic shrink priority must include capability columns when present.
 	headers := core.ColumnHeaders(wideCols)
-	priority := core.GridPolicy(headers).Priority
+	priority, _ := core.ShrinkPolicy(headers)
 	for _, c := range core.Capabilities() {
 		if !slices.Contains(priority, strings.ToUpper(c.ID)) {
 			t.Errorf("capability column %q not in dynamic shrink priority", strings.ToUpper(c.ID))
@@ -287,8 +270,8 @@ func TestRenderGridMatchesPrintTable(t *testing.T) {
 	t.Setenv("COLUMNS", "0")
 	headers := []string{"A", "BB", "CCC"}
 	rows := [][]string{{"x", "yy", "zzz"}, {"longer", "y", "z"}}
-	out := CaptureStdout(t, func() { ui.PrintTable(headers, nil, rows, ui.ColorNever, nil, []string{"CCC"}, ui.Policy{}) })
-	h, _, r, widths, aligns := ui.SizedGrid(headers, nil, rows, ui.WidthBudget(), []string{"CCC"}, ui.Policy{})
+	out := CaptureStdout(t, func() { ui.PrintTable(headers, rows, ui.ColorNever, nil, []string{"CCC"}, nil, nil, nil) })
+	h, r, widths, aligns := ui.SizedGrid(headers, rows, ui.WidthBudget(), []string{"CCC"}, nil, nil, nil)
 	header, body := ui.RenderGrid(h, r, widths, aligns)
 	if got := ui.GridString(header, body) + "\n"; got != out {
 		t.Fatalf("renderGrid = %q, printTable = %q", got, out)
