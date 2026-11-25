@@ -239,7 +239,7 @@ func TestWorktreeCreated(t *testing.T) {
 	t.Setenv(createdAtEnv, "")
 	_ = os.Unsetenv(createdAtEnv)
 	dir := t.TempDir()
-	if !worktreeCreated(dir).IsZero() {
+	if !worktreeCreated(dir, time.Now()).IsZero() {
 		t.Error("a worktree without a .git entry must have no creation mark")
 	}
 
@@ -247,26 +247,46 @@ func TestWorktreeCreated(t *testing.T) {
 	writeFile(t, gitEntry, "gitdir: /elsewhere\n", 0o644)
 	birth := fileBirthTime(gitEntry)
 	if birth.IsZero() {
+		if os.Getenv(requireBtimeEnv) != "" {
+			t.Fatal("filesystem records no birth time, but WTM_REQUIRE_BTIME requires one")
+		}
 		t.Log("filesystem records no birth time; AGE is unknown here")
 	}
-	if got := worktreeCreated(dir); !got.Equal(birth) {
+	now := time.Now()
+	if got := worktreeCreated(dir, now); !got.Equal(birth) {
 		t.Errorf("worktreeCreated = %v, want the .git entry birth time %v", got, birth)
 	}
 
 	// The seam must win over the filesystem fact, for both RFC3339 forms.
 	pin := time.Date(2020, 1, 1, 0, 0, 0, 123456789, time.UTC)
 	t.Setenv(createdAtEnv, pin.Format(time.RFC3339Nano))
-	if got := worktreeCreated(dir); !got.Equal(pin) {
+	if got := worktreeCreated(dir, now); !got.Equal(pin) {
 		t.Errorf("worktreeCreated = %v, want the %s pin %v", got, createdAtEnv, pin)
 	}
 	whole := time.Date(2021, 6, 7, 8, 9, 10, 0, time.UTC)
 	t.Setenv(createdAtEnv, whole.Format(time.RFC3339))
-	if got := worktreeCreated(dir); !got.Equal(whole) {
+	if got := worktreeCreated(dir, now); !got.Equal(whole) {
 		t.Errorf("worktreeCreated = %v, want the %s pin %v", got, createdAtEnv, whole)
 	}
 	t.Setenv(createdAtEnv, "nope")
-	if got := worktreeCreated(dir); !got.Equal(birth) {
+	if got := worktreeCreated(dir, now); !got.Equal(birth) {
 		t.Errorf("malformed %s = %v, want the filesystem birth time %v", createdAtEnv, got, birth)
+	}
+}
+
+// TestFutureCreatedAtYieldsNoAge pins the future-timestamp policy: a creation
+// mark after the report instant is no mark, so AGE renders "-" and JSON omits
+// ageSeconds, instead of a clamped, positive-looking zero.
+func TestFutureCreatedAtYieldsNoAge(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	t.Setenv(createdAtEnv, now.Add(365*24*time.Hour).Format(time.RFC3339))
+	if got := worktreeCreated(dir, now); !got.IsZero() {
+		t.Errorf("worktreeCreated = %v, want no mark for a future creation mark", got)
+	}
+	t.Setenv(createdAtEnv, now.Add(-24*time.Hour).Format(time.RFC3339))
+	if got := worktreeCreated(dir, now); got.IsZero() {
+		t.Error("worktreeCreated = zero, want a real mark for a past creation mark")
 	}
 }
 

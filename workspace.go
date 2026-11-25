@@ -143,7 +143,7 @@ func worktreeInventory(g gworktree, idx sessionIndex, ups map[string]upstream, p
 		// Dirty is set lazily by the gc picker; status does not use it.
 		LastUsed: worktreeLastUsed(pth, idx, p, now),
 		Caps:     capabilityStates(capInput{root: pth, mcp: configs}),
-		Created:  worktreeCreated(pth),
+		Created:  worktreeCreated(pth, now),
 	}
 }
 
@@ -151,13 +151,21 @@ func worktreeInventory(g gworktree, idx sessionIndex, ups map[string]upstream, p
 // A linked worktree's .git is a file and the main's is a directory; neither
 // birth time moves on ref or index writes. Filesystems that record no birth
 // time yield zero, so AGE reads "-": an mtime or reflog proxy would re-stamp
-// on writes and report a young worktree as new. createdAtEnv overrides this
-// for tests only.
-func worktreeCreated(path string) time.Time {
+// on writes and report a young worktree as new. A mark after the report
+// instant is no age, matching the future-timestamp policy used everywhere else.
+// createdAtEnv serves tests only and short-circuits the stat; the future rule
+// covers it too.
+func worktreeCreated(path string, now time.Time) time.Time {
+	created := time.Time{}
 	if t, ok := parseCreatedAtEnv(); ok {
-		return t
+		created = t
+	} else {
+		created = fileBirthTime(filepath.Join(path, ".git"))
 	}
-	return fileBirthTime(filepath.Join(path, ".git"))
+	if created.After(now) {
+		return time.Time{}
+	}
+	return created
 }
 
 // applyTempRecord marks w temporary when its record verifies. Every failure

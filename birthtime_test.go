@@ -28,7 +28,7 @@ func TestWorktreeCreatedIgnoresGitMtime(t *testing.T) {
 	if err := os.Chtimes(gitDir, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	got := worktreeCreated(dir)
+	got := worktreeCreated(dir, time.Now())
 	if got.Equal(stamp) {
 		t.Fatalf("worktreeCreated read the .git mtime %v", stamp)
 	}
@@ -37,9 +37,16 @@ func TestWorktreeCreatedIgnoresGitMtime(t *testing.T) {
 	}
 }
 
+// requireBtimeEnv turns the birth-time skip into a failure on runners whose
+// filesystem must record birth times (macOS APFS), so the statx/birth-time
+// path is proven in CI instead of silently skipped. It mirrors the
+// WTM_REQUIRE_RACE skip-as-failure policy.
+const requireBtimeEnv = "WTM_REQUIRE_BTIME"
+
 // TestFileBirthTime pins the platform helper contract: a missing path has no
 // mark, and changing mtime never moves the birth time. Filesystems that record
-// no birth time (some Linux mounts, older kernels) skip the positive checks.
+// no birth time (some Linux mounts, older kernels) skip the positive checks
+// unless WTM_REQUIRE_BTIME is set.
 func TestFileBirthTime(t *testing.T) {
 	dir := t.TempDir()
 	if !fileBirthTime(filepath.Join(dir, "absent")).IsZero() {
@@ -50,6 +57,9 @@ func TestFileBirthTime(t *testing.T) {
 	writeFile(t, path, "x", 0o644)
 	birth := fileBirthTime(path)
 	if birth.IsZero() {
+		if os.Getenv(requireBtimeEnv) != "" {
+			t.Fatal("filesystem records no birth time, but WTM_REQUIRE_BTIME requires one")
+		}
 		t.Skip("filesystem records no birth time")
 	}
 	if d := time.Since(birth); d < -time.Minute || d > 10*time.Minute {

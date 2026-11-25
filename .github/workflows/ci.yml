@@ -73,6 +73,17 @@ jobs:
         env:
           WTM_REQUIRE_RACE: "1"
         run: go test -race -count=1 ./...
+      - name: go test -run 'TestFileBirthTime|TestWorktreeCreated' (required btime)
+        # APFS records birth times; some Linux mounts do not, so require the
+        # positive assertion only where the filesystem supports it. Running
+        # TestWorktreeCreated under the same flag proves AGE through the full
+        # worktreeCreated -> fileBirthTime composition, not just fileBirthTime.
+        # A skip here is a coverage loss, not a pass (same policy as
+        # WTM_REQUIRE_RACE).
+        if: matrix.runner == 'macos-15'
+        env:
+          WTM_REQUIRE_BTIME: "1"
+        run: go test -count=1 -run 'TestFileBirthTime|TestWorktreeCreated' .
 
   # Tier 2: container golden filesystem diff, authoritative for integration.
   # Native arm64 (not QEMU) keeps this fast.
