@@ -148,4 +148,9 @@ jobs:
         env:
           GOCACHE: ${{ runner.temp }}/go cache
           GOPROXY: "off"
-        run: go test ./internal/cli -run '^TestNativeStatusJSON$' -count=1
+        # -run exits 0 with "[no tests to run]" when the pattern matches nothing, so
+        # assert the test actually ran; otherwise a rename retires this check. Capture
+        # output first: grep -q exits on first match and can SIGPIPE the writer (rc 141).
+        run: |
+          out=$(go test ./internal/cli -v -run '^TestNativeStatusJSON$' -count=1)
+          printf '%s\n' "$out" | grep -q -- '--- PASS: TestNativeStatusJSON'
