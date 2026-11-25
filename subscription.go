@@ -65,7 +65,8 @@ func loadSubscriptions(hasClaude bool) subscriptions {
 	if !hasClaude {
 		return s
 	}
-	s.claude, s.since, s.claudeAllowanceOnly, s.claudeErr = readClaudeSubscription()
+	v, err := readClaudeSubscription()
+	s.claude, s.since, s.claudeAllowanceOnly, s.claudeErr = v.ok, v.asOf, v.allowanceOnly, err
 	if s.claude {
 		var managedErr error
 		s.managed, managedErr = managedMetered()
@@ -206,53 +207,68 @@ func readClaudeAccount(path string) (*claudeAccount, error) {
 	return &acct, nil
 }
 
+// claudeSubscriptionVerdict is the proven Claude subscription proof. ok means
+// the current credentials bill by one of claudeSubscriptionBillingTypes with no
+// metered override; asOf is the subscription start; allowanceOnly means extra
+// usage is explicitly disabled, pinning a completed request's marginal cost at
+// $0.
+type claudeSubscriptionVerdict struct {
+	ok            bool
+	asOf          time.Time
+	allowanceOnly bool
+}
+
 // readClaudeSubscription proves the Claude Code subscription: the account must
 // bill by one of claudeSubscriptionBillingTypes and no metered override may be
 // configured, since an API key, Bedrock or Vertex bills every request outside
-// the subscription. The third result is true only when the account explicitly
+// the subscription. allowanceOnly is true only when the account explicitly
 // disables extra usage, which pins a completed request's marginal cost at $0.
-func readClaudeSubscription() (bool, time.Time, bool, error) {
-	metered, err := claudeMeteredOverride()
-	if err != nil {
-		return false, time.Time{}, false, err
+func readClaudeSubscription() (claudeSubscriptionVerdict, error) {
+	if metered, err := claudeMeteredOverride(); err != nil || metered {
+		return claudeSubscriptionVerdict{}, err
 	}
-	if metered {
-		return false, time.Time{}, false, nil
+	acct, err := currentClaudeAccount()
+	if err != nil || acct == nil {
+		return claudeSubscriptionVerdict{}, err
 	}
+	return claudeAccountProof(acct.OAuthAccount), nil
+}
+
+// currentClaudeAccount resolves and reads the active account file. A missing
+// file or a signed-out account yields nil without error; an unknowable account
+// voids the proof so loadUsage can disclose the cause.
+func currentClaudeAccount() (*claudeAccount, error) {
 	path, ok, err := claudeAccountFile()
-	if err != nil {
-		// An unknowable account voids the proof: claiming coverage would hide
-		// real money. loadUsage discloses the cause.
-		return false, time.Time{}, false, err
-	}
-	if !ok {
-		return false, time.Time{}, false, nil
+	if err != nil || !ok {
+		return nil, err
 	}
 	acct, err := readClaudeAccount(path)
 	if err != nil {
 		// A machine that never signed in is not an anomaly worth a warning.
 		if errors.Is(err, os.ErrNotExist) {
-			err = nil
+			return nil, nil
 		}
-		return false, time.Time{}, false, err
+		return nil, err
 	}
 	if acct.OAuthAccount == nil {
-		return false, time.Time{}, false, nil
+		return nil, nil
 	}
-	claude, since, allowanceOnly := claudeAccountProof(acct.OAuthAccount)
-	return claude, since, allowanceOnly, nil
+	return acct, nil
 }
 
 // claudeAccountProof decides one account record's coverage. An absent
 // hasExtraUsageEnabled means overage is possible, not disabled, so a legacy
 // file flips a covered $0 to ~$0.00.
-func claudeAccountProof(a *claudeOAuthAccount) (bool, time.Time, bool) {
+func claudeAccountProof(a *claudeOAuthAccount) claudeSubscriptionVerdict {
 	if !claudeSubscriptionBillingTypes[a.BillingType] {
-		return false, time.Time{}, false
+		return claudeSubscriptionVerdict{}
 	}
-	allowanceOnly := a.HasExtraUsageEnabled != nil && !*a.HasExtraUsageEnabled
 	since, _ := parseRFC3339(a.SubscriptionCreatedAt)
-	return true, since, allowanceOnly
+	return claudeSubscriptionVerdict{
+		ok:            true,
+		asOf:          since,
+		allowanceOnly: a.HasExtraUsageEnabled != nil && !*a.HasExtraUsageEnabled,
+	}
 }
 
 // claudeMeteredRule is one configured value that bills Claude Code outside the
@@ -346,6 +362,16 @@ func settingsMetered(path string) (bool, error) {
 	}), nil
 }
 
+// settingsPairMetered checks a directory's settings pair: the base file first,
+// then its local override. The first failure or metered verdict wins.
+func settingsPairMetered(dir, primary, local string) (bool, error) {
+	metered, err := settingsMetered(filepath.Join(dir, primary))
+	if err != nil || metered {
+		return metered, err
+	}
+	return settingsMetered(filepath.Join(dir, local))
+}
+
 // claudeUserMetered reports a user settings file that bills outside the
 // subscription. Both files are checked because a key helper in either one
 // changes every request's billing.
@@ -354,11 +380,7 @@ func claudeUserMetered() (bool, error) {
 	if dir == "" {
 		return false, nil
 	}
-	metered, err := settingsMetered(filepath.Join(dir, "settings.json"))
-	if err != nil || metered {
-		return metered, err
-	}
-	return settingsMetered(filepath.Join(dir, "settings.local.json"))
+	return settingsPairMetered(dir, "settings.json", "settings.local.json")
 }
 
 // claudeProjectMetered reports a worktree settings file that bills outside the
@@ -368,11 +390,7 @@ func claudeUserMetered() (bool, error) {
 // enterprise managed-settings.json is machine-global (managedMetered and the
 // cached subscriptions.managed).
 func claudeProjectMetered(root string) (bool, error) {
-	metered, err := settingsMetered(filepath.Join(root, claudeSettingsFile))
-	if err != nil || metered {
-		return metered, err
-	}
-	return settingsMetered(filepath.Join(root, claudeLocalSettingsFile))
+	return settingsPairMetered(root, claudeSettingsFile, claudeLocalSettingsFile)
 }
 
 // claudeParentScopeEnv is the operator kill switch for the ancestor-settings
@@ -396,11 +414,7 @@ func claudeParentsMetered(root string) (bool, error) {
 		return true, fmt.Errorf("claude ancestor settings for %s: %w", root, err)
 	}
 	for dir := filepath.Dir(abs); ; {
-		metered, err := settingsMetered(filepath.Join(dir, claudeSettingsFile))
-		if err != nil || metered {
-			return metered, err
-		}
-		metered, err = settingsMetered(filepath.Join(dir, claudeLocalSettingsFile))
+		metered, err := settingsPairMetered(dir, claudeSettingsFile, claudeLocalSettingsFile)
 		if err != nil || metered {
 			return metered, err
 		}

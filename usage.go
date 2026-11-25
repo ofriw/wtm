@@ -901,41 +901,42 @@ func bridgesForeignTurn(last *span, e usageEvent, barriers []span) bool {
 }
 
 // answerBarriers maps each model named by the transcript to the merged spans of
-// turns answered by a different model. A chain of same-model point events must
-// never bridge one of these turns: bridging would attribute the foreign
-// answer's turn to the wrong model. Turns with no named answer are not
-// barriers, so the fallback opening attribution keeps ownership of them. A
-// session where every answered turn belongs to one model has no barriers, so
-// same-model chains across identical-answer turns stay intact.
+// turns answered by a different model, so a same-model chain never bridges a
+// foreign answer. Turns with no named answer are not barriers; a session where
+// every answer belongs to one model has none either.
 func answerBarriers(turns []turn, events []usageEvent) map[string][]span {
-	names := make(map[string]bool)
-	for _, e := range events {
-		names[e.model] = true
-	}
 	byAnswer := map[string][]span{}
 	for _, t := range turns {
-		if t.answer == "" {
-			continue
+		if t.answer != "" {
+			byAnswer[t.answer] = append(byAnswer[t.answer], t.span)
 		}
-		byAnswer[t.answer] = append(byAnswer[t.answer], t.span)
 	}
 	if len(byAnswer) <= 1 {
 		return nil
 	}
-	out := make(map[string][]span, len(names))
+	names := make(map[string]bool)
+	for _, e := range events {
+		names[e.model] = true
+	}
+	out := make(map[string][]span)
 	for name := range names {
-		var foreign []span
-		for ans, spans := range byAnswer {
-			if ans != name {
-				foreign = append(foreign, spans...)
-			}
+		if foreign := foreignAnswerSpans(name, byAnswer); len(foreign) > 0 {
+			out[name] = mergeSpans(foreign)
 		}
-		if len(foreign) == 0 {
-			continue
-		}
-		out[name] = mergeSpans(foreign)
 	}
 	return out
+}
+
+// foreignAnswerSpans collects the spans of every turn answered by a different
+// model, so a bridge across one of them misattributes the foreign answer.
+func foreignAnswerSpans(name string, byAnswer map[string][]span) []span {
+	var foreign []span
+	for ans, spans := range byAnswer {
+		if ans != name {
+			foreign = append(foreign, spans...)
+		}
+	}
+	return foreign
 }
 
 // foldBilled adds one event's priced pair to the model and harness totals.
@@ -1101,28 +1102,33 @@ func electBilledMask(events []usageEvent, best map[string]dedupeBest, covered co
 			mask[ei] = true
 			continue
 		}
-		w, ok := best[e.key]
-		if !ok {
-			continue
-		}
-		if w.hasUncovered {
-			if covered(e) {
-				continue // a covered copy never substitutes for a metered twin
-			}
-			target := w.uncovered
-			if !scoreOf(e).beats(target) && !target.beats(scoreOf(e)) {
-				mask[ei] = true
-				delete(best, e.key)
-			}
-			continue
-		}
-		s := scoreOf(e)
-		if !s.beats(w.score) && !w.score.beats(s) {
-			mask[ei] = true
-			delete(best, e.key)
-		}
+		electKeyedCopy(mask, ei, e, best, covered)
 	}
 	return mask
+}
+
+// electKeyedCopy awards the slot for one keyed event. When a metered
+// (uncovered) twin exists, only an uncovered copy can prove the charge, so a
+// covered copy never substitutes for it; otherwise the first copy at the
+// overall best score wins and later equal duplicates drop.
+func electKeyedCopy(mask []bool, ei int, e usageEvent, best map[string]dedupeBest, covered coveredProof) {
+	w, ok := best[e.key]
+	if !ok {
+		return
+	}
+	win := w.score
+	if w.hasUncovered {
+		if covered(e) {
+			return // a covered copy never substitutes for a metered twin
+		}
+		win = w.uncovered
+	}
+	s := scoreOf(e)
+	if s.beats(win) || win.beats(s) {
+		return // not a tie: a better copy won, or the slot was already taken
+	}
+	mask[ei] = true
+	delete(best, e.key)
 }
 
 // model returns the harness's accumulator for one model, creating it on demand.

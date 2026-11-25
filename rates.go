@@ -982,15 +982,15 @@ func loadCatalogFromNotify(url string, p *progress, now time.Time) (catalog, err
 // same cache file, so a retry cannot repeat a warning.
 func loadFromCachePath(path, url string, p *progress, now time.Time) (catalog, error) {
 	warn := dedupeWarn(progressWarn(p))
-	c, fresh, cacheUnusable := readFreshCache(path, warn, now)
-	if fresh {
+	st := readFreshCache(path, warn, now)
+	if st.fresh {
 		p.detail(string(catalogCache))
-		return c, nil
+		return st.catalog, nil
 	}
 	if err := p.abort(); err != nil {
 		return nil, err
 	}
-	c, fetchErr := tryFetch(path, url, p, cacheUnusable, warn, now)
+	c, fetchErr := tryFetch(path, url, p, st.cacheUnusable, warn, now)
 	if fetchErr == nil {
 		return c, nil
 	}
@@ -1218,43 +1218,56 @@ func clearAttemptMarkers(path string) {
 	_ = os.Remove(filepath.Join(dir, fallbackAttemptName(path)))
 }
 
+// cacheState is readFreshCache's verdict: the parsed catalog, whether it is
+// inside its TTL, and whether the cache path itself is unusable for writes.
+type cacheState struct {
+	catalog       catalog
+	fresh         bool
+	cacheUnusable bool
+}
+
 // readFreshCache serves the cache when it is inside its TTL and parses cleanly.
 // A missing cache is silent: the first run refetches. Any other stat or parse
-// failure names the path and cause and returns false, so the caller refetches
-// instead of serving a corrupt copy in silence. Both failures stay visible
-// beside the fetch cause, which staleCatalog reports later. A stat failure also
-// blocks the cache write, so it is disclosed once, with both effects, and the
-// path is reported unusable to keep fetchAndCache silent.
-func readFreshCache(path string, warn warnSink, now time.Time) (catalog, bool, bool) {
+// failure names the path and cause and leaves fresh false, so the caller
+// refetches instead of serving a corrupt copy in silence. Both failures stay
+// visible beside the fetch cause, which staleCatalog reports later. A stat
+// failure also blocks the cache write, so it is disclosed once, with both
+// effects, and the path is reported unusable to keep fetchAndCache silent.
+func readFreshCache(path string, warn warnSink, now time.Time) cacheState {
 	fresh, err := cacheFresh(path, now)
 	if err != nil {
-		// A missing cache is the normal cold start, not corruption. Every other
-		// stat failure (permissions, I/O, a link loop) means the path cannot be
-		// read or written. Windows reports a file where a directory is needed as
-		// ERROR_PATH_NOT_FOUND (ENOENT), so a missing path is a cold start only
-		// when its parent really is a directory; otherwise the path is unusable.
-		if errors.Is(err, os.ErrNotExist) {
-			// A parent that exists but is not a directory blocks both read and
-			// write, so the path is unusable. A missing parent is a normal cold
-			// start: the cache dir is created on write.
-			if d, derr := os.Stat(filepath.Dir(path)); derr == nil && !d.IsDir() {
-				doWarnSink(warn, fmt.Errorf("%s: %w; refetching and skipping the rate cache write", path, err))
-				return nil, false, true
-			}
-			return nil, false, false
-		}
-		doWarnSink(warn, fmt.Errorf("%s: %w; refetching and skipping the rate cache write", path, err))
-		return nil, false, true
+		return cacheUnusableOrColdStart(path, warn, err)
 	}
 	if !fresh {
-		return nil, false, false
+		return cacheState{}
 	}
 	c, err := parseCatalogFile(path, warn)
 	if err != nil {
 		doWarnSink(warn, fmt.Errorf("%s: %w; refetching", path, err))
-		return nil, false, false
+		return cacheState{}
 	}
-	return c, true, false
+	return cacheState{catalog: c, fresh: true}
+}
+
+// cacheUnusableOrColdStart classifies a cache stat failure. A missing cache is
+// the normal cold start; every other stat failure (permissions, I/O, a link
+// loop) means the path cannot be read or written. Windows reports a file where
+// a directory is needed as ERROR_PATH_NOT_FOUND (ENOENT), so a missing path is
+// a cold start only when its parent really is a directory; otherwise the path
+// is unusable.
+func cacheUnusableOrColdStart(path string, warn warnSink, err error) cacheState {
+	if !errors.Is(err, os.ErrNotExist) {
+		doWarnSink(warn, fmt.Errorf("%s: %w; refetching and skipping the rate cache write", path, err))
+		return cacheState{cacheUnusable: true}
+	}
+	// A parent that exists but is not a directory blocks both read and write,
+	// so the path is unusable. A missing parent is a normal cold start: the
+	// cache dir is created on write.
+	if d, derr := os.Stat(filepath.Dir(path)); derr == nil && !d.IsDir() {
+		doWarnSink(warn, fmt.Errorf("%s: %w; refetching and skipping the rate cache write", path, err))
+		return cacheState{cacheUnusable: true}
+	}
+	return cacheState{}
 }
 
 func fetchAndCache(path, url string, p *progress, cacheUnusable bool, warn warnSink) (catalog, error) {
@@ -1266,22 +1279,30 @@ func fetchAndCache(path, url string, p *progress, cacheUnusable bool, warn warnS
 	if err != nil {
 		return nil, err
 	}
-	// A failed cache write must not hide prices: keep the fetched catalog for
-	// this run and retry the fetch next run instead of serving unknown costs.
-	// An unreadable mode is not a licence to widen it: skip the write. An
-	// already-disclosed unusable path skips it without a second warning.
-	if !cacheUnusable {
-		mode, err := fileModeOrDefault(path)
-		if err != nil {
-			warnProgress(p, "rate cache mode %s: %s; skipping the cache write", path, err)
-		} else if err := writeFileAtomic(path, raw, mode); err != nil {
-			warnProgress(p, "rate cache write failed: %s; prices will be fetched again next run", err)
-		}
-	}
+	writeCacheSafe(path, raw, p, cacheUnusable)
 	// The fetch succeeded, so any prior failure marker is obsolete even when the
 	// cache write failed.
 	clearAttemptMarkers(path)
 	return c, nil
+}
+
+// writeCacheSafe persists the fetched catalog, degrading a failed write to a
+// warning instead of hiding prices: the run keeps today's fetched catalog and
+// retries the write next run. An unreadable mode is not a licence to widen it,
+// so the write is skipped; an already-disclosed unusable path skips it without
+// a second warning.
+func writeCacheSafe(path string, raw []byte, p *progress, cacheUnusable bool) {
+	if cacheUnusable {
+		return
+	}
+	mode, err := fileModeOrDefault(path)
+	if err != nil {
+		warnProgress(p, "rate cache mode %s: %s; skipping the cache write", path, err)
+		return
+	}
+	if err := writeFileAtomic(path, raw, mode); err != nil {
+		warnProgress(p, "rate cache write failed: %s; prices will be fetched again next run", err)
+	}
 }
 
 func ratesCachePath() (string, error) {

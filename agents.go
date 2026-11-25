@@ -435,20 +435,33 @@ func (s *sessionScan) scan(ags []agent) error {
 	return nil
 }
 
-func (s *sessionScan) walk(a agent) error {
+// sessionBase resolves the agent's session root and its resolved target. An
+// empty base means the agent has no session directory to scan.
+func sessionBase(a agent) (base, target string, err error) {
 	if a.configDir() == "" {
-		return nil
+		return "", "", nil
 	}
-	base, err := sessionRoot(filepath.Join(a.configDir(), a.sessionSubdir))
+	base, err = sessionRoot(filepath.Join(a.configDir(), a.sessionSubdir))
 	if err != nil {
-		return s.pol.sessionErr(fmt.Errorf("session root: %w", err))
+		return "", "", fmt.Errorf("session root: %w", err)
+	}
+	if base == "" {
+		return "", "", nil
+	}
+	target, err = filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve sessions %s: %w", base, err)
+	}
+	return base, target, nil
+}
+
+func (s *sessionScan) walk(a agent) error {
+	base, target, err := sessionBase(a)
+	if err != nil {
+		return s.pol.sessionErr(err)
 	}
 	if base == "" {
 		return nil
-	}
-	target, err := filepath.EvalSymlinks(base)
-	if err != nil {
-		return s.pol.sessionErr(fmt.Errorf("resolve sessions %s: %w", base, err))
 	}
 	s.pol.p.detail(a.name)
 	if err := s.pol.p.abort(); err != nil {
@@ -458,6 +471,16 @@ func (s *sessionScan) walk(a agent) error {
 	if err := s.pol.p.abort(); err != nil {
 		return err
 	}
+	if err := s.reportWalkFindings(walkErrs, unverified); err != nil {
+		return err
+	}
+	return s.resolve(a, cands)
+}
+
+// reportWalkFindings applies the session error policy to walk findings in their
+// fixed order: structural walk errors abort in a strict run, then unknown-owner
+// paths become evidence.
+func (s *sessionScan) reportWalkFindings(walkErrs []error, unverified []unverifiedFile) error {
 	for _, walkErr := range walkErrs {
 		if perr := s.pol.sessionErr(walkErr); perr != nil {
 			return perr
@@ -468,7 +491,7 @@ func (s *sessionScan) walk(a agent) error {
 			return err
 		}
 	}
-	return s.resolve(a, cands)
+	return nil
 }
 
 // sessionCandidate is one regular session file awaiting an owner read. The walk
@@ -536,9 +559,11 @@ type ownerRead struct {
 // resolve reads owners in a bounded pool: the kernel and the disk, not the CPU,
 // bound this walk. Reads merge in candidate order, so the index and its
 // warnings never depend on completion order.
-func (s *sessionScan) resolve(a agent, cands []sessionCandidate) error {
+// readOwners looks up owners in a bounded pool: the kernel and disk, not the
+// CPU, bound this walk. Reads stay in candidate order for the merge.
+func (s *sessionScan) readOwners(a agent, cands []sessionCandidate) []ownerRead {
 	var processed atomic.Int64
-	reads := mapParallel(len(cands), scanWorkers, func(i int) ownerRead {
+	return mapParallel(len(cands), scanWorkers, func(i int) ownerRead {
 		c := cands[i]
 		if err := s.pol.p.abort(); err != nil {
 			return ownerRead{candidate: c, err: err}
@@ -553,6 +578,11 @@ func (s *sessionScan) resolve(a agent, cands []sessionCandidate) error {
 		}
 		return ownerRead{candidate: c, cwd: canonical(cwd)}
 	})
+}
+
+// mergeReads folds read results into the index in candidate order, so the index
+// and its warnings never depend on completion order.
+func (s *sessionScan) mergeReads(a agent, reads []ownerRead) error {
 	for _, r := range reads {
 		if err := s.pol.p.abort(); err != nil {
 			return err
@@ -570,6 +600,10 @@ func (s *sessionScan) resolve(a agent, cands []sessionCandidate) error {
 		})
 	}
 	return nil
+}
+
+func (s *sessionScan) resolve(a agent, cands []sessionCandidate) error {
+	return s.mergeReads(a, s.readOwners(a, cands))
 }
 
 // Resolve only the root symlink; resolving ancestors rewrites macOS /var paths.
@@ -921,31 +955,56 @@ func sanitizeEvents(events []usageEvent, warn warnSink) {
 	tierWarned := false
 	costWarned := map[string]bool{}
 	for i := range events {
-		model := events[i].model
-		if model == unreadableText {
-			if !modelWarned {
-				doWarnSink(warn, fmt.Errorf("model figure unreadable; reported as unknown"))
-				modelWarned = true
-			}
-			model = "unknown"
-			events[i].model = model
-		}
-		events[i].tokens = sanitizeTokens(events[i].tokens, model, warn)
-		if cause := invalidCount(events[i].webSearch); cause != "" {
-			doWarnSink(warn, countCauseError(model, "webSearch", cause))
-		}
-		if events[i].tier == unreadableText {
-			if !tierWarned {
-				doWarnSink(warn, fmt.Errorf("service_tier figure unreadable; tier stays unknown"))
-				tierWarned = true
-			}
-		}
-		if events[i].cost != nil {
-			if cause := invalidCost(*events[i].cost); cause != "" && !costWarned[cause] {
-				costWarned[cause] = true
-				doWarnSink(warn, fmt.Errorf("cost.total: %s", cause))
-			}
-		}
+		e := &events[i]
+		modelWarned = sanitizeEventModel(e, modelWarned, warn)
+		sanitizeEventTokens(e, warn)
+		tierWarned = sanitizeEventTier(e, tierWarned, warn)
+		sanitizeEventCost(e, costWarned, warn)
+	}
+}
+
+// sanitizeEventModel replaces a corrupt model name with the established
+// "unknown" fallback label, warning once per run before any warning names it.
+func sanitizeEventModel(e *usageEvent, modelWarned bool, warn warnSink) bool {
+	if e.model != unreadableText {
+		return modelWarned
+	}
+	if !modelWarned {
+		doWarnSink(warn, fmt.Errorf("model figure unreadable; reported as unknown"))
+		modelWarned = true
+	}
+	e.model = unknownValue
+	return modelWarned
+}
+
+// sanitizeEventTokens rejects corrupt token counts and discloses a corrupt
+// web-search count even when no catalog can price the event.
+func sanitizeEventTokens(e *usageEvent, warn warnSink) {
+	e.tokens = sanitizeTokens(e.tokens, e.model, warn)
+	if cause := invalidCount(e.webSearch); cause != "" {
+		doWarnSink(warn, countCauseError(e.model, "webSearch", cause))
+	}
+}
+
+// sanitizeEventTier names a corrupt service_tier once per run; it stays
+// unknown because ratesFor has no match for it.
+func sanitizeEventTier(e *usageEvent, tierWarned bool, warn warnSink) bool {
+	if e.tier == unreadableText && !tierWarned {
+		doWarnSink(warn, fmt.Errorf("service_tier figure unreadable; tier stays unknown"))
+		tierWarned = true
+	}
+	return tierWarned
+}
+
+// sanitizeEventCost warns once per cause about a corrupt self-priced cost
+// without mutating the event, so the duplicate election keeps the winning copy.
+func sanitizeEventCost(e *usageEvent, costWarned map[string]bool, warn warnSink) {
+	if e.cost == nil {
+		return
+	}
+	if cause := invalidCost(*e.cost); cause != "" && !costWarned[cause] {
+		costWarned[cause] = true
+		doWarnSink(warn, fmt.Errorf("cost.total: %s", cause))
 	}
 }
 

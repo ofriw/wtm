@@ -291,10 +291,10 @@ func TestLocalCatalogTooLargeFails(t *testing.T) {
 // TestFreshCacheTooLargeIsRefused pins the same bound on the cache route: a
 // corrupt fresh cache cannot be served and cannot OOM the run.
 func TestFreshCacheTooLargeIsRefused(t *testing.T) {
-	t.Setenv("WTM_NOW", "")
+	t.Setenv(nowEnv, "")
 	path := filepath.Join(t.TempDir(), "rates.json")
 	writeFile(t, path, strings.Repeat("x", ratesMaxBytes+1), 0o644)
-	if _, ok, _ := readFreshCache(path, nil, nowFunc()); ok {
+	if st := readFreshCache(path, nil, nowFunc()); st.fresh {
 		t.Fatal("an oversized fresh cache must not be served")
 	}
 	if _, err := parseCatalogFile(path, nil); !errors.Is(err, errRateCatalogTooLarge) {

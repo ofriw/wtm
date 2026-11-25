@@ -259,6 +259,8 @@ type progressOptions struct {
 	// delay is the orchestration-side silence window resolved by transientDelay;
 	// the model never sees it.
 	delay time.Duration
+	// interruptGrace overrides the package default; zero means interruptGrace.
+	interruptGrace time.Duration
 }
 
 // withProgress runs work against a renderer on stderr when gating allows, else
@@ -322,49 +324,95 @@ func runPlainProgress(out io.Writer, work func(*progress) error) error {
 // errInterrupted when either the signal record, the renderer, or a cancelled
 // work result proves the user interrupted.
 func runProgressProgram(out io.Writer, opts progressOptions, work func(*progress) error) error {
+	ctx, cancel := newProgressContext()
+	defer childCtx.Store(nil)
+	defer cancel()
+	workErr, events := feedProgress(ctx, work)
+	if v := maybeDrainSilentRun(out, opts.delay, workErr, events); v.done {
+		return v.err
+	}
+	animated := runAnimatedRenderer(out, opts, ctx, events)
+	cancel()
+	grace := opts.interruptGrace
+	if grace == 0 {
+		grace = interruptGrace
+	}
+	err := awaitWork(workErr, grace)
+	if animated.interrupted || errors.Is(err, context.Canceled) {
+		return errInterrupted
+	}
+	return chooseFinalError(err, animated.err)
+}
+
+// newProgressContext owns the single-renderer contract: a nested progress run
+// must fail loudly instead of sharing a parent's kill scope.
+func newProgressContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	if !childCtx.CompareAndSwap(nil, &ctx) {
 		panic("progress: nested renderer")
 	}
-	defer childCtx.Store(nil)
-	defer cancel()
-	workErr, events := feedProgress(ctx, work)
-	// Silence a fast run: if the work ends inside the delay window, drop its
-	// frames (notices still print) and return its outcome directly.
-	if opts.delay > 0 {
-		select {
-		case err := <-workErr:
-			drainSilentRun(out, events)
-			return err
-		case <-time.After(opts.delay):
-		}
+	return ctx, cancel
+}
+
+// silentRunVerdict is the silence-window outcome: done when the work finished
+// inside the delay window, carrying the work's error.
+type silentRunVerdict struct {
+	done bool
+	err  error
+}
+
+// renderVerdict is the animated-render outcome: the renderer's error and
+// whether the run proved interrupted.
+type renderVerdict struct {
+	err         error
+	interrupted bool
+}
+
+// maybeDrainSilentRun reports whether the work ended inside the silence window;
+// the caller then drops frames (notices still print) and returns the work's
+// outcome directly.
+func maybeDrainSilentRun(out io.Writer, delay time.Duration, workErr <-chan error, events <-chan progressEvent) silentRunVerdict {
+	if delay <= 0 {
+		return silentRunVerdict{}
 	}
+	select {
+	case err := <-workErr:
+		drainSilentRun(out, events)
+		return silentRunVerdict{done: true, err: err}
+	case <-time.After(delay):
+		return silentRunVerdict{}
+	}
+}
+
+// runAnimatedRenderer runs the Bubble Tea renderer and reports whether the run
+// proved interrupted: SIGTERM makes Run return nil, so only the record proves
+// it, unless the renderer itself quit on an interrupt. Restoring the default
+// disposition happens before the caller awaits the work, so a second Ctrl-C
+// terminates.
+func runAnimatedRenderer(out io.Writer, opts progressOptions, ctx context.Context, events <-chan progressEvent) renderVerdict {
 	signals := watchInterrupts()
 	defer signal.Stop(signals)
 	prog := tea.NewProgram(newProgressModel(events, progressWidth(out), opts), teaOptions(out, ctx)...)
 	_, runErr := prog.Run()
-	// Read the recorded signal before cancelling: SIGTERM makes Bubble Tea's
-	// Run return nil, so only the record proves the run was interrupted.
 	interrupted := interruptedBySignal(signals) || errors.Is(runErr, tea.ErrInterrupted)
-	// Restore the default disposition first: a second Ctrl-C must terminate.
-	signal.Stop(signals)
-	cancel()
-	// Wait for the work, bounded by the grace window so a wedged worker cannot
-	// hang the exit.
-	var err error
+	return renderVerdict{err: runErr, interrupted: interrupted}
+}
+
+// awaitWork waits for the work, bounded by the grace window so a wedged worker
+// cannot hang the exit.
+func awaitWork(workErr <-chan error, grace time.Duration) error {
 	select {
-	case err = <-workErr:
-	case <-time.After(interruptGrace):
-		warnf("work did not stop within %s of the interrupt; exiting anyway", interruptGrace)
-		err = errInterrupted
-	}
-	// A cancelled work result is the second proof: SIGTERM may be delivered to
-	// Bubble Tea before this listener even when it shut down cleanly.
-	if interrupted || errors.Is(err, context.Canceled) {
+	case err := <-workErr:
+		return err
+	case <-time.After(grace):
+		warnf("work did not stop within %s of the interrupt; exiting anyway", grace)
 		return errInterrupted
 	}
-	// Keep both failures visible: the renderer's cause would otherwise be hidden
-	// by the work's error.
+}
+
+// chooseFinalError keeps both failures visible: the renderer's cause would
+// otherwise be hidden by the work's error.
+func chooseFinalError(err, runErr error) error {
 	if err == nil {
 		return runErr
 	}

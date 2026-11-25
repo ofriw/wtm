@@ -232,17 +232,26 @@ type discoveryInputs struct {
 	temps   tempStore
 }
 
-// discoverInputs reads each shared source once, concurrently: worktrees,
+// discoverInputs emits the deferred warnings after the parallel batch joins, so
+// their order is stable.
+func discoverInputs(root string, p *progress, sessions sessionDiscovery) (discoveryInputs, error) {
+	in, upsWarn, tempWarn, err := fetchDiscoveryInputs(root, p, sessions)
+	if err != nil {
+		return discoveryInputs{}, err
+	}
+	emitWarning(p, upsWarn)
+	emitWarning(p, tempWarn)
+	return in, nil
+}
+
+// fetchDiscoveryInputs reads each shared source once, concurrently: worktrees,
 // sessions, upstreams and temp records are independent. The label names the
 // session walk because it dominates the batch; the other three finish in tens
-// of milliseconds. Warnings are emitted after the join, in a fixed order.
-func discoverInputs(root string, p *progress, sessions sessionDiscovery) (discoveryInputs, error) {
+// of milliseconds.
+func fetchDiscoveryInputs(root string, p *progress, sessions sessionDiscovery) (in discoveryInputs, upsWarn, tempWarn string, err error) {
 	var (
-		in          discoveryInputs
 		rawErr      error
 		sessionsErr error
-		upsWarn     string
-		tempWarn    string
 		wg          sync.WaitGroup
 	)
 	p.phase("indexing sessions", 0)
@@ -252,18 +261,22 @@ func discoverInputs(root string, p *progress, sessions sessionDiscovery) (discov
 	go func() { defer wg.Done(); in.ups, upsWarn = discoverUpstreams(root) }()
 	go func() { defer wg.Done(); in.temps, tempWarn = readTempStoreLenient() }()
 	wg.Wait()
-	if err := p.abort(); err != nil {
-		return discoveryInputs{}, err
+	if ferr := firstDiscoveryFailure(p.abort(), rawErr, sessionsErr); ferr != nil {
+		return discoveryInputs{}, "", "", ferr
+	}
+	return in, upsWarn, tempWarn, nil
+}
+
+// firstDiscoveryFailure returns the first reader failure: the abort check
+// precedes the workers' errors so an interrupt preempts their results.
+func firstDiscoveryFailure(abortErr, rawErr, sessionsErr error) error {
+	if abortErr != nil {
+		return abortErr
 	}
 	if rawErr != nil {
-		return discoveryInputs{}, rawErr
+		return rawErr
 	}
-	if sessionsErr != nil {
-		return discoveryInputs{}, sessionsErr
-	}
-	emitWarning(p, upsWarn)
-	emitWarning(p, tempWarn)
-	return in, nil
+	return sessionsErr
 }
 
 // emitWarning writes a deferred warning through the one disclosure path.

@@ -18,8 +18,16 @@ func cmdStatus(g *globals, args []string) error {
 	// JSON must all agree. Reading before withProgress means a slow rate-catalog
 	// fetch cannot split the report instant.
 	now := nowFunc()
+	ws, err := loadStatusWorkspace(g, now)
+	if err != nil {
+		return err
+	}
+	return printStatus(ws, wide, now, g)
+}
+
+func loadStatusWorkspace(g *globals, now time.Time) (workspace, error) {
 	var ws workspace
-	err = withProgress(g, statusProgressOptions(g), func(p *progress) error {
+	err := withProgress(g, statusProgressOptions(g), func(p *progress) error {
 		var lerr error
 		if ws, lerr = loadWorkspace(g, p, false, now); lerr != nil {
 			return lerr
@@ -27,8 +35,14 @@ func cmdStatus(g *globals, args []string) error {
 		return ws.loadUsage(p, now)
 	})
 	if err != nil {
-		return err
+		return workspace{}, err
 	}
+	return ws, nil
+}
+
+// printStatus emits the report: JSON when the contract requests it, otherwise
+// the table, legend and detail block.
+func printStatus(ws workspace, wide bool, now time.Time, g *globals) error {
 	current := currentWorktreePath(ws)
 	if g.json {
 		return printStatusJSON(ws.wts, now, ws.ttl, current)
