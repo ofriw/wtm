@@ -55,7 +55,7 @@ func activateTemp(t *testing.T, w core.Worktree, activity string) {
 // Cleanup reuses discovery's real ownership index, independent of idle refresh.
 func cleanupSessionIndex(t *testing.T, repo string) core.SessionIndex {
 	t.Helper()
-	ws, err := core.LoadWorkspace(&core.Globals{Root: repo}, false, defaultHooks())
+	ws, err := core.LoadWorkspace(core.Options{Root: repo}, false, defaultHooks())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func runIdleCleanup(t *testing.T, repo string, w core.Worktree, idx core.Session
 	t.Helper()
 	var res gcResult
 	warnings := CaptureStderr(t, func() {
-		err := withProgress(&core.Globals{JSON: true}, true, func(p *ui.Progress) error {
+		err := withProgress(&globals{JSON: true}, true, func(p *ui.Progress) error {
 			var err error
 			res, err = gcCleanup(repo, []core.Worktree{w}, remotePlan{keep: true}, false, idx, gcMode{deleteTemp: true, idleOnly: true}, TempNow, p)
 			return err

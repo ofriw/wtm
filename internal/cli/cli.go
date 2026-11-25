@@ -13,10 +13,10 @@ import (
 )
 
 // cli.go — the command layer: dispatch, exit-code mapping and the harness
-// orchestration (session discovery hooks, temp activity injection). The
-// framework types live in core; command handlers live here. Handlers use the
-// qualified framework types directly (core.Globals, ui.Progress, …): no type
-// aliases, so handlers and framework never carry two names for one type.
+// orchestration (session discovery hooks, temp activity injection). The flag
+// framework lives here (flags.go); core receives a neutral Options struct, so
+// the domain layer owns no CLI semantics. Handlers use the local globals and
+// core types directly: no type aliases.
 
 const usage = `wtm — worktree manager
 
@@ -42,16 +42,16 @@ exit codes: 0 ok, 1 error, 2 usage
 // Run is the CLI entry point; root's main() calls it.
 func Run(args []string) int {
 	harness.RegisterCapabilities() // composition root: core panics without it
-	g := &core.Globals{Color: ui.ColorAuto, Progress: ui.ProgressAuto}
+	g := &globals{Color: ui.ColorAuto, Progress: ui.ProgressAuto}
 	fs := flag.NewFlagSet("wtm", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	g.Register(fs)
+	g.register(fs)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Print(usage)
 			return 0
 		}
-		return fail(core.Usagef("%v", err))
+		return fail(usagef("%v", err))
 	}
 	cmd, rest := "status", fs.Args()
 	if len(rest) > 0 {
@@ -60,15 +60,15 @@ func Run(args []string) int {
 	return fail(dispatch(cmd, g, rest))
 }
 
-func dispatch(cmd string, g *core.Globals, rest []string) error {
-	// Globals are validated once here so every subcommand rejects bogus values.
-	if err := core.ValidateGlobals(g); err != nil {
+func dispatch(cmd string, g *globals, rest []string) error {
+	// globals are validated once here so every subcommand rejects bogus values.
+	if err := validateGlobals(g); err != nil {
 		return err
 	}
 	return dispatchSubcommand(cmd, g, rest)
 }
 
-func dispatchSubcommand(cmd string, g *core.Globals, rest []string) error {
+func dispatchSubcommand(cmd string, g *globals, rest []string) error {
 	switch cmd {
 	case "status":
 		return cmdStatus(g, rest, defaultHooks())
@@ -84,15 +84,15 @@ func dispatchSubcommand(cmd string, g *core.Globals, rest []string) error {
 		return cmdConfig(g, rest)
 	case "help":
 		fmt.Print(usage)
-		return core.ErrHelpOK
+		return errHelpOK
 	}
-	return core.Usagef("unknown command %q", cmd)
+	return usagef("unknown command %q", cmd)
 }
 
 // fail maps an error to the exit contract: usage → 2, anything else → 1.
 func fail(err error) int {
 	switch {
-	case err == nil, errors.Is(err, core.ErrHelpOK):
+	case err == nil, errors.Is(err, errHelpOK):
 		return 0
 	case errors.Is(err, errAborted):
 		// "aborted" is already on stderr; exit 0, no extra output.
@@ -117,16 +117,16 @@ func defaultHooks() core.Hooks {
 	}
 }
 
-func loadWorkspace(g *core.Globals, showProgress bool, sessions core.SessionDiscovery) (core.Workspace, error) {
+func loadWorkspace(g *globals, showProgress bool, sessions core.SessionDiscovery) (core.Workspace, error) {
 	hooks := defaultHooks()
 	hooks.Sessions = sessions
-	return core.LoadWorkspace(g, showProgress, hooks)
+	return core.LoadWorkspace(g.opts(), showProgress, hooks)
 }
 
 // loadGCWorkspace selects the session policy: explicit --path removal stays
 // lenient about ownership but strict about structured session errors; the
 // default idle path uses the strict fresh index.
-func loadGCWorkspace(g *core.Globals, paths []string) (core.Workspace, error) {
+func loadGCWorkspace(g *globals, paths []string) (core.Workspace, error) {
 	if len(paths) > 0 {
 		return loadWorkspace(g, true, harness.DiscoverySessions(true))
 	}
@@ -134,7 +134,7 @@ func loadGCWorkspace(g *core.Globals, paths []string) (core.Workspace, error) {
 }
 
 // withProgress runs work against the live renderer when gating allows.
-func withProgress(g *core.Globals, enabled bool, work func(*ui.Progress) error) error {
+func withProgress(g *globals, enabled bool, work func(*ui.Progress) error) error {
 	return withProgressTo(os.Stderr, g, enabled, work)
 }
 
@@ -142,6 +142,6 @@ func withProgress(g *core.Globals, enabled bool, work func(*ui.Progress) error) 
 // can drive the renderer against a pipe instead of a terminal. The gating's
 // TTY check still reads the real stderr: an explicit --progress always is what
 // lets a piped output reach the renderer at all.
-func withProgressTo(out io.Writer, g *core.Globals, enabled bool, work func(*ui.Progress) error) error {
+func withProgressTo(out io.Writer, g *globals, enabled bool, work func(*ui.Progress) error) error {
 	return ui.RunMaybeProgress(out, g.Progress, g.JSON, enabled, work)
 }

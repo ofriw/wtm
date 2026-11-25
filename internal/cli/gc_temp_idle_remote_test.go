@@ -77,7 +77,7 @@ func cleanupSharedIdleTemps(t *testing.T, repo string, selected []core.Worktree,
 	t.Helper()
 	var res gcResult
 	warnings := CaptureStderr(t, func() {
-		err := withProgress(&core.Globals{JSON: true}, true, func(p *ui.Progress) error {
+		err := withProgress(&globals{JSON: true}, true, func(p *ui.Progress) error {
 			var err error
 			res, err = gcCleanup(repo, selected, plan, false, idx, gcMode{deleteTemp: true, idleOnly: true}, TempNow, p)
 			return err

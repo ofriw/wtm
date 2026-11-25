@@ -90,7 +90,7 @@ func idleGCEvidenceWorkspace(t *testing.T, repo string) (core.Workspace, string)
 	t.Helper()
 	var ws core.Workspace
 	var err error
-	warning := CaptureStderr(t, func() { ws, err = loadGCWorkspace(&core.Globals{Root: repo}, nil) })
+	warning := CaptureStderr(t, func() { ws, err = loadGCWorkspace(&globals{Root: repo}, nil) })
 	if err != nil {
 		t.Fatalf("unattributable file aborted idle-GC discovery: %v", err)
 	}
@@ -253,12 +253,12 @@ func TestDisplayDiscoveryKeepsLenientSessionWarning(t *testing.T) {
 }
 
 func TestIdleGCDiscoveryStructuralSessionErrorsRemainFatal(t *testing.T) {
-	for _, a := range []string{"pi", "claude"} {
+	for _, a := range discoveryAgents {
 		for _, kind := range []string{"root-file", "root-unreadable", "child-unreadable"} {
 			t.Run(a+"/"+kind, func(t *testing.T) {
 				repo, temp, permanent := discoveryEvidenceFixture(t)
 				bad := discoveryStructuralFailure(t, a, kind)
-				_, err := loadGCWorkspace(&core.Globals{Root: repo}, nil)
+				_, err := loadGCWorkspace(&globals{Root: repo}, nil)
 				if err == nil || !strings.Contains(err.Error(), bad) {
 					t.Fatalf("structural failure did not abort discovery: %v", err)
 				}

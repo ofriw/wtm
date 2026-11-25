@@ -27,7 +27,7 @@ func runFailedTempGC(t *testing.T, repo string, selected []core.Worktree) (gcRes
 	var res gcResult
 	warnings := CaptureStderr(t, func() {
 		var err error
-		res, err = gcRunRemove(t, &core.Globals{JSON: true}, repo, selected, false, false)
+		res, err = gcRunRemove(t, &globals{JSON: true}, repo, selected, false, false)
 		if err == nil {
 			t.Error("cleanup unexpectedly succeeded")
 		}

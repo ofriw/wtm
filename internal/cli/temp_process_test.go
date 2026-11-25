@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"wtm/internal/core"
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	"wtm/internal/harness"
@@ -253,7 +252,7 @@ func runTempRegistryProcess(role, path string) error {
 		if err != nil {
 			return err
 		}
-		return cmdGC(&core.Globals{Root: root, Yes: true}, []string{"--path", path, "--yes"})
+		return cmdGC(&globals{Root: root, Yes: true}, []string{"--path", path, "--yes"})
 	}
 	if role == "reconcile" {
 		fmt.Println("ready")
@@ -268,7 +267,7 @@ func tempProcessOperation(role, path string) error {
 	case "wait-lock":
 		return holdTempTransaction("hold-lock", path)
 	case "add-deadline":
-		return cmdAdd(&core.Globals{Root: path, JSON: true}, []string{"deadline", "--no-index", "--ttl", "1.5s"})
+		return cmdAdd(&globals{Root: path, JSON: true}, []string{"deadline", "--no-index", "--ttl", "1.5s"})
 	case "add":
 		// Registry mutations hold the exclusive lock; unlocked writes would race the holder.
 		return withTempRegistryLock(func() error { return storeTempFixture(path, fixtureRecord("tmp/added")) })

@@ -210,7 +210,7 @@ func TestDiscoveryLenientOnCorruptStore(t *testing.T) {
 	WriteFile(t, p, "{not json", 0o600)
 	var ws core.Workspace
 	var derr error
-	warnings := CaptureStderr(t, func() { ws, derr = core.LoadWorkspace(&core.Globals{Root: repo}, false, defaultHooks()) })
+	warnings := CaptureStderr(t, func() { ws, derr = core.LoadWorkspace(core.Options{Root: repo}, false, defaultHooks()) })
 	wts := ws.Wts
 	if derr != nil {
 		t.Fatalf("discover on corrupt store: %v", derr)
@@ -328,7 +328,7 @@ func TestReadCommandsLeaveNoRegistryState(t *testing.T) {
 			env := Sandbox(t)
 			repo := NativeRepo(t)
 			CaptureStdout(t, func() {
-				if err := dispatch(cmd, &core.Globals{Root: repo, JSON: true}, nil); err != nil {
+				if err := dispatch(cmd, &globals{Root: repo, JSON: true}, nil); err != nil {
 					t.Logf("%s error: %v", cmd, err)
 				}
 			})

@@ -1,7 +1,6 @@
 package core
 
 import (
-	"errors"
 	"testing"
 	"time"
 	. "wtm/internal/testutil"

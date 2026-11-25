@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"wtm/internal/core"
+
 	"wtm/internal/fs"
 	"wtm/internal/git"
 	. "wtm/internal/testutil"
@@ -32,7 +32,7 @@ func resolutionBranches(t *testing.T, checkout bool) string {
 func assertResolvedDelete(t *testing.T, checkout bool, input, want string) {
 	t.Helper()
 	repo := resolutionBranches(t, checkout)
-	res := deleteResultOf(t, &core.Globals{Root: repo, Yes: true}, input)
+	res := deleteResultOf(t, &globals{Root: repo, Yes: true}, input)
 	if res.DeletedBranch != want {
 		t.Fatalf("delete %q resolved %q, want %q", input, res.DeletedBranch, want)
 	}
@@ -65,7 +65,7 @@ func assertOrphanPrecedence(t *testing.T, input, want string) {
 	GitWorktreeAdd(t, repo, linked, "tmp/review-x", "main")
 	GitTestBranch(t, repo, "review-x")
 	GitTestBranch(t, repo, "review_x")
-	res := deleteResultOf(t, &core.Globals{Root: repo, Yes: true}, input)
+	res := deleteResultOf(t, &globals{Root: repo, Yes: true}, input)
 	if res.DeletedBranch != want || !fs.Exists(linked) || !git.RefExists(repo, "refs/heads/tmp/review-x") {
 		t.Fatalf("orphan lost precedence over checkout alias: %+v", res)
 	}
@@ -80,7 +80,7 @@ func failTempDelete(t *testing.T, repo, linked, origin string) {
 	t.Helper()
 	MustGit(t, linked, "branch", "-m", "tmp/review")
 	MustGit(t, origin, "config", "receive.denyDeletes", "true")
-	if err := cmdDelete(&core.Globals{Root: repo, Yes: true}, []string{"review"}); err == nil {
+	if err := cmdDelete(&globals{Root: repo, Yes: true}, []string{"review"}); err == nil {
 		t.Fatal("remote rejection must fail deletion")
 	}
 	if fs.Exists(linked) || !git.RefExists(repo, "refs/heads/tmp/review") {
@@ -93,7 +93,7 @@ func TestDeleteBareTempNameRecoversRemoteFailure(t *testing.T) {
 	repo, linked, origin := gcFixtureWithUpstream(t)
 	failTempDelete(t, repo, linked, origin)
 	MustGit(t, origin, "config", "receive.denyDeletes", "false")
-	res := deleteResultOf(t, &core.Globals{Root: repo, Yes: true}, "review")
+	res := deleteResultOf(t, &globals{Root: repo, Yes: true}, "review")
 	if res.DeletedBranch != "tmp/review" || git.RefExists(repo, "refs/heads/tmp/review") {
 		t.Fatalf("bare-name retry did not delete recovery branch: %+v", res)
 	}
@@ -111,11 +111,11 @@ func TestAddDeleteRoundTripKeepsStoredSpelling(t *testing.T) {
 	GitTestBranch(t, repo, "Feature/under_score")
 	mainTip := MustGit(t, repo, "rev-parse", "refs/heads/main")
 
-	res := addResultOf(t, &core.Globals{Root: repo}, "feature/under_score", "--no-index")
+	res := addResultOf(t, &globals{Root: repo}, "feature/under_score", "--no-index")
 	if !res.Attached || res.Branch != "Feature/under_score" {
 		t.Fatalf("attach = %+v, want Feature/under_score", res)
 	}
-	del := deleteResultOf(t, &core.Globals{Root: repo, Yes: true}, "feature/under_score")
+	del := deleteResultOf(t, &globals{Root: repo, Yes: true}, "feature/under_score")
 	if del.DeletedBranch != "Feature/under_score" {
 		t.Fatalf("delete resolved %q, want Feature/under_score", del.DeletedBranch)
 	}
@@ -137,7 +137,7 @@ func TestBranchOnlyDeleteRefusesLiveCheckout(t *testing.T) {
 	linked := CanonicalPath(filepath.Join(filepath.Dir(repo), "linked"))
 	GitWorktreeAdd(t, repo, linked, "Feature/under_score", "refs/heads/main")
 
-	err := deleteOrphanFallback(&core.Globals{Root: repo, Yes: true}, deleteOptions{branch: "feature/under_score"}, errNoWorktreeForBranch)
+	err := deleteOrphanFallback(&globals{Root: repo, Yes: true}, deleteOptions{branch: "feature/under_score"}, errNoWorktreeForBranch)
 	if err == nil || !strings.Contains(err.Error(), "refusing branch-only delete") {
 		t.Fatalf("fallback = %v, want a branch-only refusal", err)
 	}
@@ -156,7 +156,7 @@ func assertPromoteRefBesideAlias(t *testing.T, alias string) {
 	linked := CanonicalPath(filepath.Join(filepath.Dir(repo), "linked"))
 	GitWorktreeAdd(t, repo, linked, alias, "refs/heads/main")
 	GitTestBranch(t, repo, "foo")
-	err := cmdPromote(&core.Globals{Root: repo}, []string{"foo"})
+	err := cmdPromote(&globals{Root: repo}, []string{"foo"})
 	if !errors.Is(err, errNoWorktreeForBranch) {
 		t.Fatalf("promote foo = %v, want a missing-checkout refusal", err)
 	}
@@ -169,7 +169,7 @@ func assertPromoteRefBesideAlias(t *testing.T, alias string) {
 		t.Fatal("refused promote must change nothing")
 	}
 	CaptureStdout(t, func() {
-		if err := cmdPromote(&core.Globals{Root: repo}, []string{alias}); err != nil {
+		if err := cmdPromote(&globals{Root: repo}, []string{alias}); err != nil {
 			t.Fatalf("promote %s: %v", alias, err)
 		}
 	})
@@ -198,7 +198,7 @@ func TestPromoteResolvesStoredSpelling(t *testing.T) {
 	GitWorktreeAdd(t, repo, linked, "Feature/under_score", "refs/heads/main")
 
 	out := CaptureStdout(t, func() {
-		if err := cmdPromote(&core.Globals{Root: repo, JSON: true}, []string{"feature/under_score"}); err != nil {
+		if err := cmdPromote(&globals{Root: repo, JSON: true}, []string{"feature/under_score"}); err != nil {
 			t.Fatal(err)
 		}
 	})

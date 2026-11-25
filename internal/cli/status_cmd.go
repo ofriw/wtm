@@ -16,22 +16,22 @@ import (
 
 // cmdStatus is the status command handler. hooks carry the harness-provided
 // session/MCP discovery.
-func cmdStatus(g *core.Globals, args []string, hooks core.Hooks) error {
-	flags := core.SubFlags("status", g)
+func cmdStatus(g *globals, args []string, hooks core.Hooks) error {
+	flags := subFlags("status", g)
 	wide := flags.Bool("wide", false, "show one column per integration")
-	pos, err := core.ParseSub(flags, g, args, usage)
+	pos, err := parseSub(flags, g, args, usage)
 	if err != nil {
 		return err
 	}
 	if len(pos) > 0 {
-		return core.Usagef("status: unexpected argument %q", pos[0])
+		return usagef("status: unexpected argument %q", pos[0])
 	}
 	// --wide shapes only the table; the JSON contract always reports every
 	// integration, so the combination is a usage error, not a silent no-op.
 	if *wide && g.JSON {
-		return core.Usagef("status: --wide has no effect with --json (JSON already reports all integrations)")
+		return usagef("status: --wide has no effect with --json (JSON already reports all integrations)")
 	}
-	ws, err := core.LoadWorkspace(g, false, hooks)
+	ws, err := core.LoadWorkspace(g.opts(), false, hooks)
 	if err != nil {
 		return err
 	}

@@ -20,7 +20,7 @@ func cmdConfigSet(val string) error {
 	// Invalid TTL is user input, so it is a usage error (exit 2), not a write
 	// failure: nothing on disk should change for a rejected value.
 	if _, err := core.TTLDays(val); err != nil {
-		return core.Usagef("%v", err)
+		return usagef("%v", err)
 	}
 	p, err := settingsPath()
 	if err != nil {
@@ -84,7 +84,7 @@ func readSettingsMapUnlocked(p string) (map[string]json.RawMessage, error) {
 	return m, nil
 }
 
-func cmdConfigGet(g *core.Globals) error {
+func cmdConfigGet(g *globals) error {
 	s, p, err := core.LoadSettings()
 	if err != nil {
 		return err
@@ -101,9 +101,9 @@ func cmdConfigGet(g *core.Globals) error {
 	return nil
 }
 
-func cmdConfig(g *core.Globals, args []string) error {
-	flags := core.SubFlags("config", g)
-	pos, err := core.ParseSub(flags, g, args, usage)
+func cmdConfig(g *globals, args []string) error {
+	flags := subFlags("config", g)
+	pos, err := parseSub(flags, g, args, usage)
 	if err != nil {
 		return err
 	}
@@ -111,7 +111,7 @@ func cmdConfig(g *core.Globals, args []string) error {
 		return cmdConfigSet(pos[2])
 	}
 	if len(pos) != 0 {
-		return core.Usagef("config: use 'config' or 'config set unusedTTL <Nd>'")
+		return usagef("config: use 'config' or 'config set unusedTTL <Nd>'")
 	}
 	return cmdConfigGet(g)
 }

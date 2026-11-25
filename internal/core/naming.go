@@ -12,6 +12,17 @@ import (
 	"wtm/internal/ui"
 )
 
+// ErrAmbiguousBranch is a usage error so every command gives the same exit code
+// when a request matches several branches only by case. The stored spelling is
+// the repair, which makes the request a command-line mistake in all commands.
+var ErrAmbiguousBranch = UsageError("matches multiple local branches by case")
+
+// UsageError maps to exit code 2. It lives here so core's branch resolution can
+// report usage-class errors without importing the CLI package.
+type UsageError string
+
+func (e UsageError) Error() string { return string(e) }
+
 // naming.go — the single source of truth for branch and worktree directory
 // names. Branches keep their semantic, taxonomy-prefixed identity (feature/x);
 // directories are project-prefixed slugs placed next to the current worktree,

@@ -27,23 +27,23 @@ type deleteOptions struct {
 	keepRemote   bool
 }
 
-func cmdDelete(g *core.Globals, args []string) error {
-	flags := core.SubFlags("delete", g)
+func cmdDelete(g *globals, args []string) error {
+	flags := subFlags("delete", g)
 	var o deleteOptions
 	flags.BoolVar(&o.keepSessions, "keep-sessions", false, "keep agent session history")
 	flags.BoolVar(&o.keepRemote, "keep-remote", false, "keep the remote upstream branch")
-	pos, err := core.ParseSub(flags, g, args, usage)
+	pos, err := parseSub(flags, g, args, usage)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return core.Usagef("delete: want <branch>")
+		return usagef("delete: want <branch>")
 	}
 	o.branch = pos[0]
 	return deleteWorktree(g, o)
 }
 
-func prepareDelete(g *core.Globals, o deleteOptions) (core.Workspace, core.Worktree, remotePlan, error) {
+func prepareDelete(g *globals, o deleteOptions) (core.Workspace, core.Worktree, remotePlan, error) {
 	ws, err := loadWorkspace(g, true, harness.DiscoverySessions(true))
 	if err != nil {
 		return core.Workspace{}, core.Worktree{}, remotePlan{}, err
@@ -68,7 +68,7 @@ func prepareDelete(g *core.Globals, o deleteOptions) (core.Workspace, core.Workt
 	return ws, *w, plan, nil
 }
 
-func deleteWorktree(g *core.Globals, o deleteOptions) error {
+func deleteWorktree(g *globals, o deleteOptions) error {
 	ws, w, plan, err := prepareDelete(g, o)
 	if err != nil {
 		// The worktree may already be gone while the branch
@@ -125,7 +125,7 @@ func checkedDeleteTarget(w *core.Worktree, branch, defBranch string) (*core.Work
 
 // confirmDelete obtains consent unless --yes. The branch names the target, but
 // the removal still destroys uncommitted work, remote history and sessions.
-func confirmDelete(g *core.Globals, w core.Worktree, plan remotePlan) error {
+func confirmDelete(g *globals, w core.Worktree, plan remotePlan) error {
 	if w.Dirty {
 		ui.Warnf("%s has uncommitted changes", core.DisplayPath(w.Path))
 	}
@@ -133,7 +133,7 @@ func confirmDelete(g *core.Globals, w core.Worktree, plan remotePlan) error {
 		return nil
 	}
 	if !ui.Interactive() {
-		return core.Usagef("delete: confirmation requires a terminal; pass --yes")
+		return usagef("delete: confirmation requires a terminal; pass --yes")
 	}
 	ok, err := ui.Confirm(deletePromptTitle(w, plan.count()), false)
 	if err != nil {
@@ -178,7 +178,7 @@ func finishLocalDelete(root, branch string, res *gcResult, runErr error) error {
 
 // runDelete performs the gc removal, then force-deletes the local branch the
 // command is addressed by. Keep this recovery ref until all cleanup succeeds.
-func runDelete(g *core.Globals, root string, w core.Worktree, plan remotePlan, keepSessions bool, idx core.SessionIndex) (gcResult, error) {
+func runDelete(g *globals, root string, w core.Worktree, plan remotePlan, keepSessions bool, idx core.SessionIndex) (gcResult, error) {
 	// confirmDelete already disclosed uncommitted changes before consent, so
 	// clear Dirty to keep removeOneWorktree from warning a second time.
 	w.Dirty = false
@@ -199,7 +199,7 @@ func runDelete(g *core.Globals, root string, w core.Worktree, plan remotePlan, k
 // delete failed, or the branch never had a worktree at all. Either way, the
 // branch name is the consent, so it runs the branch-only cleanup. Without it a
 // retry fails with "no worktree has branch" and the branch is orphaned.
-func deleteOrphanFallback(g *core.Globals, o deleteOptions, cause error) error {
+func deleteOrphanFallback(g *globals, o deleteOptions, cause error) error {
 	if cause == nil || !errors.Is(cause, errNoWorktreeForBranch) {
 		return cause
 	}
@@ -224,7 +224,7 @@ func deleteOrphanFallback(g *core.Globals, o deleteOptions, cause error) error {
 // upstream (unless kept) via the shared veto-aware purge, then the branch. It
 // refuses a branch a live worktree still holds; the resolved stored name makes
 // that comparison independent of the argument spelling.
-func runBranchOnlyDelete(g *core.Globals, o deleteOptions, root string, wts []core.Worktree, branch string) error {
+func runBranchOnlyDelete(g *globals, o deleteOptions, root string, wts []core.Worktree, branch string) error {
 	if w := exactBranch(wts, branch); w != nil {
 		return fmt.Errorf("refusing branch-only delete of %q: checked out at %s", branch, core.DisplayPath(w.Path))
 	}
@@ -244,7 +244,7 @@ func runBranchOnlyDelete(g *core.Globals, o deleteOptions, root string, wts []co
 
 // runOrphanDelete deletes the orphan's remote upstream (unless kept) and the
 // local branch, reusing the shared purge and branch finishers.
-func runOrphanDelete(g *core.Globals, root string, w core.Worktree, plan remotePlan, keepSessions bool) (gcResult, error) {
+func runOrphanDelete(g *globals, root string, w core.Worktree, plan remotePlan, keepSessions bool) (gcResult, error) {
 	res := emptyGCResult(keepSessions, plan.keptRemote())
 	runErr := withProgress(g, true, func(p *ui.Progress) error {
 		if !plan.keep && w.Upstream.OnRemote() {

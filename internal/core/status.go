@@ -74,11 +74,19 @@ func (w Worktree) BranchName() string {
 	return w.Branch
 }
 
+// Options carries the neutral discovery inputs the CLI passes into core; the
+// domain layer owns no flag machinery.
+type Options struct {
+	Root     string
+	JSON     bool
+	Progress string
+}
+
 // ResolveRoot returns the repo root: --root if given, else the main worktree
 // of the repo containing the current directory.
-func ResolveRoot(g *Globals) (string, error) {
-	if g.Root != "" {
-		return fs.CanonicalAbs(g.Root)
+func ResolveRoot(o Options) (string, error) {
+	if o.Root != "" {
+		return fs.CanonicalAbs(o.Root)
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -105,16 +113,16 @@ type Workspace struct {
 // the harness.
 type SessionDiscovery func(*ui.Progress) (SessionIndex, []temp.UnverifiedSession, error)
 
-// mcpFn inventories a worktree root's MCP configs; the harness provides the
-// real implementation, core only defines the seam (it must not import the
+// MCPDiscovery inventories a worktree root's MCP configs; the harness provides
+// the real implementation, core only defines the seam (it must not import the
 // harness).
-type mcpFn func(root string, p *ui.Progress) map[string]bool
+type MCPDiscovery func(root string, p *ui.Progress) map[string]bool
 
 // Hooks carries the harness-provided discovery functions core cannot call
 // directly (it must not import the harness).
 type Hooks struct {
 	Sessions SessionDiscovery
-	MCP      mcpFn
+	MCP      MCPDiscovery
 }
 
 // LoadWorkspace resolves the repo, TTL and inventory. discovery — the slow
@@ -122,12 +130,12 @@ type Hooks struct {
 // Discovery reads but never reconciles the temp registry. Explicit removal
 // passes failClosed-style hooks to reject unreadable sessions before any
 // destructive action.
-func LoadWorkspace(g *Globals, showProgress bool, hooks Hooks) (Workspace, error) {
+func LoadWorkspace(o Options, showProgress bool, hooks Hooks) (Workspace, error) {
 	var ws Workspace
 	if err := validateDiscoveryHooks(hooks); err != nil {
 		return ws, err
 	}
-	root, err := ResolveRoot(g)
+	root, err := ResolveRoot(o)
 	if err != nil {
 		return ws, err
 	}
@@ -135,7 +143,7 @@ func LoadWorkspace(g *Globals, showProgress bool, hooks Hooks) (Workspace, error
 	if err != nil {
 		return ws, err
 	}
-	err = ui.RunMaybeProgress(os.Stderr, g.Progress, g.JSON, showProgress, func(p *ui.Progress) error {
+	err = ui.RunMaybeProgress(os.Stderr, o.Progress, o.JSON, showProgress, func(p *ui.Progress) error {
 		var derr error
 		ws.Wts, ws.Idx, derr = discoverWithSessions(root, p, hooks)
 		return derr
@@ -144,13 +152,13 @@ func LoadWorkspace(g *Globals, showProgress bool, hooks Hooks) (Workspace, error
 	return ws, err
 }
 
-func buildWorktree(g git.Worktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp mcpFn) Worktree {
+func buildWorktree(g git.Worktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp MCPDiscovery) Worktree {
 	w := worktreeInventory(g, idx, ups, p, mcp)
 	applyTempRecord(&w, temps, p)
 	return w
 }
 
-func worktreeInventory(g git.Worktree, idx SessionIndex, ups map[string]git.Upstream, p *ui.Progress, mcp mcpFn) Worktree {
+func worktreeInventory(g git.Worktree, idx SessionIndex, ups map[string]git.Upstream, p *ui.Progress, mcp MCPDiscovery) Worktree {
 	pth := fs.Canonical(g.Path)
 	configs := mcp(pth, p)
 	return Worktree{
@@ -305,7 +313,7 @@ func readTempStoreLenient(p *ui.Progress) temp.Store {
 
 // scanWorktrees builds the inventory and reports per-worktree progress; the
 // loop is split out so discover stays a readable sequence of phases.
-func scanWorktrees(raw []git.Worktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp mcpFn) []Worktree {
+func scanWorktrees(raw []git.Worktree, idx SessionIndex, ups map[string]git.Upstream, temps temp.Store, p *ui.Progress, mcp MCPDiscovery) []Worktree {
 	p.Phase("scanning worktrees", len(raw))
 	wts := make([]Worktree, 0, len(raw))
 	for _, g := range raw {

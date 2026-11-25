@@ -135,7 +135,7 @@ func (p remotePlan) keptRemote() bool {
 
 func confirmGC(selected []core.Worktree, plan remotePlan) (bool, error) {
 	if !ui.Interactive() {
-		return false, core.Usagef("gc: confirmation requires a terminal; pass --yes")
+		return false, usagef("gc: confirmation requires a terminal; pass --yes")
 	}
 
 	title := gcConsentTitle(selected, plan)
@@ -180,16 +180,16 @@ func tempBranchNames(selected []core.Worktree) []string {
 
 func validateGCArgs(o gcOptions, pos []string) error {
 	if len(pos) > 0 {
-		return core.Usagef("gc: unexpected argument %q", pos[0])
+		return usagef("gc: unexpected argument %q", pos[0])
 	}
 	if o.all && len(o.paths) > 0 {
-		return core.Usagef("gc: --all and --path are mutually exclusive")
+		return usagef("gc: --all and --path are mutually exclusive")
 	}
 	return nil
 }
 
-func parseGCFlags(g *core.Globals, args []string) (gcOptions, error) {
-	flags := core.SubFlags("gc", g)
+func parseGCFlags(g *globals, args []string) (gcOptions, error) {
+	flags := subFlags("gc", g)
 	var o gcOptions
 	flags.BoolVar(&o.all, "all", false, "remove all UNUSED worktrees")
 	flags.BoolVar(&o.keepSessions, "keep-sessions", false, "keep agent session history")
@@ -198,14 +198,14 @@ func parseGCFlags(g *core.Globals, args []string) (gcOptions, error) {
 		o.paths = append(o.paths, v)
 		return nil
 	})
-	pos, err := core.ParseSub(flags, g, args, usage)
+	pos, err := parseSub(flags, g, args, usage)
 	if err != nil {
 		return o, err
 	}
 	return o, validateGCArgs(o, pos)
 }
 
-func promptGC(g *core.Globals, selected []core.Worktree, plan remotePlan) (bool, error) {
+func promptGC(g *globals, selected []core.Worktree, plan remotePlan) (bool, error) {
 	if g.Yes {
 		return true, nil
 	}
@@ -216,7 +216,7 @@ func promptGC(g *core.Globals, selected []core.Worktree, plan remotePlan) (bool,
 // candidate scan runs under the progress renderer; the huh picker and ui.Confirm
 // run after it exits, because two tea programs must never share the tty. The
 // remote plan is computed once here so ui.Confirm and purge share one source.
-func selectAndConfirmGC(g *core.Globals, wts []core.Worktree, o gcOptions, ttl time.Duration, root string, now time.Time) ([]core.Worktree, remotePlan, error) {
+func selectAndConfirmGC(g *globals, wts []core.Worktree, o gcOptions, ttl time.Duration, root string, now time.Time) ([]core.Worktree, remotePlan, error) {
 	var none remotePlan
 	candidates, err := scanSelection(g, wts, o, ttl, now)
 	if err != nil || len(candidates) == 0 {
@@ -236,7 +236,7 @@ func selectAndConfirmGC(g *core.Globals, wts []core.Worktree, o gcOptions, ttl t
 
 // scanSelection runs the candidate scan under the renderer. An explicit --path
 // is already fast and may warn on stderr, so it bypasses the renderer entirely.
-func scanSelection(g *core.Globals, wts []core.Worktree, o gcOptions, ttl time.Duration, now time.Time) ([]core.Worktree, error) {
+func scanSelection(g *globals, wts []core.Worktree, o gcOptions, ttl time.Duration, now time.Time) ([]core.Worktree, error) {
 	if len(o.paths) > 0 {
 		return gcSelection(wts, o, ttl, now, nil)
 	}
@@ -258,14 +258,14 @@ func chooseCandidates(candidates []core.Worktree, o gcOptions, ttl time.Duration
 	return promptCandidateSelection(candidates, now, ttl, o.keepRemote)
 }
 
-func handleGCAbort(g *core.Globals, o gcOptions, err error) error {
+func handleGCAbort(g *globals, o gcOptions, err error) error {
 	if errors.Is(err, errAborted) && g.JSON {
 		return gcReport(g, abortGCResult(o))
 	}
 	return err
 }
 
-func cmdGC(g *core.Globals, args []string) error {
+func cmdGC(g *globals, args []string) error {
 	o, err := parseGCFlags(g, args)
 	if err != nil {
 		return err
@@ -298,7 +298,7 @@ func reconcileGCTempStore() {
 // reportResult dispatches the report if removals, remote deletes, branch
 // deletes or failures occurred, joining any report failure with the run
 // error. The branch/remote arms exist for branch-only delete retries.
-func reportResult(g *core.Globals, res gcResult, runErr error) error {
+func reportResult(g *globals, res gcResult, runErr error) error {
 	if len(res.Removed) > 0 || len(res.Failed) > 0 || len(res.Skipped) > 0 || len(res.RemoteDeleted) > 0 || len(res.DeletedBranches) > 0 || res.DeletedBranch != "" {
 		if rerr := gcReport(g, res); rerr != nil {
 			if runErr != nil {
@@ -313,7 +313,7 @@ func reportResult(g *core.Globals, res gcResult, runErr error) error {
 // runGCRemove removes the selected worktrees under the renderer, then prints the
 // report only after the renderer exits: a raw stdout write would land mid-frame
 // and corrupt the inline display.
-func runGCRemove(g *core.Globals, root string, selected []core.Worktree, plan remotePlan, o gcOptions, idx core.SessionIndex, now time.Time) error {
+func runGCRemove(g *globals, root string, selected []core.Worktree, plan remotePlan, o gcOptions, idx core.SessionIndex, now time.Time) error {
 	var res gcResult
 	runErr := withProgress(g, true, func(p *ui.Progress) error {
 		var rerr error
@@ -325,7 +325,7 @@ func runGCRemove(g *core.Globals, root string, selected []core.Worktree, plan re
 
 func promptCandidateSelection(candidates []core.Worktree, now time.Time, ttl time.Duration, keepRemote bool) ([]core.Worktree, error) {
 	if !ui.Interactive() {
-		return nil, core.Usagef("gc: nothing selected; use --all or --path")
+		return nil, usagef("gc: nothing selected; use --all or --path")
 	}
 	header, body, _ := pickerGrid(candidates, core.ColumnContext{Now: now, TTL: ttl}, pickerBudget())
 	sel, err := ui.MultiSelect(gcPickerTitle(len(candidates)), gcPickerDescription(candidates, keepRemote, header), body)
@@ -819,7 +819,7 @@ func printGCHuman(res gcResult) {
 	}
 }
 
-func gcReport(g *core.Globals, res gcResult) error {
+func gcReport(g *globals, res gcResult) error {
 	if g.JSON {
 		return ui.PrintJSON(res)
 	}

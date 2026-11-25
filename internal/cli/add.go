@@ -41,16 +41,16 @@ type addResult struct {
 	ExpiresAt *string `json:"expiresAt,omitempty"`
 }
 
-func cmdAdd(g *core.Globals, args []string) error {
-	flags := core.SubFlags("add", g)
+func cmdAdd(g *globals, args []string) error {
+	flags := subFlags("add", g)
 	var o addOptions
 	bindAddFlags(flags, &o)
-	pos, err := core.ParseSub(flags, g, args, usage)
+	pos, err := parseSub(flags, g, args, usage)
 	if err != nil {
 		return err
 	}
 	if len(pos) < 1 || len(pos) > 2 {
-		return core.Usagef("add: want <branch> [<start-point>]")
+		return usagef("add: want <branch> [<start-point>]")
 	}
 	if len(pos) == 2 {
 		o.start = pos[1]
@@ -318,7 +318,7 @@ func resolveAddTarget(root string, wts []git.Worktree, branch, override string) 
 	// The derived path shares this guard: locationBase can return a directory
 	// inside another worktree when the current worktree is nested.
 	if parent, nested := core.NestedIn(target, wts); nested {
-		return "", core.Usagef("add: refusing to create a worktree inside %s; worktrees must be siblings, not nested", parent)
+		return "", usagef("add: refusing to create a worktree inside %s; worktrees must be siblings, not nested", parent)
 	}
 	return target, nil
 }
@@ -349,7 +349,7 @@ func rollbackAdd(root, path, branch string, attached bool, seedErr error) error 
 	return seedErr
 }
 
-func reportAddResult(g *core.Globals, res addResult, ttl time.Duration) error {
+func reportAddResult(g *globals, res addResult, ttl time.Duration) error {
 	if g.JSON {
 		return ui.PrintJSON(res)
 	}
@@ -377,8 +377,8 @@ type addParams struct {
 	ttl                      time.Duration
 }
 
-func prepareAdd(g *core.Globals, branchArg string, o addOptions) (addParams, error) {
-	root, err := core.ResolveRoot(g)
+func prepareAdd(g *globals, branchArg string, o addOptions) (addParams, error) {
+	root, err := core.ResolveRoot(g.opts())
 	if err != nil {
 		return addParams{}, err
 	}
@@ -456,7 +456,7 @@ func resolveAddBase(p *addParams, start string) (string, error) {
 func resolveStartPoint(root, start string) (string, error) {
 	commit, err := git.Run(root, "rev-parse", "--verify", "--quiet", "--end-of-options", start+"^{commit}")
 	if err != nil {
-		return "", core.Usagef("add: start-point %q is not a commit", start)
+		return "", usagef("add: start-point %q is not a commit", start)
 	}
 	return commit, nil
 }
@@ -502,7 +502,7 @@ func addUsage(err error) error {
 	if errors.As(err, &ue) {
 		return fmt.Errorf("add: %w", err)
 	}
-	return core.Usagef("add: %v", err)
+	return usagef("add: %v", err)
 }
 
 // resolveAddBranch adopts an existing local branch with git's stored spelling,
@@ -531,7 +531,7 @@ func resolveAddBranch(root, raw string, temp bool) (core.BranchChoice, error) {
 // replicates the source's harness. Idempotent by construction: an existing
 // path, or a branch that is checked out elsewhere, fails before anything is
 // written; an existing free branch is attached, never recreated.
-func addWorktree(g *core.Globals, branchArg string, o addOptions) error {
+func addWorktree(g *globals, branchArg string, o addOptions) error {
 	p, err := prepareAdd(g, branchArg, o)
 	if err != nil {
 		return err

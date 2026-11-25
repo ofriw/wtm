@@ -38,7 +38,7 @@ func mustIndexSessions(t *testing.T) core.SessionIndex {
 }
 
 func TestGCAllPathMutuallyExclusive(t *testing.T) {
-	err := cmdGC(&core.Globals{}, []string{"--all", "--path", "/somewhere"})
+	err := cmdGC(&globals{}, []string{"--all", "--path", "/somewhere"})
 	var ue core.UsageError
 	if !errors.As(err, &ue) {
 		t.Fatalf("cmdGC(--all --path) = %v, want usageError", err)
@@ -225,8 +225,8 @@ func TestGCPickerColumnBudget(t *testing.T) {
 	rows := core.GridRows(core.PickerColumns(), candidates, core.ColumnContext{Now: now, TTL: ttl})
 	for _, cols := range []int{200, 120, 80, 60, 44} {
 		t.Setenv("COLUMNS", strconv.Itoa(cols))
-		p := core.GridPolicy(headers)
-		widths := ui.ColumnWidths(headers, rows, pickerBudget(), p.Priority, p.Floors, p.CapHeader)
+		priority, floors := core.ShrinkPolicy(headers)
+		widths := ui.ColumnWidths(headers, rows, pickerBudget(), priority, floors)
 		if got := ui.LineWidth(widths) + ui.PickerChromeWidth + ui.PickerOptionPrefixWidth; got > cols {
 			t.Errorf("picker line = %d cells at %d cols, want <= %d", got, cols, cols)
 		}
@@ -328,7 +328,7 @@ func gcTestLinkedWorktree(t *testing.T) (repo, linked, session string) {
 }
 
 // gcRunRemove runs the forced cleanup mode under --json and returns the parsed report.
-func gcRunRemove(t *testing.T, g *core.Globals, repo string, selected []core.Worktree, keepSessions, keepRemote bool) (gcResult, error) {
+func gcRunRemove(t *testing.T, g *globals, repo string, selected []core.Worktree, keepSessions, keepRemote bool) (gcResult, error) {
 	t.Helper()
 	var res gcResult
 	var runErr error
@@ -383,7 +383,7 @@ func countNotices(notices []string, sub string) int {
 func TestGCRemove(t *testing.T) {
 	Sandbox(t)
 	repo, linked, session := gcTestLinkedWorktree(t)
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{{Path: linked}}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{{Path: linked}}, false, false)
 	if err != nil {
 		t.Fatalf("gcCleanup: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestGCRemove(t *testing.T) {
 func TestGCRemoveKeepSessions(t *testing.T) {
 	Sandbox(t)
 	repo, linked, session := gcTestLinkedWorktree(t)
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{{Path: linked}}, true, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{{Path: linked}}, true, false)
 	if err != nil {
 		t.Fatalf("gcCleanup: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestGCRemoveDirty(t *testing.T) {
 	Sandbox(t)
 	repo, linked, _ := gcTestLinkedWorktree(t)
 	WriteFile(t, filepath.Join(linked, "dirty.txt"), "x", 0o644)
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{{Path: linked}}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{{Path: linked}}, false, false)
 	if err != nil {
 		t.Fatalf("gcCleanup(dirty): %v", err)
 	}
@@ -455,7 +455,7 @@ func TestGCRemoveMissingGitLink(t *testing.T) {
 	if err := os.Remove(filepath.Join(linked, ".git")); err != nil {
 		t.Fatal(err)
 	}
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{{Path: linked}}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{{Path: linked}}, false, false)
 	if err != nil {
 		t.Fatalf("gcCleanup(broken link): %v", err)
 	}
@@ -485,7 +485,7 @@ func TestGCRemoveTempMissingGitLink(t *testing.T) {
 	if err := os.Remove(filepath.Join(linked, ".git")); err != nil {
 		t.Fatal(err)
 	}
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{w}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{w}, false, false)
 	if err != nil {
 		t.Fatalf("gcCleanup(temp broken link): %v", err)
 	}
@@ -514,7 +514,7 @@ func TestGCRemoveRejectsTempRecordAppearedSinceDiscovery(t *testing.T) {
 	// Register as temp after discovery
 	seedTempRecord(t, linked, "feat", "1h", TempNow)
 	// Removal must fail, not proceed without lock
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{w}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{w}, false, false)
 	if err == nil {
 		t.Fatal("expected removal to fail")
 	}
@@ -542,7 +542,7 @@ func TestGCRemovePrunesWhenNothingRemoved(t *testing.T) {
 	if err := os.RemoveAll(stale); err != nil {
 		t.Fatal(err)
 	}
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{{Path: locked}}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{{Path: locked}}, false, false)
 	if err == nil {
 		t.Fatal("gcCleanup(locked) succeeded, want failure")
 	}
@@ -568,7 +568,7 @@ func TestGCReport(t *testing.T) {
 			Pruned:         true,
 		}
 		out := CaptureStdout(t, func() {
-			if err := gcReport(&core.Globals{JSON: true}, want); err != nil {
+			if err := gcReport(&globals{JSON: true}, want); err != nil {
 				t.Errorf("gcReport: %v", err)
 			}
 		})
@@ -599,7 +599,7 @@ func TestGCReport(t *testing.T) {
 
 	t.Run("nothing to do", func(t *testing.T) {
 		out := CaptureStdout(t, func() {
-			if err := gcReport(&core.Globals{}, gcResult{Removed: []string{}, Failed: []gcFailure{}}); err != nil {
+			if err := gcReport(&globals{}, gcResult{Removed: []string{}, Failed: []gcFailure{}}); err != nil {
 				t.Errorf("gcReport: %v", err)
 			}
 		})
@@ -610,7 +610,7 @@ func TestGCReport(t *testing.T) {
 
 	t.Run("kept and pruned lines", func(t *testing.T) {
 		out := CaptureStdout(t, func() {
-			if err := gcReport(&core.Globals{}, gcResult{
+			if err := gcReport(&globals{}, gcResult{
 				Removed: []string{"/x"}, Failed: []gcFailure{}, KeptSessions: true, Pruned: true,
 			}); err != nil {
 				t.Errorf("gcReport: %v", err)
@@ -625,7 +625,7 @@ func TestGCReport(t *testing.T) {
 		var errOut string
 		out := CaptureStdout(t, func() {
 			errOut = CaptureStderr(t, func() {
-				if err := gcReport(&core.Globals{}, gcResult{
+				if err := gcReport(&globals{}, gcResult{
 					Removed: []string{}, Failed: []gcFailure{{Path: "/p", Error: "boom"}}, SessionsPurged: 4,
 				}); err != nil {
 					t.Errorf("gcReport: %v", err)
@@ -642,7 +642,7 @@ func TestGCReport(t *testing.T) {
 
 	t.Run("deleted remote and kept remote lines", func(t *testing.T) {
 		out := CaptureStdout(t, func() {
-			if err := gcReport(&core.Globals{}, gcResult{
+			if err := gcReport(&globals{}, gcResult{
 				Removed: []string{"/x"}, RemoteDeleted: []string{"origin/feat"}, Failed: []gcFailure{}, Pruned: true,
 			}); err != nil {
 				t.Errorf("gcReport: %v", err)
@@ -652,7 +652,7 @@ func TestGCReport(t *testing.T) {
 			t.Fatalf("gcReport = %q, want %q", out, want)
 		}
 		out = CaptureStdout(t, func() {
-			if err := gcReport(&core.Globals{}, gcResult{Removed: []string{"/x"}, Failed: []gcFailure{}, KeptRemote: true}); err != nil {
+			if err := gcReport(&globals{}, gcResult{Removed: []string{"/x"}, Failed: []gcFailure{}, KeptRemote: true}); err != nil {
 				t.Errorf("gcReport: %v", err)
 			}
 		})
@@ -671,7 +671,7 @@ func TestGCAbortKeepsRemoteJSON(t *testing.T) {
 		t.Fatalf("abort result = %+v, want kept sessions+remote", res)
 	}
 	out := CaptureStdout(t, func() {
-		if err := gcReport(&core.Globals{JSON: true}, res); err != nil {
+		if err := gcReport(&globals{JSON: true}, res); err != nil {
 			t.Errorf("gcReport: %v", err)
 		}
 	})
@@ -702,7 +702,7 @@ func gcFixtureWithUpstream(t *testing.T) (repo, linked, origin string) {
 // discovered returns the one discovered worktree at path, with its upstream.
 func discovered(t *testing.T, repo, path string) core.Worktree {
 	t.Helper()
-	ws, err := core.LoadWorkspace(&core.Globals{Root: repo}, false, defaultHooks())
+	ws, err := core.LoadWorkspace(core.Options{Root: repo}, false, defaultHooks())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -718,7 +718,7 @@ func discovered(t *testing.T, repo, path string) core.Worktree {
 func TestGCRemoteDelete(t *testing.T) {
 	Sandbox(t)
 	repo, linked, origin := gcFixtureWithUpstream(t)
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, false)
 	if err != nil {
 		t.Fatalf("gcCleanup: %v", err)
 	}
@@ -736,7 +736,7 @@ func TestGCRemoteDelete(t *testing.T) {
 func TestGCRemoteKeep(t *testing.T) {
 	Sandbox(t)
 	repo, linked, origin := gcFixtureWithUpstream(t)
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, true)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, true)
 	if err != nil {
 		t.Fatalf("gcCleanup(keep-remote): %v", err)
 	}
@@ -754,7 +754,7 @@ func TestGCRemoteFailureExitsNonZero(t *testing.T) {
 	Sandbox(t)
 	repo, linked, origin := gcFixtureWithUpstream(t)
 	MustGit(t, origin, "config", "receive.denyDeletes", "true")
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, false)
 	if err == nil {
 		t.Fatal("gcCleanup succeeded, want a remote-delete failure")
 	}
@@ -773,7 +773,7 @@ func TestGCRemoteUnreachableFails(t *testing.T) {
 	Sandbox(t)
 	repo, linked, _ := gcFixtureWithUpstream(t)
 	MustGit(t, repo, "remote", "set-url", "origin", filepath.Join(repo, "no-such.git"))
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, false)
 	if err == nil {
 		t.Fatal("gcCleanup succeeded, want a remote-delete failure")
 	}
@@ -792,7 +792,7 @@ func TestGCRemoteNotDeletedWhenRemovalFails(t *testing.T) {
 	Sandbox(t)
 	repo, linked, origin := gcFixtureWithUpstream(t)
 	MustGit(t, repo, "worktree", "lock", linked)
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, false)
 	if err == nil {
 		t.Fatal("gcCleanup(locked) succeeded, want the local removal to fail")
 	}
@@ -815,7 +815,7 @@ func TestGCRemoteNotDeletedWhenRemovalFails(t *testing.T) {
 func TestGCRemoteAbsentNoOp(t *testing.T) {
 	Sandbox(t)
 	repo, linked, _ := gcTestLinkedWorktree(t)
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{discovered(t, repo, linked)}, false, false)
 	if err != nil {
 		t.Fatalf("gcCleanup: %v", err)
 	}
@@ -888,7 +888,7 @@ func TestGCRemoteLocalUpstreamNoOp(t *testing.T) {
 	if !w.Upstream.Present() || w.Upstream.OnRemote() {
 		t.Fatalf("local upstream = %+v, want present but not onRemote", w.Upstream)
 	}
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{w}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{w}, false, false)
 	if err != nil {
 		t.Fatalf("gcCleanup(local upstream): %v", err)
 	}
@@ -944,7 +944,7 @@ func TestGCRemoteSharedFailureDeduped(t *testing.T) {
 	MustGit(t, origin, "config", "receive.denyDeletes", "true")
 	w1 := discovered(t, repo, linked)
 	w2 := discovered(t, repo, linked2)
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{w1, w2}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{w1, w2}, false, false)
 	if err == nil {
 		t.Fatal("gcCleanup succeeded, want a remote-delete failure")
 	}
@@ -1175,7 +1175,7 @@ func TestGCRemoveTemp(t *testing.T) {
 	if !w.Temp {
 		t.Fatal("seeded temp not marked Temp by discovery")
 	}
-	res, err := gcRunRemove(t, &core.Globals{JSON: true}, repo, []core.Worktree{w}, false, false)
+	res, err := gcRunRemove(t, &globals{JSON: true}, repo, []core.Worktree{w}, false, false)
 	if err != nil {
 		t.Fatalf("gcCleanup(temp): %v", err)
 	}
@@ -1199,7 +1199,7 @@ func TestGCReconcilesStaleTempRecord(t *testing.T) {
 	ghost := CanonicalPath(filepath.Join(filepath.Dir(repo), "ghost"))
 	seedTempRecord(t, ghost, "tmp/ghost", "1h", TempNow)
 	out := CaptureStdout(t, func() {
-		if err := cmdGC(&core.Globals{Root: repo, Yes: true}, []string{"--all"}); err != nil {
+		if err := cmdGC(&globals{Root: repo, Yes: true}, []string{"--all"}); err != nil {
 			t.Fatalf("cmdGC: %v", err)
 		}
 	})
@@ -1221,7 +1221,7 @@ func TestDeleteTempDoesNotDoubleDelete(t *testing.T) {
 	GitWorktreeAdd(t, repo, linked, "tmp/del", "refs/heads/main")
 	seedTempRecord(t, linked, "tmp/del", "1h", TempNow)
 	out := CaptureStdout(t, func() {
-		if err := cmdDelete(&core.Globals{Root: repo, Yes: true, JSON: true}, []string{"tmp/del"}); err != nil {
+		if err := cmdDelete(&globals{Root: repo, Yes: true, JSON: true}, []string{"tmp/del"}); err != nil {
 			t.Fatalf("cmdDelete(temp): %v", err)
 		}
 	})

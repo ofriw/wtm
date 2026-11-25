@@ -549,3 +549,43 @@ func TestNativePromotePermanentIsIdempotent(t *testing.T) {
 		t.Fatalf("promote(permanent) output = %q, want already permanent", out)
 	}
 }
+
+// TestNativeGlobalFlagContract drives the compiled binary's global flags in
+// both positions, replacing the private validate* unit tests: globals parse
+// before and after the subcommand, valid modes forward to rendering, the last
+// occurrence wins, and bogus values are usage errors (exit 2) in either
+// position before any repo access.
+func TestNativeGlobalFlagContract(t *testing.T) {
+	Sandbox(t)
+	repo := NativeRepo(t)
+	run := func(args ...string) (string, string, int) {
+		return RunWTM(t, t.TempDir(), nil, append([]string{"--root", repo}, args...)...)
+	}
+	cases := []struct {
+		name string
+		args []string
+		want bool // expects ANSI color
+	}{
+		{"color before subcommand", []string{"--color", "always", "status"}, true},
+		{"color after subcommand", []string{"status", "--color", "always"}, true},
+		{"last occurrence wins", []string{"--color", "always", "status", "--color", "never"}, false},
+	}
+	for _, tc := range cases {
+		out, _, rc := run(tc.args...)
+		if rc != 0 || strings.Contains(out, "\x1b[") != tc.want {
+			t.Fatalf("%s: rc=%d out=%q, want ANSI=%v", tc.name, rc, out, tc.want)
+		}
+	}
+	if out, _, rc := run("status", "--root", repo, "--json"); rc != 0 || !strings.Contains(out, `"main": true`) {
+		t.Fatalf("status --root --json: rc=%d out=%q, want main JSON", rc, out)
+	}
+	for _, cmd := range []string{"status", "add", "promote", "delete", "gc", "config"} {
+		for _, bad := range [][]string{{"--color", "bogus"}, {"--progress", "sometimes"}} {
+			for _, args := range [][]string{append(append([]string{}, bad...), cmd), append([]string{cmd}, bad...)} {
+				if _, _, rc := run(args...); rc != 2 {
+					t.Fatalf("%v: rc=%d, want 2", args, rc)
+				}
+			}
+		}
+	}
+}

@@ -18,7 +18,7 @@ import (
 // commands use.
 func discoveredWorktree(t *testing.T, repo, path string) core.Worktree {
 	t.Helper()
-	ws, err := core.LoadWorkspace(&core.Globals{Root: repo}, false, defaultHooks())
+	ws, err := core.LoadWorkspace(core.Options{Root: repo}, false, defaultHooks())
 	if err != nil {
 		t.Fatalf("load workspace: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestPromotionUnreadableRegistry(t *testing.T) {
 func TestPromotionJSONAndIdentityRemoval(t *testing.T) {
 	repo, path, w := identityCheckout(t)
 	out := CaptureStdout(t, func() {
-		if err := promoteWorktree(&core.Globals{Root: repo, JSON: true}, w.Branch); err != nil {
+		if err := promoteWorktree(&globals{Root: repo, JSON: true}, w.Branch); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -176,7 +176,7 @@ func TestPromotionJSONAndIdentityRemoval(t *testing.T) {
 func TestPromoteMatchesTempPrefix(t *testing.T) {
 	repo, path, w := identityCheckout(t)
 	out := CaptureStdout(t, func() {
-		if err := promoteWorktree(&core.Globals{Root: repo, JSON: true}, "test"); err != nil {
+		if err := promoteWorktree(&globals{Root: repo, JSON: true}, "test"); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -239,7 +239,7 @@ func TestPromotionCommandRejectsCorruptTargetRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	CaptureStderr(t, func() {
-		if err := promoteWorktree(&core.Globals{Root: repo, JSON: true}, w.Branch); err == nil {
+		if err := promoteWorktree(&globals{Root: repo, JSON: true}, w.Branch); err == nil {
 			t.Fatal("corrupt target record was silently reported permanent")
 		}
 	})

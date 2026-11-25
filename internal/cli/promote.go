@@ -20,14 +20,14 @@ type promoteResult struct {
 	Promoted bool   `json:"promoted"`
 }
 
-func cmdPromote(g *core.Globals, args []string) error {
-	flags := core.SubFlags("promote", g)
-	pos, err := core.ParseSub(flags, g, args, usage)
+func cmdPromote(g *globals, args []string) error {
+	flags := subFlags("promote", g)
+	pos, err := parseSub(flags, g, args, usage)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return core.Usagef("promote: want <branch>")
+		return usagef("promote: want <branch>")
 	}
 	return promoteWorktree(g, pos[0])
 }
@@ -35,7 +35,7 @@ func cmdPromote(g *core.Globals, args []string) error {
 // promoteWorktree resolves the worktree addressed by branch and clears its temp
 // record. A worktree that is already permanent is the desired end state, so it
 // succeeds with promoted=false rather than erroring (safe for retries).
-func promoteWorktree(g *core.Globals, branch string) error {
+func promoteWorktree(g *globals, branch string) error {
 	ws, err := loadWorkspace(g, true, harness.DiscoverySessions(false))
 	if err != nil {
 		return err
@@ -79,7 +79,7 @@ func explainPromoteMiss(root string, wts []core.Worktree, branch string, cause e
 	return cause
 }
 
-func printPromoteResult(g *core.Globals, res promoteResult) error {
+func printPromoteResult(g *globals, res promoteResult) error {
 	if g.JSON {
 		return ui.PrintJSON(res)
 	}

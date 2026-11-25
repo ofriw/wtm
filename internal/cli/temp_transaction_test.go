@@ -358,7 +358,7 @@ func TestIdleCheckContention(t *testing.T) {
 	startContender(func() {
 		var res gcResult
 		var err error
-		err = withProgress(&core.Globals{JSON: true}, true, func(p *ui.Progress) error {
+		err = withProgress(&globals{JSON: true}, true, func(p *ui.Progress) error {
 			res, err = gcCleanup(repo, []core.Worktree{w}, remotePlan{keep: true}, false, idx, gcMode{deleteTemp: true, idleOnly: true}, TempNow, p)
 			return err
 		})

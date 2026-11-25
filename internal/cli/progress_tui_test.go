@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"wtm/internal/core"
+
 	. "wtm/internal/testutil"
 	"wtm/internal/ui"
 )
@@ -132,7 +132,7 @@ func TestDiscoverUpstreamsUnavailablePTY(t *testing.T) {
 // renderer on the injected writer, the work error surfaces as withProgressTo's
 // error, and the terminal frame reports the failure.
 func TestWithProgressRendererPTY(t *testing.T) {
-	var g core.Globals
+	var g globals
 	g.Progress = ui.ProgressAlways
 	masterErr, slaveErr := openTTY(t, 80)
 	workErr := errors.New("boom")

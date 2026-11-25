@@ -64,7 +64,7 @@ func runStaleCleanup(t *testing.T, command, repo, path, branch string) gcResult 
 	t.Helper()
 	var err error
 	out := CaptureStdout(t, func() {
-		g := &core.Globals{Root: repo, JSON: true, Yes: true}
+		g := &globals{Root: repo, JSON: true, Yes: true}
 		if command == "delete" {
 			err = cmdDelete(g, []string{branch})
 		} else {

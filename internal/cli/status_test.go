@@ -51,7 +51,7 @@ func TestDiscover(t *testing.T) {
 	SetMtime(t, harness.ChunkhoundDBPath(repo), now.Add(-10*time.Hour))
 	SetMtime(t, filepath.Join(linkedA, harness.ProjectMCPFile), now.Add(-10*time.Hour))
 
-	ws, err := core.LoadWorkspace(&core.Globals{Root: repo}, false, defaultHooks())
+	ws, err := core.LoadWorkspace(core.Options{Root: repo}, false, defaultHooks())
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 
 	// Non-renderer path: the warning reaches stderr directly.
 	stderr := CaptureStderr(t, func() {
-		if err := cmdStatus(&core.Globals{Root: repo}, nil, defaultHooks()); err != nil {
+		if err := cmdStatus(&globals{Root: repo}, nil, defaultHooks()); err != nil {
 			t.Fatalf("cmdStatus: %v", err)
 		}
 	})
@@ -109,7 +109,7 @@ func TestDiscoverUpstreamsUnavailableReachesNotice(t *testing.T) {
 func statusJSON(t *testing.T, repo string) []core.JSONWorktree {
 	t.Helper()
 	out := CaptureStdout(t, func() {
-		if err := cmdStatus(&core.Globals{Root: repo, JSON: true}, nil, defaultHooks()); err != nil {
+		if err := cmdStatus(&globals{Root: repo, JSON: true}, nil, defaultHooks()); err != nil {
 			t.Fatalf("status --json: %v", err)
 		}
 	})
@@ -414,31 +414,6 @@ func TestPrintStatusJSON(t *testing.T) {
 	}
 }
 
-// TestDispatchValidatesColor pins Fix C: --color is validated once in
-// dispatch, so every subcommand rejects a bogus value as a usage error (exit 2)
-// before touching the repo.
-func TestDispatchValidatesColor(t *testing.T) {
-	for _, cmd := range []string{"status", "add", "delete", "gc", "config"} {
-		g := &core.Globals{Color: "bogus"}
-		if err := dispatch(cmd, g, nil); !isUsage(err) {
-			t.Errorf("dispatch(%q,Color:bogus) = %v, want usageError", cmd, err)
-		}
-	}
-}
-
-// TestParseSubRejectsInvalidGlobalsAfterSubcommand pins that a bogus global
-// placed AFTER the subcommand is validated: subFlags re-binds core.Globals, so the
-// value is only visible once parseSub has parsed it.
-func TestParseSubRejectsInvalidGlobalsAfterSubcommand(t *testing.T) {
-	for _, args := range [][]string{
-		{"--color", "bogus"},
-		{"--progress", "sometimes"},
-	} {
-		if err := cmdStatus(&core.Globals{Root: t.TempDir()}, args, defaultHooks()); !isUsage(err) {
-			t.Errorf("cmdStatus(%v) = %v, want usageError", args, err)
-		}
-	}
-}
 func TestTempDeadlineStatusAndSelectionAgree(t *testing.T) {
 	w := core.Worktree{Temp: true, TempCreated: TempTestTime, LastUsed: TempTestTime.Add(time.Second), TempTTL: 1500 * time.Millisecond}
 	deadline := TempTestTime.Add(2500 * time.Millisecond)
@@ -502,7 +477,7 @@ func TestStatusColumnsForNoAliasing(t *testing.T) {
 // renderer gated off by --progress never, work gets the nil-safe handle and no
 // renderer runs.
 func TestWithProgressGatedOff(t *testing.T) {
-	g := &core.Globals{Progress: ui.ProgressNever}
+	g := &globals{Progress: ui.ProgressNever}
 	ran := false
 	err := withProgressTo(io.Discard, g, true, func(p *ui.Progress) error {
 		ran = p == nil

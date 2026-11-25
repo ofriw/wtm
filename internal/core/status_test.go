@@ -23,7 +23,7 @@ var testNoMCP = func(string, *ui.Progress) map[string]bool { return nil }
 // path rejects nil hooks with a diagnostic instead of panicking deeper in the
 // flow. The guard runs before any IO, so no repo is needed.
 func TestLoadWorkspaceRequiresHooks(t *testing.T) {
-	g := &Globals{Root: t.TempDir()}
+	o := Options{Root: t.TempDir()}
 	cases := map[string]Hooks{
 		"both nil":     {},
 		"nil sessions": {MCP: testNoMCP},
@@ -35,7 +35,7 @@ func TestLoadWorkspaceRequiresHooks(t *testing.T) {
 	}
 	for name, hooks := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := LoadWorkspace(g, false, hooks)
+			_, err := LoadWorkspace(o, false, hooks)
 			if err == nil || !strings.Contains(err.Error(), "discovery hooks are required") {
 				t.Fatalf("err = %v, want 'discovery hooks are required'", err)
 			}
