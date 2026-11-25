@@ -298,6 +298,35 @@ func TestPiDualModeMeteredTwinWinsBothOrders(t *testing.T) {
 	}
 }
 
+// TestPiCoveredPricedTwinBillsAtListBothOrders pins the measurement/coverage
+// decoupling at the CLI boundary: when the covered copy of a billed turn carries
+// the price and the metered twin is unpriced, the bill must preserve the known
+// list price (never a null cost), in either file order.
+func TestPiCoveredPricedTwinBillsAtListBothOrders(t *testing.T) {
+	sandbox(t)
+	writeAuthJSON(t, `{"anthropic":{"type":"oauth"},"openai":{"type":"api_key"}}`)
+	pricedCovered := fmt.Sprintf(`{"type":"message","id":"t1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","provider":"anthropic","model":"m","usage":{"cost":{"total":1}}}}` + "\n")
+	unpricedMetered := fmt.Sprintf(`{"type":"message","id":"t1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","provider":"openai","model":"m","usage":{}}}` + "\n")
+	for name, sessions := range map[string][]string{
+		"covered-first": {pricedCovered, unpricedMetered},
+		"metered-first": {unpricedMetered, pricedCovered},
+	} {
+		t.Run(name, func(t *testing.T) {
+			u := piUsageWorktree(t, sessions...)
+			j := worktreeJSON(t, &u)
+			if j["cost"] != 1.0 {
+				t.Errorf("json cost = %v, want 1 (preserve the priced covered list)", j["cost"])
+			}
+			if u.partial {
+				t.Error("a disputed duplicate must not taint partial")
+			}
+			if _, ok := j["listCost"]; ok {
+				t.Error("billed-at-list winner must omit listCost (no subscription split)")
+			}
+		})
+	}
+}
+
 func seedSubscriptionSettings(t *testing.T, path, state string) {
 	t.Helper()
 	switch state {

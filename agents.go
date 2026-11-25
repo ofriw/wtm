@@ -796,7 +796,7 @@ func buildUsageSessionsReport(wtPath string, refs []sessionRef, cat catalog, sub
 	proofs := newProofCache(subs, wtPath)
 	sessions, loss := parseWorktreeSessions(refs, cat, proofs)
 	var u worktreeUsage
-	foldParsedSessions(&u, sessions, now)
+	foldParsedSessions(&u, sessions, now, proofs.sink())
 	markPartial(&u, loss.lost)
 	markTailPartial(&u, loss.tailLost)
 	return u, proofs.warnings, usageLossErr(loss.firstErr, loss.dropped, loss.unsupported)
@@ -1044,7 +1044,7 @@ func sanitizeEventCost(e *usageEvent, costWarned map[string]bool, warn warnSink)
 	}
 }
 
-func foldParsedSessions(u *worktreeUsage, sessions []parsedSession, now time.Time) {
+func foldParsedSessions(u *worktreeUsage, sessions []parsedSession, now time.Time, warn warnSink) {
 	lists := make([][]usageEvent, len(sessions))
 	proofs := make([]coveredProof, len(sessions))
 	for i, s := range sessions {
@@ -1054,9 +1054,42 @@ func foldParsedSessions(u *worktreeUsage, sessions []parsedSession, now time.Tim
 	// Spans fold the original events; only the billed winners carry cost. This
 	// keeps activity time independent of the session order and of what dedupe
 	// removes from a shared transcript.
-	billed := dedupeKeyedEvents(lists, proofs)
+	best := bestScores(lists, proofs)
+	// Dedupe mutates best as it awards slots; read the disputed verdict first.
+	disputed := disputedKeys(best)
+	billed := dedupeMasks(lists, best)
 	for i, s := range sessions {
-		u.addBilledSession(s.harness, s.events, s.activity, billed[i], s.price, now)
+		price := s.price
+		if len(disputed) > 0 {
+			price = meterDisputed(price, disputed, warn)
+		}
+		u.addBilledSession(s.harness, s.events, s.activity, billed[i], price, now)
+	}
+}
+
+// meterDisputed overrides a subscription-substituted $0 with the list price for
+// billed copies of a disputed key (one with a metered twin): the metered copy
+// proves the charge, so coverage cannot erase it. The override fires one warning
+// per run disclosing the conflict instead of deleting the figure.
+func meterDisputed(price func(usageEvent) pricedEvent, disputed map[string]bool, warn warnSink) func(usageEvent) pricedEvent {
+	warned := false
+	return func(e usageEvent) pricedEvent {
+		p := price(e)
+		if p.total.subscription && disputed[e.key] {
+			p.total.billed = p.total.list
+			p.total.subscription = false
+			for i := range p.tiers {
+				if p.tiers[i].subscription {
+					p.tiers[i].billed = p.tiers[i].list
+					p.tiers[i].subscription = false
+				}
+			}
+			if !warned {
+				doWarnSink(warn, fmt.Errorf("same turn exists under a subscription and outside it; billed at list price"))
+				warned = true
+			}
+		}
+		return p
 	}
 }
 

@@ -506,34 +506,57 @@ func TestDedupeEqualScoresElectFirst(t *testing.T) {
 	}
 }
 
-// TestReviewDuplicate pins that when a larger covered duplicate of a billed turn
-// exists beside a metered copy, the metered copy must still win the slot, so the
-// bill stays at list price. The election must preserve the metered evidence
-// independently of which copy supplies the winning token count, in either
-// session order.
+// TestReviewDuplicate pins the measurement/coverage decoupling: election selects
+// the best measurement copy (the richer one) regardless of coverage, while a
+// metered twin makes the key disputed so the bill stays at list price instead of
+// substituting a covered $0. The outcome — not which physical copy is elected —
+// is what the contract guarantees, in either session order.
 func TestReviewDuplicate(t *testing.T) {
+	priceAtList := func(e usageEvent) pricedEvent {
+		var p pricedEvent
+		if e.tokens.total() > 0 {
+			p.total.list.addKnown(0.3)
+		} else {
+			p.total.list.addUnknown()
+		}
+		p.total.billed = p.total.list
+		return p
+	}
+	coveredPrice := func(e usageEvent) pricedEvent {
+		p := priceAtList(e)
+		coverTiers(&p, knownZero)
+		return p
+	}
+	meteredPrice := func(e usageEvent) pricedEvent { return priceAtList(e) }
 	covered := func(usageEvent) bool { return true }
 	metered := func(usageEvent) bool { return false }
 	coveredTurn := usageEvent{at: at(1), model: "m", key: "k", tokens: promptTokens{input: 100001}}
-	meteredTurn := usageEvent{at: at(2), model: "m", key: "k", tokens: promptTokens{input: 100000}}
+	meteredTurn := usageEvent{at: at(2), model: "m", key: "k"}
 	cases := []struct {
 		name     string
-		sessions [][]usageEvent
-		proofs   []coveredProof
-		billed   int // session index that must carry the charge
+		sessions []parsedSession
 	}{
-		{"metered-first", [][]usageEvent{{meteredTurn}, {coveredTurn}}, []coveredProof{metered, covered}, 0},
-		{"covered-first", [][]usageEvent{{coveredTurn}, {meteredTurn}}, []coveredProof{covered, metered}, 1},
+		{
+			"metered-first",
+			[]parsedSession{
+				{harness: piAgent.name, events: []usageEvent{meteredTurn}, proof: metered, price: meteredPrice},
+				{harness: piAgent.name, events: []usageEvent{coveredTurn}, proof: covered, price: coveredPrice},
+			},
+		},
+		{
+			"covered-first",
+			[]parsedSession{
+				{harness: piAgent.name, events: []usageEvent{coveredTurn}, proof: covered, price: coveredPrice},
+				{harness: piAgent.name, events: []usageEvent{meteredTurn}, proof: metered, price: meteredPrice},
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			masks := dedupeKeyedEvents(tc.sessions, tc.proofs)
-			for si, mask := range masks {
-				for ei, billed := range mask {
-					if want := si == tc.billed; billed != want {
-						t.Errorf("session %d event %d billed = %v, want %v", si, ei, billed, want)
-					}
-				}
+			var u worktreeUsage
+			foldParsedSessions(&u, tc.sessions, nowFunc(), nil)
+			if got := u.cost().cell(); got != "$0.30" {
+				t.Errorf("cost = %q, want $0.30 (bill at list price; no coverage substitution)", got)
 			}
 		})
 	}

@@ -1011,15 +1011,14 @@ func scoreOf(e usageEvent) dedupeScore {
 	return s
 }
 
-// dedupeBest is a key's winning score across every copy, plus the winning score
-// across the metered (uncovered) copies alone. hasUncovered is tracked
-// independently of which copy supplies the overall winning score: a larger
-// covered copy must not erase the fact that a metered twin proves the charge
-// . Election prefers the best-scoring metered copy whenever one exists, so
-// transcript placement never decides whether a subscription proves the charge.
+// dedupeBest is a key's winning score across every copy plus the coverage
+// verdict. hasUncovered tracks whether any metered (uncovered) copy exists, so
+// a larger covered copy cannot erase the fact that a metered twin proves the
+// charge. Election always selects the best measurement copy by score, regardless
+// of coverage; hasUncovered only marks the key disputed so the fold bills the
+// winning copy at list price instead of substituting a covered $0.
 type dedupeBest struct {
 	score        dedupeScore
-	uncovered    dedupeScore
 	hasUncovered bool
 }
 
@@ -1032,18 +1031,36 @@ type coveredProof func(usageEvent) bool
 // returns a per-session billed mask: true marks the occurrence that contributes
 // cost. Spans ignore the mask and fold every event, so dedupe never changes
 // activity time. Keyless events always bill. The winner is the first occurrence
-// of a key with the best score, except that a covered copy never beats a metered
-// twin: when any uncovered copy of a key exists, only an uncovered copy can be
-// elected, so billing stays at list price instead of substituting coverage for a
-// duplicate whose provenance is unestablished. The caller keeps its event
-// slices; only the returned masks describe the change.
+// of a key with the best score, independent of coverage: the best measurement
+// copy prices the turn. Coverage is a separate per-key verdict the fold applies
+// (see disputedKeys and meterDisputed). The caller keeps its event slices; only
+// the returned masks describe the change.
 func dedupeKeyedEvents(sessions [][]usageEvent, covered []coveredProof) [][]bool {
-	best := bestScores(sessions, covered)
+	return dedupeMasks(sessions, bestScores(sessions, covered))
+}
+
+// dedupeMasks derives the per-session billed masks from the precomputed best
+// scores, so the fold can compute masks and the disputed-key verdict from one
+// walk.
+func dedupeMasks(sessions [][]usageEvent, best map[string]dedupeBest) [][]bool {
 	masks := make([][]bool, len(sessions))
 	for si, events := range sessions {
-		masks[si] = electBilledMask(events, best, coveredOf(covered, si))
+		masks[si] = electBilledMask(events, best)
 	}
 	return masks
+}
+
+// disputedKeys reports the billed-turn keys that have at least one metered
+// (uncovered) copy. Such a key is disputed: the elected copy may be covered, but
+// the bill must stay at list price and the conflict is disclosed.
+func disputedKeys(best map[string]dedupeBest) map[string]bool {
+	keys := make(map[string]bool, len(best))
+	for k, w := range best {
+		if w.hasUncovered {
+			keys[k] = true
+		}
+	}
+	return keys
 }
 
 // coveredOf returns the session's coverage proof, defaulting to never-covered so
@@ -1055,12 +1072,10 @@ func coveredOf(covered []coveredProof, si int) coveredProof {
 	return func(usageEvent) bool { return false }
 }
 
-// bestScores records the overall winning score per billed-turn key and the
-// winning score among the metered (uncovered) copies alone. Coverage is read per
-// event, not per session. The uncovered score is tracked on every uncovered
-// copy, even one that loses to a covered twin: the existence of a metered copy
-// is evidence that must survive the election regardless of which copy supplies
-// the winning figures.
+// bestScores records the overall winning score per billed-turn key and whether
+// any metered (uncovered) copy exists. Coverage is read per event, not per
+// session, so a metered twin in one session is never hidden by a covered copy of
+// the same turn in another.
 func bestScores(sessions [][]usageEvent, covered []coveredProof) map[string]dedupeBest {
 	best := map[string]dedupeBest{}
 	for si, events := range sessions {
@@ -1076,9 +1091,6 @@ func bestScores(sessions [][]usageEvent, covered []coveredProof) map[string]dedu
 				w.score = s
 			}
 			if !cov(e) {
-				if !w.hasUncovered || s.beats(w.uncovered) {
-					w.uncovered = s
-				}
 				w.hasUncovered = true
 			}
 			best[e.key] = w
@@ -1087,42 +1099,33 @@ func bestScores(sessions [][]usageEvent, covered []coveredProof) map[string]dedu
 	return best
 }
 
-// electBilledMask marks the billed occurrence of each key. When a metered
-// (uncovered) copy exists, the first copy at the best uncovered score wins the
-// slot and covered copies are skipped: only a metered copy can prove the
-// charge, regardless of which copy supplied the overall best score. When
-// every copy is covered, the first copy at the best score wins, so equal
-// duplicates later in the walk drop.
-func electBilledMask(events []usageEvent, best map[string]dedupeBest, covered coveredProof) []bool {
+// electBilledMask marks the billed occurrence of each key. Election is purely
+// measurement: the first copy at the best score wins, regardless of coverage, so
+// the richest record always prices the turn. The coverage verdict is applied
+// later by the fold (see meterDisputed), not here.
+func electBilledMask(events []usageEvent, best map[string]dedupeBest) []bool {
 	mask := make([]bool, len(events))
 	for ei, e := range events {
 		if e.key == "" {
 			mask[ei] = true
 			continue
 		}
-		electKeyedCopy(mask, ei, e, best, covered)
+		electKeyedCopy(mask, ei, e, best)
 	}
 	return mask
 }
 
-// electKeyedCopy awards the slot for one keyed event. When a metered
-// (uncovered) twin exists, only an uncovered copy can prove the charge, so a
-// covered copy never substitutes for it; otherwise the first copy at the
-// overall best score wins and later equal duplicates drop.
-func electKeyedCopy(mask []bool, ei int, e usageEvent, best map[string]dedupeBest, covered coveredProof) {
+// electKeyedCopy awards the slot for one keyed event: the first copy at the
+// overall best score wins and later equal duplicates drop. Coverage never
+// changes which copy is elected; it only decides whether the winning copy's bill
+// is disputed (see meterDisputed).
+func electKeyedCopy(mask []bool, ei int, e usageEvent, best map[string]dedupeBest) {
 	w, ok := best[e.key]
 	if !ok {
 		return
 	}
-	win := w.score
-	if w.hasUncovered {
-		if covered(e) {
-			return // a covered copy never substitutes for a metered twin
-		}
-		win = w.uncovered
-	}
 	s := scoreOf(e)
-	if s.beats(win) || win.beats(s) {
+	if s.beats(w.score) || w.score.beats(s) {
 		return // not a tie: a better copy won, or the slot was already taken
 	}
 	mask[ei] = true
