@@ -14,7 +14,9 @@ import (
 // be exercised. They do not model real harness probes — those live in harness's
 // own tests against real config layouts.
 func TestMain(m *testing.M) {
-	RegisterCapability(Capability{ID: "chunkhound", Token: "chunk", Probe: func(CapInput) CapState { return CapAbsent }})
-	RegisterCapability(Capability{ID: "mcp", Token: "mcp", Probe: func(CapInput) CapState { return CapAbsent }})
+	RegisterCapabilities([]Capability{
+		{ID: "chunkhound", Token: "chunk", Probe: func(CapInput) CapState { return CapAbsent }},
+		{ID: "mcp", Token: "mcp", Probe: func(CapInput) CapState { return CapAbsent }},
+	})
 	os.Exit(m.Run())
 }

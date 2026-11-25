@@ -22,10 +22,62 @@ func TestCapabilitiesReturnsCopy(t *testing.T) {
 	}
 }
 
+// TestRegisterCapabilitiesDuplicateChecksPanic pins the one-shot duplicate
+// guards: a duplicate ID or Token in the incoming list must panic before any
+// state mutation. Panic paths of RegisterCapabilities itself cannot run
+// in-process (TestMain already registered once), so the unexported helper is
+// exercised directly.
+func TestRegisterCapabilitiesDuplicateChecksPanic(t *testing.T) {
+	mk := func(id, token string) Capability {
+		return Capability{ID: id, Token: token, Probe: func(CapInput) CapState { return CapAbsent }}
+	}
+	cases := []struct {
+		name string
+		caps []Capability
+	}{
+		{"duplicate id", []Capability{mk("dup", "a"), mk("dup", "b")}},
+		{"duplicate token", []Capability{mk("a", "dup"), mk("b", "dup")}},
+		{"duplicate header case-folded", []Capability{mk("A", "A"), mk("a", "a")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Fatal("assertNoDuplicateCapabilities must panic")
+				}
+			}()
+			assertNoDuplicateCapabilities(tc.caps)
+		})
+	}
+}
+
 // TestCapabilitiesPanicsWhenEmpty pins the fail-fast guard: a production
 // reader must never silently see an empty registry (which would disable the
 // hidden-capability disclosure), so Capabilities() panics like
 // requireCapabilities.
+// TestRegisterCapabilitiesValidates pins the descriptor invariants enforced
+// before registration: an empty id, an empty token, and a token that is not
+// a prefix of its id all panic.
+func TestRegisterCapabilitiesValidates(t *testing.T) {
+	mk := func(id, token string) Capability {
+		return Capability{ID: id, Token: token, Probe: func(CapInput) CapState { return CapAbsent }}
+	}
+	for name, tc := range map[string][2]string{
+		"empty id":         {"", "t"},
+		"empty token":      {"ab", ""},
+		"token not prefix": {"ab", "x"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Fatal("invalid descriptor must panic")
+				}
+			}()
+			assertValidCapability(mk(tc[0], tc[1]))
+		})
+	}
+}
+
 func TestCapabilitiesPanicsWhenEmpty(t *testing.T) {
 	saved := capabilityRegistry
 	capabilityRegistry = nil

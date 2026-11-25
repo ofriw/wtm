@@ -16,17 +16,18 @@ var capabilitiesRegistered bool
 
 // RegisterCapabilities registers every integration descriptor in registry order
 // (project integrations first, then agents). Idempotent: cli.Run may call it
-// repeatedly in one process.
+// repeatedly in one process. The flag flips only after core's one-shot
+// registration succeeds, so a panic mid-registration leaves it false.
 func RegisterCapabilities() {
 	if capabilitiesRegistered {
 		return
 	}
-	capabilitiesRegistered = true
-	core.RegisterCapability(chunkhoundCapability)
-	core.RegisterCapability(mcpCapability)
+	caps := []core.Capability{chunkhoundCapability, mcpCapability}
 	for _, a := range agents() {
-		core.RegisterCapability(a.capability())
+		caps = append(caps, a.capability())
 	}
+	core.RegisterCapabilities(caps)
+	capabilitiesRegistered = true
 }
 
 var (

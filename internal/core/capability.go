@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 )
@@ -40,14 +41,56 @@ type Capability struct {
 }
 
 var capabilityRegistry []Capability
+var registered bool
 
-// RegisterCapability appends a capability, panicking on a core-column header
-// collision at registration — not only when the harness happens to be linked.
-// The check uses the real column header (assertNoCollision), so a header that
-// stops equaling the upper-cased ID still surfaces here and at registry build.
-func RegisterCapability(c Capability) {
-	assertNoCollision(c, c.Column(), AllColumns())
-	capabilityRegistry = append(capabilityRegistry, c)
+// RegisterCapabilities installs the full capability set in one shot. It panics
+// when called twice (registered already true) or when any cap fails
+// validation: an empty id or token, a non-prefix token, a core-column header
+// collision, or a duplicate ID/Token/upper-cased header against another cap
+// in the incoming list. Validation completes before any state mutation, so a
+// panic leaves the registry and flag untouched.
+func RegisterCapabilities(caps []Capability) {
+	if registered {
+		panic("wtm: capabilities already registered")
+	}
+	for _, c := range caps {
+		assertValidCapability(c)
+		assertNoCollision(c, c.Column(), AllColumns())
+	}
+	assertNoDuplicateCapabilities(caps)
+	capabilityRegistry = slices.Clone(caps)
+	registered = true
+}
+
+// assertValidCapability panics on a descriptor that cannot be rendered: an
+// empty ID, an empty Token, or a Token that is not a prefix of its ID.
+func assertValidCapability(c Capability) {
+	switch {
+	case c.ID == "":
+		panic("wtm: capability id must not be empty")
+	case c.Token == "":
+		panic(fmt.Sprintf("wtm: capability %q has an empty token", c.ID))
+	case !strings.HasPrefix(c.ID, c.Token):
+		panic(fmt.Sprintf("wtm: capability %q token %q is not a prefix of its id", c.ID, c.Token))
+	}
+}
+
+// assertNoDuplicateCapabilities panics when any two caps share an ID, a Token,
+// or an upper-cased header. Header comparison mirrors Column (strings.ToUpper
+// of ID), so a duplicate in the input also means a duplicate --wide column.
+func assertNoDuplicateCapabilities(caps []Capability) {
+	for i, a := range caps {
+		for _, b := range caps[i+1:] {
+			switch {
+			case a.ID == b.ID:
+				panic(fmt.Sprintf("wtm: duplicate capability id %q", a.ID))
+			case a.Token == b.Token:
+				panic(fmt.Sprintf("wtm: duplicate capability token %q", a.Token))
+			case strings.ToUpper(a.ID) == strings.ToUpper(b.ID):
+				panic(fmt.Sprintf("wtm: duplicate capability header %q", strings.ToUpper(a.ID)))
+			}
+		}
+	}
 }
 
 // requireCapabilities panics on an empty registry: a silent empty integration
@@ -182,7 +225,6 @@ func (c Capability) wideText(s CapState, inUse bool) string {
 // from the registry so the schema never grows by hand.
 func (c Capability) Column() WorktreeColumn {
 	return WorktreeColumn{
-		ID:     c.ID,
 		Header: strings.ToUpper(c.ID),
 		Cell: func(w Worktree, ctx ColumnContext) string {
 			return c.wideText(w.Caps[c.ID], Applicable(ctx.Active, c.ID))
