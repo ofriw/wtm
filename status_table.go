@@ -21,16 +21,30 @@ type columnContext struct {
 	active []capability
 }
 
+// colStyle is the semantic style key of a fixed column. The UI maps the key to
+// a style, so styling keys off the registry instead of header string literals.
+type colStyle int
+
+const (
+	stylePlain     colStyle = iota // identity/measurement cells
+	styleStatus                    // the STATUS word
+	styleTemp                      // the TEMP countdown
+	styleUpstream                  // UPSTREAM presence
+	styleSecondary                 // COST/LIST non-values
+	styleStale                     // BRANCH/LAST USED stale markers
+)
+
 // worktreeColumn is one grid column: its header, its projection from a
-// worktree, and its fit policy. shrinkRank is the fit order (0 = pinned): a
-// lower rank gives up width or drops whole first. floor is the hard minimum
-// width of a shrinkable column; the fit never shrinks below it. floor 0 means
-// the column has no useful minimum, so it drops whole. This registry is the
-// single source of truth for the status table and the gc picker, so the two
-// can never drift apart.
+// worktree, its style key, and its fit policy. shrinkRank is the fit order (0
+// = pinned): a lower rank gives up width or drops whole first. floor is the
+// hard minimum width of a shrinkable column; the fit never shrinks below it.
+// floor 0 means the column has no useful minimum, so it drops whole. This
+// registry is the single source of truth for the status table and the gc
+// picker, so the two can never drift apart.
 type worktreeColumn struct {
 	header     string
 	cell       func(worktree, columnContext) string
+	style      colStyle
 	rightAlign bool
 	shrinkRank int
 	floor      int
@@ -50,7 +64,7 @@ func cellStatus(w worktree, c columnContext) string   { return w.status(c.now, c
 
 func lastUsedCell(w worktree) string {
 	if w.LastUsed.IsZero() {
-		return "never"
+		return neverValue
 	}
 	return w.LastUsed.Format("2006-01-02")
 }
@@ -59,7 +73,7 @@ func lastUsedCell(w worktree) string {
 // branch has none, so whether gc will delete a remote branch is obvious.
 func upstreamCell(w worktree) string {
 	if !w.Upstream.present() {
-		return "-"
+		return dashValue
 	}
 	return w.Upstream.Short
 }
@@ -70,14 +84,15 @@ func dirtyCell(w worktree) string {
 	if w.Dirty {
 		return "dirty"
 	}
-	return "-"
+	return dashValue
 }
 
 // cellAge is the wall-clock life of the worktree; "-" when the creation mark
-// is absent, so an unknown age never reads as a real zero.
+// is absent, including one after the report instant (worktreeCreated treats a
+// future stamp as no mark), so an unknown age never reads as a real zero.
 func cellAge(w worktree, c columnContext) string {
 	if w.Created.IsZero() {
-		return "-"
+		return dashValue
 	}
 	return humanDuration(c.now.Sub(w.Created))
 }
@@ -97,12 +112,12 @@ func partialValue(s string, partial bool) string {
 // The legend reads the flag, so it never explains a marker that cannot render.
 func activeCellValue(w worktree) (string, bool) {
 	if w.Usage == nil {
-		return "-", false
+		return dashValue, false
 	}
 	if w.Usage.partial {
 		active := w.Usage.active()
 		if !w.Usage.hasEvents() || active == 0 {
-			return "unknown", false
+			return unknownValue, false
 		}
 		return partialValue(humanDuration(active), true), true
 	}
@@ -123,7 +138,7 @@ func cellActive(w worktree, _ columnContext) string {
 // so one header always labels one right-aligned number.
 func cellCost(w worktree, _ columnContext) string {
 	if w.Usage == nil {
-		return "-"
+		return dashValue
 	}
 	return w.Usage.cost().billed.cell()
 }
@@ -136,7 +151,7 @@ func cellList(w worktree, _ columnContext) string { return listCell(w.cost()) }
 // the model cell, so both recede to "-" on the same condition.
 func listCell(p costPair) string {
 	if !p.showsList() {
-		return "-"
+		return dashValue
 	}
 	return p.list.cell()
 }
@@ -144,7 +159,7 @@ func listCell(p costPair) string {
 // cellTemp shows the remaining idle window, or a dash for permanent checkouts.
 func cellTemp(w worktree, c columnContext) string {
 	if !w.Temp {
-		return "-"
+		return dashValue
 	}
 	return remainingWindowLabel(w.tempExpiresAt(), c.now)
 }
@@ -160,7 +175,7 @@ func cellIntegrations(w worktree, c columnContext) string {
 		}
 	}
 	if len(tokens) == 0 {
-		return "-"
+		return dashValue
 	}
 	return strings.Join(tokens, " ")
 }
@@ -177,20 +192,20 @@ var (
 	// whole value or drop whole, never a truncated number that reads as a
 	// different value.
 	colPath     = worktreeColumn{header: "PATH", cell: cellPath, shrinkRank: 3, floor: 12}
-	colBranch   = worktreeColumn{header: "BRANCH", cell: cellBranch, shrinkRank: 5, floor: 8}
-	colUpstream = worktreeColumn{header: "UPSTREAM", cell: cellUpstream, shrinkRank: 4, floor: 8}
-	colLastUsed = worktreeColumn{header: "LAST USED", cell: cellLastUsed, rightAlign: true, shrinkRank: 6, floor: 10, unelidable: true}
+	colBranch   = worktreeColumn{header: "BRANCH", cell: cellBranch, style: styleStale, shrinkRank: 5, floor: 8}
+	colUpstream = worktreeColumn{header: "UPSTREAM", cell: cellUpstream, style: styleUpstream, shrinkRank: 4, floor: 8}
+	colLastUsed = worktreeColumn{header: "LAST USED", cell: cellLastUsed, style: styleStale, rightAlign: true, shrinkRank: 6, floor: 10, unelidable: true}
 	colAge      = worktreeColumn{header: "AGE", cell: cellAge, rightAlign: true, shrinkRank: 7, floor: 3, unelidable: true}
 	colActive   = worktreeColumn{header: "ACTIVE", cell: cellActive, rightAlign: true, shrinkRank: 8, floor: 6, unelidable: true}
-	colCost     = worktreeColumn{header: "COST", cell: cellCost, rightAlign: true, shrinkRank: 9, floor: 4, unelidable: true}
+	colCost     = worktreeColumn{header: "COST", cell: cellCost, style: styleSecondary, rightAlign: true, shrinkRank: 9, floor: 4, unelidable: true}
 	// colList is the data-dependent pay-as-you-go column beside COST (see
 	// withListColumn). It drops whole and it drops first: a counterfactual price
 	// is the most dispensable number here, and a price must never middle-cut.
-	colList   = worktreeColumn{header: "LIST", cell: cellList, rightAlign: true, shrinkRank: 1, unelidable: true}
-	colStatus = worktreeColumn{header: "STATUS", cell: cellStatus}
+	colList   = worktreeColumn{header: "LIST", cell: cellList, style: styleSecondary, rightAlign: true, shrinkRank: 1, unelidable: true}
+	colStatus = worktreeColumn{header: "STATUS", cell: cellStatus, style: styleStatus}
 	// colTemp is pinned (rank 0): the reclaim countdown is never elided. Only the
 	// tail-first last resort drops it, when the budget cannot hold the pinned set.
-	colTemp         = worktreeColumn{header: "TEMP", cell: cellTemp}
+	colTemp         = worktreeColumn{header: "TEMP", cell: cellTemp, style: styleTemp}
 	colIntegrations = worktreeColumn{header: "INTEGRATIONS", cell: cellIntegrations, shrinkRank: 2, floor: 6, unelidable: true}
 	colUncommitted  = worktreeColumn{header: "UNCOMMITTED", cell: cellUncommitted}
 
@@ -243,12 +258,24 @@ func allColumns() []worktreeColumn {
 // and the slice cannot be mutated at runtime.
 func columnRegistry() map[string]worktreeColumn { return columnRegistryFor(capabilities()) }
 
+// fixedStyledColumns are the headers that must carry a style key: the columns
+// whose presentation is not plain data. Init panics if the registry loses a
+// style key, so a future column edit cannot silently unstyle a styled header.
+// The list is a literal, never registry state, so it cannot be mutated and
+// each entry names its column directly — duplicate style key stays beside the
+// column that carries it.
 func init() {
-	// WHY (an eager guard, not registry state — see the no-package-var rule
-	// above): capability ids become --wide headers; a collision with a core
-	// header must fail at startup, not at the first status render. Go
-	// initializes the agent/capability descriptors before init runs.
-	_ = columnRegistry()
+	// WHY (an eager guard, not registry state): capability ids become --wide
+	// headers; a collision with a core header must fail at startup, not at the
+	// first status render. Go initializes the agent/capability descriptors
+	// before init runs. The same pass guards that every fixed styled column
+	// still carries a style key.
+	registry := columnRegistry()
+	for _, h := range []string{colStatus.header, colTemp.header, colUpstream.header, colCost.header, colList.header, colBranch.header, colLastUsed.header} {
+		if registry[h].style == stylePlain {
+			panic(fmt.Sprintf("styled header %q has no style key", h))
+		}
+	}
 }
 
 // columnRegistryFor builds the registry for the given capabilities and panics

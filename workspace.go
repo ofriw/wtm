@@ -41,7 +41,7 @@ type worktree struct {
 
 func (w worktree) branchName() string {
 	if w.Branch == "" {
-		return "(detached)"
+		return detachedValue
 	}
 	return w.Branch
 }

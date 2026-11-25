@@ -164,7 +164,7 @@ func wideText(s capState, inUse bool) string {
 	case capPartial:
 		return "partial"
 	default:
-		return "-"
+		return dashValue
 	}
 }
 

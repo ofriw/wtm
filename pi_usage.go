@@ -634,7 +634,7 @@ func piChildModel(model, current string) string {
 	if current != "" {
 		return current
 	}
-	return "unknown"
+	return unknownValue
 }
 
 // piChildProvider is the child's billing provider. A routed child names its own
@@ -707,7 +707,7 @@ func addPiEvent(events *[]usageEvent, at time.Time, id string, model, provider s
 		return
 	}
 	if model == "" {
-		model = "unknown"
+		model = unknownValue
 	}
 	var cost *float64
 	if u.Cost != nil {

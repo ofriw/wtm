@@ -91,9 +91,9 @@ func (m money) jsonValue() *float64 {
 func (m money) cell() string {
 	switch {
 	case !m.any:
-		return "-"
+		return dashValue
 	case m.unknown:
-		return "unknown"
+		return unknownValue
 	case m.causes != 0:
 		return "~" + formatCost(m.amount)
 	default:
@@ -215,7 +215,7 @@ func (p costPair) cell() string {
 	if p.showsList() {
 		// After markPartial taints both sides, collapse to single "unknown"
 		if p.bothUnpriced() {
-			return "unknown"
+			return unknownValue
 		}
 		return p.billed.cell() + "/" + p.list.cell()
 	}

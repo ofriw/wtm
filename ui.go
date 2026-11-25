@@ -74,17 +74,39 @@ func titleStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Cyan)
 }
 
-// secondaryValue reports a rendered non-value: absent ("-") or unpriced
-// ("unknown"). One rule serves both the table cells and the summary block, so
-// a non-value recedes with faint everywhere.
-func secondaryValue(v string) bool { return v == "-" || v == "unknown" }
+// Non-value grammar: the rendered absent/unpriced tokens. Cells produce them;
+// the styles that fade them and the summary block match the same names, so a
+// non-value always recedes with faint. The detached/never tokens are the
+// branch and last-used non-s, named once here so every producer and the
+// styles that fade them share one spelling.
+const (
+	dashValue     = "-"
+	unknownValue  = "unknown"
+	neverValue    = "never"
+	detachedValue = "(detached)"
+)
+
+// secondaryValue reports a rendered non-value: absent (dashValue) or unpriced
+// (unknownValue). One rule serves both the table cells and the summary block,
+// so a non-value recedes with faint everywhere.
+func secondaryValue(v string) bool { return v == dashValue || v == unknownValue }
 
 // statusCellStyle maps a status-table cell to its style. Basic ANSI colors are
 // deliberate: the terminal theme owns the palette, and every profile (16/256/
 // truecolor/NO_COLOR) degrades cleanly. UNUSED is Yellow, not Red: it is the
 // gc candidate, not an error.
+// columnStyleFor resolves a header's style key straight from the registry, so
+// presentation keys off the column definition — never a second header→style
+// table that could drift.
+func columnStyleFor(header string) colStyle {
+	if c, ok := columnRegistry()[header]; ok {
+		return c.style
+	}
+	return stylePlain
+}
+
 func statusCellStyle(header, value string) lipgloss.Style {
-	if style, ok := statusColumnStyle(header, value); ok {
+	if style, ok := statusColumnStyle(columnStyleFor(header), value); ok {
 		return style
 	}
 	// Capability columns only appear in the opt-in --wide view.
@@ -94,19 +116,19 @@ func statusCellStyle(header, value string) lipgloss.Style {
 	return lipgloss.NewStyle()
 }
 
-// statusColumnStyle maps the fixed status columns. The ok result is false when
-// the header has no rule, so the caller can fall through to the capability
-// columns.
-func statusColumnStyle(header, value string) (lipgloss.Style, bool) {
-	switch header {
-	case "STATUS":
+// statusColumnStyle maps the fixed status columns by their style key. The ok
+// result is false when the style has no rule, so the caller can fall through to
+// the capability columns.
+func statusColumnStyle(style colStyle, value string) (lipgloss.Style, bool) {
+	switch style {
+	case styleStatus:
 		return statusWordStyle(value), true
-	case "TEMP":
+	case styleTemp:
 		return tempCellStyle(value), true
-	case "UPSTREAM":
-		return booleanStyle(value != "-"), true
-	case "COST", "LIST", "BRANCH", "LAST USED":
-		return secondaryColumnStyle(header, value)
+	case styleUpstream:
+		return booleanStyle(value != dashValue), true
+	case styleSecondary, styleStale:
+		return secondaryColumnStyle(style, value)
 	}
 	return lipgloss.Style{}, false
 }
@@ -114,7 +136,7 @@ func statusColumnStyle(header, value string) (lipgloss.Style, bool) {
 // statusWordStyle colors the STATUS word: ACTIVE is live, anything else is the
 // gc candidate.
 func statusWordStyle(value string) lipgloss.Style {
-	if value == "ACTIVE" {
+	if value == statusActive {
 		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Green)
 	}
 	return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
@@ -123,15 +145,15 @@ func statusWordStyle(value string) lipgloss.Style {
 // secondaryColumnStyle fades a COST/LIST non-value and a stale BRANCH/LAST USED
 // marker; any other value stays plain. The ok result is false so the caller can
 // try the capability columns.
-func secondaryColumnStyle(header, value string) (lipgloss.Style, bool) {
-	switch header {
-	case "COST", "LIST":
+func secondaryColumnStyle(style colStyle, value string) (lipgloss.Style, bool) {
+	switch style {
+	case styleSecondary:
 		// A number is the signal; "unknown" and "-" are non-values and recede.
 		if secondaryValue(value) {
 			return lipgloss.NewStyle().Faint(true), true
 		}
-	case "BRANCH", "LAST USED":
-		if value == "(detached)" || value == "never" {
+	case styleStale:
+		if value == detachedValue || value == neverValue {
 			return lipgloss.NewStyle().Faint(true), true
 		}
 	}
@@ -153,7 +175,7 @@ func capabilityCellStyle(value string) lipgloss.Style {
 }
 
 func tempCellStyle(value string) lipgloss.Style {
-	if value == "-" {
+	if value == dashValue {
 		return lipgloss.NewStyle().Faint(true)
 	}
 	if value == "expired" {
@@ -175,17 +197,31 @@ func capStateStyle(s capState) lipgloss.Style {
 	}
 }
 
-// cellRenderer renders one plain cell value into its colored form. printTable
+// cellRenderer renders one plain cell value into its colored form. emitGrid
 // calls it only when the profile supports styling, so it may always decorate.
 type cellRenderer func(header, value string) string
 
-// statusCell renders one plain status cell with its color. The grouped
-// INTEGRATIONS cell colors token-by-token; every other column takes one style.
-func statusCell(header, value string) string {
-	if header == colIntegrations.header {
-		return groupedCellStyle(value)
+// statusCellRenderer fixes the style lookup for one render, so columnRegistry()
+// runs once per table, not per cell.
+func statusCellRenderer(styles map[string]worktreeColumn) cellRenderer {
+	return func(header, value string) string {
+		if header == colIntegrations.header {
+			return groupedCellStyle(value)
+		}
+		if styled, ok := statusColumnStyle(styles[header].style, value); ok {
+			return styled.Render(value)
+		}
+		if isCapabilityHeader(header) {
+			return capabilityCellStyle(value).Render(value)
+		}
+		return value
 	}
-	return statusCellStyle(header, value).Render(value)
+}
+
+// statusCell renders one plain status cell with its color, building the style
+// lookup per call; production uses statusCellRenderer with a prebuilt lookup.
+func statusCell(header, value string) string {
+	return statusCellRenderer(columnRegistry())(header, value)
 }
 
 // legendStyle is the one treatment for the explanatory lines under a table:

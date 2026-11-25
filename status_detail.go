@@ -288,7 +288,7 @@ func tokenRatioRows(t promptTokens, partial bool) [][]string {
 		// rather than absent.
 		rows := make([][]string, 0, len(detailRatioMeta))
 		for _, d := range detailRatioMeta {
-			rows = append(rows, []string{d.label, "unknown"})
+			rows = append(rows, []string{d.label, unknownValue})
 		}
 		return rows
 	}
@@ -415,7 +415,7 @@ func detailActive(w worktree) string { return cellActive(w, columnContext{}) }
 // and LIST columns; both derive from costPair.
 func detailCost(w worktree) string {
 	if w.Usage == nil {
-		return "-"
+		return dashValue
 	}
 	return w.Usage.cost().cell()
 }
@@ -584,7 +584,7 @@ func modelTimeCell(m *modelUsage) string {
 		return humanDuration(active)
 	}
 	if active == 0 {
-		return "unknown"
+		return unknownValue
 	}
 	return partialValue(humanDuration(active), true)
 }
@@ -596,12 +596,12 @@ func modelTimeCell(m *modelUsage) string {
 func partialTokenCell(value int64, present, partial bool) string {
 	if partial {
 		if !present {
-			return "unknown"
+			return unknownValue
 		}
 		return partialValue(formatTokens(value), true)
 	}
 	if !present {
-		return "-"
+		return dashValue
 	}
 	return formatTokens(value)
 }
@@ -610,7 +610,7 @@ func partialTokenCell(value int64, present, partial bool) string {
 // tokens, "-" when none, and "unknown" when the count was rejected.
 func tokenCount(m *modelUsage, t tier) string {
 	if m.tokens.corrupt.has(t) {
-		return "unknown"
+		return unknownValue
 	}
 	n := m.tokens.tier(t)
 	return partialTokenCell(n, n > 0, m.partial)
@@ -621,7 +621,7 @@ func tokenCount(m *modelUsage, t tier) string {
 // model recorded no prompt tokens, "unknown" when a prompt class is corrupt.
 func totalInputCell(m *modelUsage) string {
 	if m.tokens.corruptPrompt() {
-		return "unknown"
+		return unknownValue
 	}
 	context := m.tokens.context()
 	return partialTokenCell(context, context != 0, m.partial)
@@ -633,7 +633,7 @@ func totalInputCell(m *modelUsage) string {
 // class reads unknown rather than a zero placeholder.
 func missCount(m *modelUsage) string {
 	if m.tokens.corruptPrompt() {
-		return "unknown"
+		return unknownValue
 	}
 	context := m.tokens.context()
 	return partialTokenCell(m.tokens.miss(), context != 0, m.partial)
@@ -644,17 +644,17 @@ func missCount(m *modelUsage) string {
 // model recorded no prompt tokens at all.
 func hitRateCell(m *modelUsage) string {
 	if m.tokens.corruptPrompt() {
-		return "unknown"
+		return unknownValue
 	}
 	rate, ok := m.tokens.hitRate()
 	if ok {
 		return partialValue(formatPercent(rate), m.partial)
 	}
 	if m.partial {
-		return "unknown"
+		return unknownValue
 	}
 	if m.tokens.context() == 0 {
-		return "-"
+		return dashValue
 	}
-	return "unknown"
+	return unknownValue
 }

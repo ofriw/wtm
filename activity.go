@@ -33,11 +33,15 @@ func (w worktree) tempExpiresAt() time.Time {
 	return tempDeadline(w.TempCreated, w.LastUsed, w.TempTTL)
 }
 
+// statusActive is the live STATUS word: the activity grammar returns it and the
+// UI matches it, so a rename cannot drift between producer and style.
+const statusActive = "ACTIVE"
+
 func (w worktree) status(now time.Time, ttl time.Duration) string {
 	if w.unused(now, ttl) {
 		return "UNUSED"
 	}
-	return "ACTIVE"
+	return statusActive
 }
 
 // Permanent cleanup has no fresh idle probe. Missing ownership therefore keeps

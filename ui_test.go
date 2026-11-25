@@ -598,3 +598,17 @@ func TestStatusCellStyleNonValuesRecede(t *testing.T) {
 		}
 	}
 }
+
+// BenchmarkReviewStatusCell tracks per-cell allocations in the status style
+// path: the registry lookup must be built once per render, not per cell.
+func BenchmarkReviewStatusCell(b *testing.B) {
+	render := statusCellRenderer(columnRegistry())
+	headers := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "AGE", "ACTIVE", "COST", "LIST", "STATUS", "TEMP", "INTEGRATIONS"}
+	row := []string{"/SBX/wt", "main", "-", "2026-10-24", "10d 3h", "~2M 16d", "$101.19", "$1,738.95", "ACTIVE", "-", "chunk mcp pi claude"}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for j, h := range headers {
+			render(h, row[j])
+		}
+	}
+}
