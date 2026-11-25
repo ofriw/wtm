@@ -246,7 +246,7 @@ func TestReconcileDropsNonCanonicalKeys(t *testing.T) {
 	}
 	store := mustReadTempStore(t)
 	if _, ok := store[stale]; ok {
-		t.Fatalf("non-Canonical key survived reconcile: %+v", store)
+		t.Fatalf("non-canonical key survived reconcile: %+v", store)
 	}
 	if _, ok := store[CanonicalPath(keep)]; !ok {
 		t.Fatalf("Canonical record dropped by reconcile: %+v", store)

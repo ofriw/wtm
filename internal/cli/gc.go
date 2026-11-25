@@ -59,7 +59,7 @@ func emptyGCResult(keptSessions, keptRemote bool) gcResult {
 }
 
 // abortGCResult is the report when gc stops before removing anything
-// (declined ui.Confirm or empty selection): no remote branch was deleted, so a
+// (declined confirm or empty selection): no remote branch was deleted, so a
 // passed --keep-remote trivially kept them all. (On the removal path the same
 // claim goes through plan.keptRemote, which additionally requires targets.)
 func abortGCResult(o gcOptions) gcResult {

@@ -16,7 +16,7 @@ import (
 // that runs the gc removal path regardless of the unused TTL, then removes the
 // local branch the command names. Fixtures drive real git only.
 
-func deleteResultOf(t *testing.T, g *core.Globals, args ...string) gcResult {
+func deleteResultOf(t *testing.T, g *globals, args ...string) gcResult {
 	t.Helper()
 	g.JSON = true
 	var err error

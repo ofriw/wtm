@@ -42,8 +42,8 @@ func TestChunkhoundCapabilityState(t *testing.T) {
 	}
 }
 
-// TestCapabilityApplicability pins the n/a distinction: a core.Capability no
-// core.Worktree uses is not applicable, while an applicable one absent here is "-".
+// TestCapabilityApplicability pins the n/a distinction: a capability no
+// worktree uses is not applicable, while an applicable one absent here is "-".
 func TestCapabilityApplicability(t *testing.T) {
 	wts := []core.Worktree{
 		{Path: "/a", Caps: map[string]core.CapState{"mcp": core.CapPresent}},

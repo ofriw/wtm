@@ -242,8 +242,8 @@ func TestClaudeTranscriptKeepsOldWorktreeActive(t *testing.T) {
 	t.Setenv("GIT_AUTHOR_DATE", old.Format(time.RFC3339))
 	t.Setenv("GIT_COMMITTER_DATE", old.Format(time.RFC3339))
 	repo := NativeRepo(t)
-	wt := filepath.Join(filepath.Dir(repo), "old-core")
-	GitWorktreeAdd(t, repo, wt, "old-core", "main")
+	wt := filepath.Join(filepath.Dir(repo), "old-worktree")
+	GitWorktreeAdd(t, repo, wt, "old-worktree", "main")
 	// Git activity now participates alongside sessions; isolate the transcript.
 	BackdateGitActivity(t, wt, old)
 	assertTranscriptActivity(t, repo, wt)

@@ -89,7 +89,7 @@ func TestIndexPiSessions(t *testing.T) {
 	Sandbox(t)
 	wt := t.TempDir()
 
-	t.Run("Canonical cwd match", func(t *testing.T) {
+	t.Run("canonical cwd match", func(t *testing.T) {
 		p := MkSession(t, wt, "s1", time.Now())
 		idx := mustIndexSessions(t)
 		if !idxContains(idx, wt, p) {
@@ -97,7 +97,7 @@ func TestIndexPiSessions(t *testing.T) {
 		}
 	})
 
-	t.Run("symlinked core.Worktree path still matches", func(t *testing.T) {
+	t.Run("symlinked worktree path still matches", func(t *testing.T) {
 		link := filepath.Join(t.TempDir(), "wtlink")
 		MustSymlink(t, wt, link)
 		p := MkSession(t, link, "s2", time.Now())
