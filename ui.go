@@ -345,13 +345,14 @@ func styleKeyValues(rows [][]string, titleRows int) [][]string {
 // sizedGrid resolves a grid against a width budget: columns are sized, then
 // laid out by layoutGrid.
 func sizedGrid(headers []string, rows [][]string, budget int, rightAlign []string) ([]string, [][]string, []int, []lipgloss.Position) {
-	return layoutGrid(headers, rows, columnWidths(headers, rows, budget), rightAlign)
+	// nil seen: grids outside a status run always disclose a drop.
+	return layoutGrid(headers, rows, columnWidths(headers, rows, budget), rightAlign, nil)
 }
 
 // layoutGrid is the shared drop/align/elide pipeline for a pre-sized grid;
 // sizedGrid and fittedGrid both end here, so one pipeline serves every table.
-func layoutGrid(headers []string, rows [][]string, widths []int, rightAlign []string) ([]string, [][]string, []int, []lipgloss.Position) {
-	headers, rows, widths = dropZeroColumns(headers, rows, widths)
+func layoutGrid(headers []string, rows [][]string, widths []int, rightAlign []string, seen map[string]bool) ([]string, [][]string, []int, []lipgloss.Position) {
+	headers, rows, widths = dropZeroColumns(headers, rows, widths, seen)
 	aligns := columnAligns(headers, rightAlign)
 	headers, rows = elideCells(headers, rows, widths)
 	return headers, rows, widths, aligns
@@ -618,12 +619,12 @@ func shrinkToFloors(headers []string, widths []int, priority []string, floors ma
 // gutter or empty cell behind. Cells, widths and headers stay index-aligned.
 // Dropped columns are disclosed on stderr (stdout stays machine-clean for pipes
 // and goldens), so a missing column reads as hidden, not absent.
-func dropZeroColumns(headers []string, rows [][]string, widths []int) ([]string, [][]string, []int) {
+func dropZeroColumns(headers []string, rows [][]string, widths []int, seen map[string]bool) ([]string, [][]string, []int) {
 	keep := positiveWidthColumns(widths)
 	if len(keep) == len(widths) {
 		return headers, rows, widths
 	}
-	warnHiddenColumns(hiddenHeaders(headers, widths))
+	warnHiddenColumns(hiddenHeaders(headers, widths), seen)
 	out := make([][]string, len(rows))
 	for r, row := range rows {
 		out[r] = selectStrings(row, keep)
@@ -643,10 +644,24 @@ func positiveWidthColumns(widths []int) []int {
 
 // warnHiddenColumns discloses dropped columns on stderr. Every grid (table,
 // detail block, token rows) uses this one line, so a narrow terminal always
-// reads as hidden columns, never as a shorter contract.
-func warnHiddenColumns(names []string) {
-	if len(names) > 0 {
-		warnf("terminal too narrow; hid %s; widen the terminal or use --json", strings.Join(names, ", "))
+// reads as hidden columns, never as a shorter contract. The per-run seen set
+// dedupes across grids, so a header hidden in the table and again in the
+// detail block warns once. A nil seen (grids outside a status run) warns on
+// every call.
+func warnHiddenColumns(names []string, seen map[string]bool) {
+	if seen == nil {
+		seen = map[string]bool{}
+	}
+	var unseen []string
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		unseen = append(unseen, name)
+	}
+	if len(unseen) > 0 {
+		warnf("terminal too narrow; hid %s; widen the terminal or use --json", strings.Join(unseen, ", "))
 	}
 }
 

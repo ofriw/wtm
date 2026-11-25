@@ -30,9 +30,9 @@ func captureStatusLayout(t *testing.T, wts []worktree, budget int) [2]string {
 		stderr = captureStderr(t, func() {
 			cols := statusSchema(false, wts)
 			fit := fitTable(cols, wts, columnContext{now: at(0), ttl: 10 * time.Hour}, budget)
-			printStatusTable(fit, colorNever)
+			printStatusTable(fit, colorNever, nil)
 			printCostLegend(fit.legend(), colorNever, budget)
-			printStatusDetail(wts, "/with", at(0), colorNever, budget)
+			printStatusDetail(wts, "/with", at(0), colorNever, budget, nil)
 		})
 	})
 	return [2]string{stdout, stderr}

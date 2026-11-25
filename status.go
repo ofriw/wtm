@@ -64,9 +64,12 @@ func renderStatus(ws workspace, wide bool, now time.Time, current, colorMode str
 	budget := widthBudget()
 	cols := statusSchema(wide, ws.wts)
 	fit := fitTable(cols, ws.wts, columnContext{now: now, ttl: ws.ttl}, budget)
-	printStatusTable(fit, colorMode)
+	// One per-run seen set shared by the table grid and the detail block, so a
+	// header hidden in both warns once (mirrors emitUsageWarning).
+	seen := map[string]bool{}
+	printStatusTable(fit, colorMode, seen)
 	printCostLegend(fit.legend(), colorMode, budget)
-	printStatusDetail(ws.wts, current, now, colorMode, budget)
+	printStatusDetail(ws.wts, current, now, colorMode, budget, seen)
 }
 
 // parseStatusFlags parses and validates the status flags. --wide shapes only

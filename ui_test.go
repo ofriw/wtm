@@ -540,7 +540,7 @@ func TestDropZeroColumns(t *testing.T) {
 		{"a2", "b2", "c2", "d2"},
 	}
 	widths := []int{10, 0, 5, 0}
-	h, r, w := dropZeroColumns(headers, rows, widths)
+	h, r, w := dropZeroColumns(headers, rows, widths, nil)
 	if !slices.Equal(h, []string{"A", "C"}) {
 		t.Errorf("headers = %v, want [A C]", h)
 	}
@@ -558,7 +558,7 @@ func TestDropZeroColumnsAllDropped(t *testing.T) {
 	headers := []string{"A", "B"}
 	rows := [][]string{{"a1", "b1"}}
 	widths := []int{0, 0}
-	h, r, w := dropZeroColumns(headers, rows, widths)
+	h, r, w := dropZeroColumns(headers, rows, widths, nil)
 	if len(h) != 0 || len(r[0]) != 0 || len(w) != 0 {
 		t.Errorf("all-dropped = %v / %v / %v, want empty", h, r, w)
 	}
@@ -572,13 +572,13 @@ func TestDropZeroColumnsDisclosesHiddenColumns(t *testing.T) {
 	headers := []string{"PATH", header}
 	rows := [][]string{{"/x", "yes"}}
 	t.Run("capability warns", func(t *testing.T) {
-		errOut := captureStderr(t, func() { dropZeroColumns(headers, rows, []int{10, 0}) })
+		errOut := captureStderr(t, func() { dropZeroColumns(headers, rows, []int{10, 0}, nil) })
 		if !strings.Contains(errOut, "terminal too narrow; hid "+header) {
 			t.Fatalf("hidden capability must warn: %q", errOut)
 		}
 	})
 	t.Run("core warns", func(t *testing.T) {
-		errOut := captureStderr(t, func() { dropZeroColumns(headers, rows, []int{0, 5}) })
+		errOut := captureStderr(t, func() { dropZeroColumns(headers, rows, []int{0, 5}, nil) })
 		if !strings.Contains(errOut, "terminal too narrow; hid PATH") {
 			t.Fatalf("hidden core column must warn: %q", errOut)
 		}

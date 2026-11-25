@@ -209,7 +209,7 @@ func TestLegendFlagsEqualRendered(t *testing.T) {
 	for _, budget := range []int{0, 10, 40} {
 		wts := []worktree{est, list, partial}
 		fit := fitTable(statusSchema(false, wts), wts, columnContext{now: at(0), ttl: 10 * time.Hour}, budget)
-		tableOut := captureStdout(t, func() { captureStderr(t, func() { printStatusTable(fit, colorNever) }) })
+		tableOut := captureStdout(t, func() { captureStderr(t, func() { printStatusTable(fit, colorNever, nil) }) })
 		legendOut := captureStdout(t, func() { printCostLegend(fit.legend(), colorNever, budget) })
 		header, _, _ := strings.Cut(tableOut, "\n")
 		costRendered := strings.Contains(header, colCost.header)
@@ -350,12 +350,12 @@ func TestStatusDetailBlock(t *testing.T) {
 	other := worktree{Path: "/other", Usage: fixtureUsage()}
 
 	// No harness anywhere has events: the block is omitted.
-	if out := captureStdout(t, func() { printStatusDetail([]worktree{empty}, "/empty", at(0), colorNever, 0) }); out != "" {
+	if out := captureStdout(t, func() { printStatusDetail([]worktree{empty}, "/empty", at(0), colorNever, 0, nil) }); out != "" {
 		t.Fatalf("block must be omitted when the repo has no usage:\n%s", out)
 	}
 
 	// The current worktree has events: a separated, titled block, then rows.
-	out := captureStdout(t, func() { printStatusDetail([]worktree{with, other}, "/with", at(0), colorNever, 0) })
+	out := captureStdout(t, func() { printStatusDetail([]worktree{with, other}, "/with", at(0), colorNever, 0, nil) })
 	if !strings.HasPrefix(out, "\ncurrent worktree") {
 		t.Errorf("block must open with a blank line, then the identity row:\n%q", out)
 	}
@@ -378,7 +378,7 @@ func TestStatusDetailBlock(t *testing.T) {
 	}
 
 	// The repo has usage, but not in the current worktree: the note replaces rows.
-	out = captureStdout(t, func() { printStatusDetail([]worktree{empty, other}, "/empty", at(0), colorNever, 0) })
+	out = captureStdout(t, func() { printStatusDetail([]worktree{empty, other}, "/empty", at(0), colorNever, 0, nil) })
 	if !strings.Contains(out, "no agent usage recorded") {
 		t.Errorf("empty current worktree must say so:\n%s", out)
 	}
@@ -578,7 +578,7 @@ func TestCostLegendSplitsTableAndDetail(t *testing.T) {
 		t.Fatal("estimated table total must set tableReasons")
 	}
 	// The current worktree is not in the list, so printStatusDetail is a no-op.
-	if out := captureStdout(t, func() { printStatusDetail([]worktree{tableWT}, "/elsewhere", now, colorNever, 0) }); out != "" {
+	if out := captureStdout(t, func() { printStatusDetail([]worktree{tableWT}, "/elsewhere", now, colorNever, 0, nil) }); out != "" {
 		t.Fatalf("absent current worktree must print no detail block, got:\n%q", out)
 	}
 }
@@ -804,7 +804,7 @@ func TestDetailBlockUnknownCost(t *testing.T) {
 		return m
 	}))
 	w := worktree{Path: "/w", Usage: &u}
-	out := captureStdout(t, func() { printStatusDetail([]worktree{w}, "/w", at(0), colorNever, 0) })
+	out := captureStdout(t, func() { printStatusDetail([]worktree{w}, "/w", at(0), colorNever, 0, nil) })
 	if !strings.Contains(out, "unknown") {
 		t.Errorf("unpriced detail row must read unknown:\n%s", out)
 	}
@@ -1282,13 +1282,13 @@ func TestStatusDetailTokenLegendOnlyWithTokens(t *testing.T) {
 		"pi": {models: map[string]*modelUsage{"m": {cost: costPair{billed: knownZero()}, tokens: promptTokens{input: 100}}}},
 	}}
 	costOut := captureStdout(t, func() {
-		printStatusDetail([]worktree{{Path: "/w", Usage: &costOnly}}, "/w", at(0), colorNever, 0)
+		printStatusDetail([]worktree{{Path: "/w", Usage: &costOnly}}, "/w", at(0), colorNever, 0, nil)
 	})
 	if strings.Contains(costOut, tokenLegendTitle) {
 		t.Errorf("cost-only detail must not print the token legend:\n%s", costOut)
 	}
 	tokOut := captureStdout(t, func() {
-		printStatusDetail([]worktree{{Path: "/w", Usage: &withTokens}}, "/w", at(0), colorNever, 0)
+		printStatusDetail([]worktree{{Path: "/w", Usage: &withTokens}}, "/w", at(0), colorNever, 0, nil)
 	})
 	if !strings.Contains(tokOut, tokenLegendTitle) {
 		t.Errorf("token-bearing detail must print the token legend:\n%s", tokOut)

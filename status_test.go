@@ -543,7 +543,7 @@ func TestPrintStatusTableFits(t *testing.T) {
 		Caps:     map[string]capState{"chunkhound": capPresent, "mcp": capPresent},
 	}}
 	out := captureStdout(t, func() {
-		printStatusTable(fitTable(statusColumns, wts, columnContext{now: at(0), ttl: 10 * time.Hour}, 80), colorNever)
+		printStatusTable(fitTable(statusColumns, wts, columnContext{now: at(0), ttl: 10 * time.Hour}, 80), colorNever, nil)
 	})
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		if w := dispWidth(line); w > 80 {
@@ -587,7 +587,7 @@ func TestStatusNarrowKeepsCostColumns(t *testing.T) {
 			var errOut string
 			out := captureStdout(t, func() {
 				errOut = captureStderr(t, func() {
-					printStatusTable(fitTable(statusColumns, wts, columnContext{now: now, ttl: 10 * time.Hour}, width), colorNever)
+					printStatusTable(fitTable(statusColumns, wts, columnContext{now: now, ttl: 10 * time.Hour}, width), colorNever, nil)
 				})
 			})
 			headerLine, _, _ := strings.Cut(out, "\n")
@@ -668,7 +668,7 @@ func TestStatusNarrowKeepsProvenPrices(t *testing.T) {
 					var errOut string
 					out := captureStdout(t, func() {
 						errOut = captureStderr(t, func() {
-							printStatusTable(fitTable(cols, wts, columnContext{now: now, ttl: 10 * time.Hour}, width), colorNever)
+							printStatusTable(fitTable(cols, wts, columnContext{now: now, ttl: 10 * time.Hour}, width), colorNever, nil)
 						})
 					})
 					for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
@@ -743,7 +743,7 @@ func TestStatusNarrowWidthSweep(t *testing.T) {
 			var errOut string
 			out := captureStdout(t, func() {
 				errOut = captureStderr(t, func() {
-					printStatusTable(fitTable(cols, wts, columnContext{now: now, ttl: 10 * time.Hour}, width), colorNever)
+					printStatusTable(fitTable(cols, wts, columnContext{now: now, ttl: 10 * time.Hour}, width), colorNever, nil)
 				})
 			})
 			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
@@ -781,7 +781,7 @@ func TestCostLegendDetailMatchesBreakdown(t *testing.T) {
 			var out string
 			captureStderr(t, func() {
 				out = captureStdout(t, func() {
-					printStatusDetail(wts, cur.Path, now, colorNever, width)
+					printStatusDetail(wts, cur.Path, now, colorNever, width, nil)
 				})
 			})
 			headerLine := ""
@@ -825,7 +825,7 @@ func TestTokenGroupDisclosurePrintsOnce(t *testing.T) {
 	errOut := captureStderr(t, func() {
 		captureStdout(t, func() {
 			fitTable(statusSchema(false, wts), wts, columnContext{now: now, ttl: 10 * time.Hour}, 40).legend()
-			printStatusDetail(wts, cur.Path, now, colorNever, 40)
+			printStatusDetail(wts, cur.Path, now, colorNever, 40, nil)
 		})
 	})
 	count := strings.Count(errOut, "terminal too narrow; hid")
@@ -850,7 +850,7 @@ func TestStatusDetailProvenPricesNarrow(t *testing.T) {
 			var errOut string
 			out := captureStdout(t, func() {
 				errOut = captureStderr(t, func() {
-					printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, width)
+					printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, width, nil)
 				})
 			})
 			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
@@ -893,7 +893,7 @@ func TestStatusDetailHeadersShareValueEdge(t *testing.T) {
 		return pricedEvent{total: costPair{list: list, billed: billed}}
 	})
 	cur := worktree{Path: filepath.Join(env.Home, "wt"), Usage: &u}
-	out := captureStdout(t, func() { printStatusDetail([]worktree{cur}, cur.Path, now, colorNever, 0) })
+	out := captureStdout(t, func() { printStatusDetail([]worktree{cur}, cur.Path, now, colorNever, 0, nil) })
 	row := func(name string) string {
 		for _, l := range strings.Split(out, "\n") {
 			if strings.HasPrefix(l, name) {
@@ -944,7 +944,7 @@ func TestStatusDetailSummaryDropsCostWhole(t *testing.T) {
 	var errOut string
 	out := captureStdout(t, func() {
 		errOut = captureStderr(t, func() {
-			printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, 20)
+			printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, 20, nil)
 		})
 	})
 	if strings.Contains(out, "$0\u2026") || strings.Contains(out, "$0...") {
@@ -971,7 +971,7 @@ func TestStatusDetailSummaryDropsRatioGroupWhole(t *testing.T) {
 	var errOut string
 	out := captureStdout(t, func() {
 		errOut = captureStderr(t, func() {
-			printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, 20)
+			printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, 20, nil)
 		})
 	})
 	for _, label := range []string{"total in:out", "cached in:out", "uncached in:out"} {
@@ -995,7 +995,7 @@ func TestStatusDetailFitsNarrowBudget(t *testing.T) {
 	for _, width := range []int{80, 60, 40} {
 		t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
 			out := captureStdout(t, func() {
-				printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, width)
+				printStatusDetail([]worktree{cur}, cur.Path, at(0), colorNever, width, nil)
 			})
 			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 				if w := dispWidth(line); w > width {
@@ -1222,5 +1222,51 @@ func TestStatusColumnsForNoAliasing(t *testing.T) {
 	}
 	if fresh[0] == "PAD" {
 		t.Fatalf("fresh schema carries mutation: %v", fresh)
+	}
+}
+
+// TestRenderStatusNarrowDisclosesEachHiddenHeaderOnce pins the B2 per-run
+// dedupe contract: a header hidden by the table grid and again by the detail
+// block warns once, not once per grid. At COLUMNS=10 the LIST column drops in
+// both grids, so without the shared seen set its disclosure appears twice.
+func TestRenderStatusNarrowDisclosesEachHiddenHeaderOnce(t *testing.T) {
+	now := at(0)
+	env := sandbox(t)
+	cur := worktree{
+		Path:  filepath.Join(env.Home, "a", "long", "checkout", "path"),
+		Usage: subscriptionUsage(now, 41.20),
+	}
+	wts := []worktree{cur}
+	t.Setenv("COLUMNS", "10")
+	var out, errOut string
+	out = captureStdout(t, func() {
+		errOut = captureStderr(t, func() {
+			renderStatus(workspace{wts: wts, ttl: 10 * time.Hour}, false, now, cur.Path, colorNever)
+		})
+	})
+	if strings.Contains(out, "warning:") {
+		t.Errorf("stdout must stay machine-clean, got a warning line:\n%s", out)
+	}
+	const marker = "terminal too narrow; hid "
+	warns := 0
+	warned := map[string]int{}
+	for _, line := range strings.Split(errOut, "\n") {
+		i := strings.Index(line, marker)
+		if i < 0 {
+			continue
+		}
+		warns++
+		rest := line[i+len(marker):]
+		for _, h := range strings.Split(strings.Split(rest, ";")[0], ", ") {
+			warned[h]++
+		}
+	}
+	if warns < 2 {
+		t.Fatalf("expected multiple narrow-width disclosures, got %d:\n%s", warns, errOut)
+	}
+	for h, n := range warned {
+		if n != 1 {
+			t.Errorf("hidden header %q disclosed %d times, want 1:\n%s", h, n, errOut)
+		}
 	}
 }

@@ -170,7 +170,7 @@ func detailShowsList(u *worktreeUsage) bool {
 // printStatusDetail renders the current worktree's usage under the table. The
 // block is omitted when no harness in the repo has events; when the current
 // worktree alone is empty, the block says so instead of showing empty rows.
-func printStatusDetail(wts []worktree, current string, now time.Time, colorMode string, budget int) {
+func printStatusDetail(wts []worktree, current string, now time.Time, colorMode string, budget int, seen map[string]bool) {
 	if !repoHasUsage(wts) {
 		return
 	}
@@ -180,21 +180,21 @@ func printStatusDetail(wts []worktree, current string, now time.Time, colorMode 
 	}
 	fmt.Println()
 	f := fitDetailBlock(*cur, now, budget)
-	printDetailSummary(f, colorMode, budget)
+	printDetailSummary(f, colorMode, budget, seen)
 	if cur.Usage == nil {
 		fmt.Println("no agent usage recorded")
 		return
 	}
 	fmt.Println()
-	printDetailTable(f, colorMode, budget)
+	printDetailTable(f, colorMode, budget, seen)
 }
 
 // printDetailSummary prints the identity and measure rows above the breakdown,
 // from the single fit: the hidden summary groups are disclosed once here, then
 // the surviving rows render.
-func printDetailSummary(f detailFit, colorMode string, budget int) {
+func printDetailSummary(f detailFit, colorMode string, budget int, seen map[string]bool) {
 	for _, group := range f.hidden {
-		warnHiddenColumns(group)
+		warnHiddenColumns(group, seen)
 	}
 	printKeyValues(f.sum, detailTitleRows, colorMode, budget)
 }
@@ -204,15 +204,15 @@ func printDetailSummary(f detailFit, colorMode string, budget int) {
 // token columns it cannot render would both disclose nothing real, so only the
 // applicable legend prints. The grid renders from the fit's stored widths via
 // the shared pipeline, so it is byte-identical to the table path.
-func printDetailTable(f detailFit, colorMode string, budget int) {
+func printDetailTable(f detailFit, colorMode string, budget int, seen map[string]bool) {
 	if len(f.rows) == 0 {
 		printDetailLegend(f.reasons, f.list, f.partial, false, colorMode, budget)
 		return
 	}
 	if f.dropped {
-		warnHiddenColumns(tokenColumnNames())
+		warnHiddenColumns(tokenColumnNames(), seen)
 	}
-	headers, rows, widths, aligns := fittedGrid(f.cols, f.rows, f.widths)
+	headers, rows, widths, aligns := fittedGrid(f.cols, f.rows, f.widths, seen)
 	emitGrid(headers, rows, widths, aligns, colorMode, statusCellRenderer(columnRegistry()))
 	printDetailLegend(f.reasons, f.list, f.partial, f.tokens, colorMode, budget)
 }

@@ -229,7 +229,7 @@ func TestDetailTokenGroupDropsWholeOnlyAtModelFloor(t *testing.T) {
 			var errOut string
 			out := captureStdout(t, func() {
 				errOut = captureStderr(t, func() {
-					printStatusDetail([]worktree{cur}, cur.Path, now, colorNever, tc.budget)
+					printStatusDetail([]worktree{cur}, cur.Path, now, colorNever, tc.budget, nil)
 				})
 			})
 			header := detailHeaderLine(out)

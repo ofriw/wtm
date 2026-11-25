@@ -390,14 +390,14 @@ func withListColumn(cols []worktreeColumn, show bool) []worktreeColumn {
 // grid projection and column sizing happen once and the legend explains exactly
 // the columns that render. Styling and elision follow the same pipeline as
 // emitGrid, so output is byte-identical to the un-shared path.
-func printStatusTable(fit tableFit, colorMode string) {
-	headers, rows, widths, aligns := fittedGrid(fit.cols, fit.rows, fit.widths)
+func printStatusTable(fit tableFit, colorMode string, seen map[string]bool) {
+	headers, rows, widths, aligns := fittedGrid(fit.cols, fit.rows, fit.widths, seen)
 	emitGrid(headers, rows, widths, aligns, colorMode, statusCellRenderer(columnRegistry()))
 }
 
 // fittedGrid lays out a precomputed fit through the shared layoutGrid pipeline.
-func fittedGrid(cols []worktreeColumn, rows [][]string, widths []int) ([]string, [][]string, []int, []lipgloss.Position) {
-	return layoutGrid(columnHeaders(cols), rows, widths, columnRightAligns(cols))
+func fittedGrid(cols []worktreeColumn, rows [][]string, widths []int, seen map[string]bool) ([]string, [][]string, []int, []lipgloss.Position) {
+	return layoutGrid(columnHeaders(cols), rows, widths, columnRightAligns(cols), seen)
 }
 
 // costLegend is the disclosure the rendered cost columns need: the "~"
