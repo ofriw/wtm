@@ -15,11 +15,14 @@ import (
 
 // sessionParse is one session file's parsed facts. events price the session;
 // activity reconstructs its turns; dropped counts records that could have
-// carried billed usage.
+// carried billed usage; unsupported names the record types that dropped because
+// a readable type carried usage at a billing location, so the disclosure can
+// call them out.
 type sessionParse struct {
-	events   []usageEvent
-	activity []activityEvent
-	dropped  int
+	events      []usageEvent
+	activity    []activityEvent
+	dropped     int
+	unsupported map[string]int
 }
 
 // activityKind is one record's effect on the open agent turn.

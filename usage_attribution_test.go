@@ -114,26 +114,17 @@ func TestBuildUsageForCountsDescendantSessions(t *testing.T) {
 	subRef := writeTurnSession(t, sessions, "sub.jsonl", sub, "2026-01-01T00:10:00Z", "2026-01-01T00:17:00Z", 1)
 	idx := sessionIndex{root: {rootRef}, sub: {subRef}}
 
-	exact, err := buildUsage(root, idx, nil, subscriptions{})
+	// The test helper routes through the production report entry, so it counts
+	// descendant sessions exactly as a one-worktree report does.
+	exact, err := buildUsageForTest(root, idx, nil, subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := exact.active().Minutes(), 5.0; got != want {
+	if got, want := exact.active().Minutes(), 12.0; got != want {
 		t.Fatalf("exact active = %v, want %v", got, want)
 	}
-	if got, want := exact.cost().billed.amount, 1.0; got != want {
+	if got, want := exact.cost().billed.amount, 2.0; got != want {
 		t.Fatalf("exact cost = %v, want %v", got, want)
-	}
-
-	all, _, err := buildUsageForReportAt(root, []worktree{{Path: root}}, idx, nil, subscriptions{}, nowFunc())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := all.active().Minutes(), 12.0; got != want {
-		t.Fatalf("descendant active = %v, want %v", got, want)
-	}
-	if got, want := all.cost().billed.amount, 2.0; got != want {
-		t.Fatalf("descendant cost = %v, want %v", got, want)
 	}
 
 	nested, _, err := buildUsageForReportAt(root, []worktree{{Path: root}, {Path: sub}}, idx, nil, subscriptions{}, nowFunc())

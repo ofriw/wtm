@@ -692,9 +692,9 @@ func TestPiSpawnCopyPairingBillsOnce(t *testing.T) {
 				{path: paired, harness: piAgent.name},
 				{path: unpaired, harness: piAgent.name},
 			}}
-			u, err := buildUsage(dir, idx, nil, subscriptions{})
+			u, err := buildUsageForTest(dir, idx, nil, subscriptions{})
 			if err != nil {
-				t.Fatalf("buildUsage: %v", err)
+				t.Fatalf("buildUsageForTest: %v", err)
 			}
 			if got := u.cost().cell(); got != "$0.30" {
 				t.Fatalf("cost = %q, want $0.30 (the copied child bills once)", got)
@@ -930,5 +930,82 @@ func TestPiOversizedToolResultUsageIsDropped(t *testing.T) {
 	}
 	if len(parsed.events) != 0 {
 		t.Fatalf("events = %d, want none", len(parsed.events))
+	}
+}
+
+// TestPiRealAssistantShapePrices pins the real-transcript shape: a realistic Pi assistant message — a
+// content block serialized before the usage block, as in real transcripts —
+// yields one event priced from the catalog.
+func TestPiRealAssistantShapePrices(t *testing.T) {
+	events := parsePi(t,
+		`{"type":"message","id":"a1","timestamp":"2026-01-01T00:00:05Z","message":{"role":"assistant","model":"m1","content":[{"type":"text","text":"hi"}],"usage":{"input":100000,"output":50000}}}`)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1: %+v", len(events), events)
+	}
+	price := testRates(t).priceWith(events[0], nil).total.list
+	if !price.known() || price.amount == 0 {
+		t.Fatalf("price = %+v, want a known positive catalog price", price)
+	}
+}
+
+// TestPiRealToolResultDetailsBeforeUsagePrices pins the spawn shape: the
+// child's details block precedes its usage block, and both describe one child —
+// one priced event with the child's own cost.
+func TestPiRealToolResultDetailsBeforeUsagePrices(t *testing.T) {
+	events := parsePi(t,
+		`{"type":"message","id":"a2","timestamp":"2026-01-01T00:00:05Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"spawn","details":{"model":"m-child","stats":{"cost":0.7}},"usage":{"cost":{"total":0.7}}}}`)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1: %+v", len(events), events)
+	}
+	assertPiEvent(t, events[0], "m-child", fptr(0.7))
+}
+
+// TestPiFailOpenCornersStayClosed pins the recorded fail-open corners — an
+// escaped \u0075sage usage key that evades the literal byte scan, a record whose
+// corruption precedes its usage, and the turn_batch unknown type with details
+// serialized before usage — each taint or bill, never vanish silently.
+func TestPiFailOpenCornersStayClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		line        string
+		wantEvents  int
+		wantDropped int
+		wantUnsup   string
+	}{
+		{
+			name:       "escaped usage key bills",
+			line:       `{"type":"message","id":"a1","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","model":"m","\u0075sage":{"cost":{"total":0.5}}}}`,
+			wantEvents: 1,
+		},
+		{
+			name:        "corrupted before usage drops",
+			line:        `{"type":"message","timestamp":"bad"quote","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}`,
+			wantDropped: 1,
+		},
+		{
+			name:        "turn_batch details before usage drops",
+			line:        `{"type":"turn_batch","timestamp":"2026-01-01T00:00:00Z","details":{},"usage":{"input":9000,"output":900,"cost":{"total":4.9}}}`,
+			wantDropped: 1,
+			wantUnsup:   "turn_batch",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := piUsageEvents(bufio.NewReader(strings.NewReader(tc.line + "\n")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(parsed.events) != tc.wantEvents {
+				t.Errorf("events = %d, want %d", len(parsed.events), tc.wantEvents)
+			}
+			if parsed.dropped != tc.wantDropped {
+				t.Errorf("dropped = %d, want %d", parsed.dropped, tc.wantDropped)
+			}
+			if tc.wantUnsup != "" && parsed.unsupported[tc.wantUnsup] != 1 {
+				t.Errorf("unsupported[%s] = %d, want 1", tc.wantUnsup, parsed.unsupported[tc.wantUnsup])
+			}
+			if tc.wantEvents == 1 && parsed.events[0].cost == nil {
+				t.Error("a billed event must carry a cost")
+			}
+		})
 	}
 }

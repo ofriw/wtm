@@ -2,12 +2,12 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -350,31 +350,6 @@ func sessionRecordErr(line []byte, oversized bool, err error) error {
 	return err
 }
 
-// recordType reads the top-level "type" from a truncated prefix. Nested types
-// cannot classify the record, and a prefix that ends first fails closed.
-func recordType(prefix []byte) (string, bool) {
-	dec := json.NewDecoder(bytes.NewReader(prefix))
-	tok, err := dec.Token()
-	if err != nil || tok != json.Delim('{') {
-		return "", false
-	}
-	for dec.More() {
-		key, err := dec.Token()
-		if err != nil {
-			return "", false
-		}
-		if key == "type" {
-			v, err := dec.Token()
-			t, ok := v.(string)
-			return t, ok && err == nil
-		}
-		if dec.Decode(new(json.RawMessage)) != nil {
-			return "", false
-		}
-	}
-	return "", false
-}
-
 // sessionIndex maps a canonical worktree cwd to its session files. It is built
 // once per command via indexSessions so discovery costs one walk per harness
 // instead of one per worktree.
@@ -700,7 +675,7 @@ func sessionMtime(p string) (time.Time, error) {
 }
 
 // parsedSession pairs one readable session's events with its fold inputs, so
-// buildUsage can parse every session before it folds any.
+// the report path can parse every session before it folds any.
 type parsedSession struct {
 	harness  string
 	events   []usageEvent
@@ -712,12 +687,15 @@ type parsedSession struct {
 // usageLoss accumulates what a parse walk lost, so folding can taint the total
 // after every readable session has been seen.
 type usageLoss struct {
-	lost     map[string]bool
-	firstErr error
-	dropped  int
+	lost        map[string]bool
+	firstErr    error
+	dropped     int
+	unsupported map[string]int
 }
 
-func newUsageLoss() usageLoss { return usageLoss{lost: map[string]bool{}} }
+func newUsageLoss() usageLoss {
+	return usageLoss{lost: map[string]bool{}, unsupported: map[string]int{}}
+}
 
 func (l *usageLoss) fail(harness string, err error) {
 	l.lost[harness] = true
@@ -726,7 +704,7 @@ func (l *usageLoss) fail(harness string, err error) {
 	}
 }
 
-func (l *usageLoss) recordDropped(harness string, n int) {
+func (l *usageLoss) recordDropped(harness string, n int, unsupported map[string]int) {
 	if n == 0 {
 		return
 	}
@@ -734,19 +712,9 @@ func (l *usageLoss) recordDropped(harness string, n int) {
 	// total, so a partial sum never reads as exact.
 	l.lost[harness] = true
 	l.dropped += n
-}
-
-// buildUsage is the exact-cwd form: it folds only sessions whose cwd equals the
-// worktree. Production status folds through buildUsageForReportAt, which also
-// includes descendant sessions; this form serves tests and callers without a
-// worktree list.
-//
-// cat is nil when no catalog is available: a catalog-rated harness then reports
-// unknown cost instead of a wrong number. subs is the run's credential proof; an
-// empty proof leaves every event at its list price, and a worktree-level metered
-// override drops the Claude proof for this worktree alone.
-func buildUsage(wtPath string, idx sessionIndex, cat catalog, subs subscriptions) (worktreeUsage, error) {
-	return buildUsageSessions(wtPath, idx[canonical(wtPath)], cat, subs)
+	for t, c := range unsupported {
+		l.unsupported[t] += c
+	}
 }
 
 // buildUsageForReportAt is the one report entry: it includes sessions whose cwd
@@ -761,18 +729,13 @@ func buildUsageForReportAt(wtPath string, wts []worktree, idx sessionIndex, cat 
 	return buildUsageSessionsReport(wtPath, sessionsForWorktree(wtPath, wts, idx), cat, subs, now)
 }
 
-func buildUsageSessions(wtPath string, refs []sessionRef, cat catalog, subs subscriptions) (worktreeUsage, error) {
-	u, _, err := buildUsageSessionsReport(wtPath, refs, cat, subs, nowFunc())
-	return u, err
-}
-
 func buildUsageSessionsReport(wtPath string, refs []sessionRef, cat catalog, subs subscriptions, now time.Time) (worktreeUsage, []error, error) {
 	proofs := newProofCache(subs, wtPath)
 	sessions, loss := parseWorktreeSessions(refs, cat, proofs)
 	var u worktreeUsage
 	foldParsedSessions(&u, sessions, now)
 	markPartial(&u, loss.lost)
-	return u, proofs.warnings, usageLossErr(loss.firstErr, loss.dropped)
+	return u, proofs.warnings, usageLossErr(loss.firstErr, loss.dropped, loss.unsupported)
 }
 
 // proofCache resolves the proof per session cwd: a metered settings file in a
@@ -917,7 +880,7 @@ func readSession(a agent, ref sessionRef, loss *usageLoss) (sessionParse, bool) 
 		loss.fail(ref.harness, err)
 		return sessionParse{}, false
 	}
-	loss.recordDropped(ref.harness, parsed.dropped)
+	loss.recordDropped(ref.harness, parsed.dropped, parsed.unsupported)
 	return parsed, true
 }
 
@@ -1004,18 +967,33 @@ func foldParsedSessions(u *worktreeUsage, sessions []parsedSession, now time.Tim
 
 // usageLossErr reports the session loss that makes a total partial: an
 // unreadable session, unreadable records, or both. One worktree-level warning
-// keeps a read-only run alive while still disclosing the loss.
-func usageLossErr(first error, dropped int) error {
+// keeps a read-only run alive while still disclosing the loss, including the
+// record types a readable unknown-type-with-usage record named.
+func usageLossErr(first error, dropped int, unsupported map[string]int) error {
 	switch {
 	case first != nil && dropped > 0:
-		return fmt.Errorf("%w; %d session record(s) dropped (bad JSON, timestamp, or oversized)", first, dropped)
+		return fmt.Errorf("%w; %s", first, droppedRecordsMsg(dropped, unsupported))
 	case first != nil:
 		return first
 	case dropped > 0:
-		return fmt.Errorf("%d session record(s) dropped (bad JSON, timestamp, or oversized); totals are partial", dropped)
+		return fmt.Errorf("%s", droppedRecordsMsg(dropped, unsupported))
 	default:
 		return nil
 	}
+}
+
+// droppedRecordsMsg is the shared dropped-record disclosure: the count, the
+// usual causes, any unsupported record types named by the parsers, and the
+// partial tail.
+func droppedRecordsMsg(dropped int, unsupported map[string]int) string {
+	msg := fmt.Sprintf("%d session record(s) dropped (bad JSON, timestamp, or oversized)", dropped)
+	if len(unsupported) > 0 {
+		types := slices.Sorted(maps.Keys(unsupported))
+		if types = slices.DeleteFunc(types, func(t string) bool { return t == "" }); len(types) > 0 {
+			msg += "; unsupported record type(s): " + strings.Join(types, ", ")
+		}
+	}
+	return msg + "; totals are partial"
 }
 
 // markPartial taints the total and each harness that kept some spans but also

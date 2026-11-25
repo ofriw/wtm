@@ -47,7 +47,7 @@ func keptBilled(events []usageEvent, billed []bool) []usageEvent {
 	return out
 }
 
-// dedupeOne runs the worktree-level dedupe the way buildUsage does and returns
+// dedupeOne runs the worktree-level dedupe the way buildUsageForTest does and returns
 // the surviving billed events, so the tests pin the dedupe contract, not its
 // plumbing.
 func dedupeOne(sessions ...[]usageEvent) []usageEvent {
@@ -174,7 +174,7 @@ type failReader struct{ err error }
 func (f failReader) Read([]byte) (int, error) { return 0, f.err }
 
 // TestClaudeUsageReadErrorReturnsEmpty pins the one error policy: a failed read
-// yields no result, so a partial session can never read as complete. buildUsage
+// yields no result, so a partial session can never read as complete. buildUsageForTest
 // drops the session and taints the total.
 func TestClaudeUsageReadErrorReturnsEmpty(t *testing.T) {
 	first := `{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","requestId":"r2","message":{"id":"b","model":"m","usage":{"input_tokens":2}}}`
@@ -252,8 +252,8 @@ func TestClaudeUsageOversizedRecordIsDropped(t *testing.T) {
 }
 
 // TestClaudeUsageSkipsNonAssistant pins the type filter: only an assistant
-// record carries billed usage, so a user record with a usage object is not an
-// event.
+// record carries billed usage, so a user record with a usage object makes no
+// event; the unexpected usage fails closed and taints the total instead.
 func TestClaudeUsageSkipsNonAssistant(t *testing.T) {
 	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(
 		`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"id":"x","model":"m","usage":{"input_tokens":1}}}` + "\n",
@@ -265,8 +265,8 @@ func TestClaudeUsageSkipsNonAssistant(t *testing.T) {
 	if len(events) != 0 {
 		t.Fatalf("non-assistant record produced %d events, want 0", len(events))
 	}
-	if dropped != 0 {
-		t.Errorf("dropped = %d, want 0: a non-assistant record is skipped, not dropped", dropped)
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1: a usage-bearing non-assistant record must taint", dropped)
 	}
 }
 
@@ -455,4 +455,19 @@ func TestClaudeCacheWriteSplitContradiction(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestClaudeRealAssistantShapePrices pins the real-transcript shape: a realistic Claude assistant
+// record — content blocks serialized before the usage block, as in real
+// transcripts — yields one event priced from the catalog, not a silent loss.
+func TestClaudeRealAssistantShapePrices(t *testing.T) {
+	line := `{"type":"assistant","timestamp":"2026-01-01T00:00:01Z","requestId":"r1","message":{"id":"x","model":"claude-opus-4-6","content":[{"type":"text","text":"working on it"}],"usage":{"input_tokens":1000,"output_tokens":500}}}`
+	parsed, err := claudeUsageEvents(bufio.NewReader(strings.NewReader(line + "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.events) != 1 {
+		t.Fatalf("events = %d, want 1: %+v", len(parsed.events), parsed.events)
+	}
+	assertCost(t, testRates(t).priceWith(parsed.events[0], nil), 0.0175, true)
 }

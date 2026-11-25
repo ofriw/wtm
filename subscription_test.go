@@ -25,7 +25,7 @@ func piProviderLine(provider string, total float64) string {
 }
 
 // piUsageWorktree folds one synthetic Pi session per given JSONL body through
-// buildUsage with the run's real credential proof.
+// buildUsageForTest with the run's real credential proof.
 func piUsageWorktree(t *testing.T, sessions ...string) worktreeUsage {
 	t.Helper()
 	dir := t.TempDir()
@@ -35,9 +35,9 @@ func piUsageWorktree(t *testing.T, sessions ...string) worktreeUsage {
 		writeFile(t, path, body, 0o644)
 		refs = append(refs, sessionRef{path: path, harness: piAgent.name})
 	}
-	u, err := buildUsage(dir, sessionIndex{canonical(dir): refs}, nil, loadSubscriptions(false))
+	u, err := buildUsageForTest(dir, sessionIndex{canonical(dir): refs}, nil, loadSubscriptions(false))
 	if err != nil {
-		t.Fatalf("buildUsage: %v", err)
+		t.Fatalf("buildUsageForTest: %v", err)
 	}
 	return u
 }
@@ -99,9 +99,9 @@ func claudeUsageWorktree(t *testing.T) worktreeUsage {
 // buildClaudeUsage folds a seeded Claude worktree through the run's proof.
 func buildClaudeUsage(t *testing.T, dir string, idx sessionIndex) worktreeUsage {
 	t.Helper()
-	u, err := buildUsage(dir, idx, testRates(t), loadSubscriptions(true))
+	u, err := buildUsageForTest(dir, idx, testRates(t), loadSubscriptions(true))
 	if err != nil {
-		t.Fatalf("buildUsage: %v", err)
+		t.Fatalf("buildUsageForTest: %v", err)
 	}
 	return u
 }
@@ -794,9 +794,9 @@ func TestSubscriptionClaudeWorktreeSettingsIsolation(t *testing.T) {
 		dirty:                        "$0.10",
 	} {
 		idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{"input_tokens":100000}`))
-		u, err := buildUsage(dir, idx, testRates(t), subs)
+		u, err := buildUsageForTest(dir, idx, testRates(t), subs)
 		if err != nil {
-			t.Fatalf("buildUsage(%s): %v", dir, err)
+			t.Fatalf("buildUsageForTest(%s): %v", dir, err)
 		}
 		if got := u.cost().cell(); got != want {
 			t.Errorf("%s cost = %q, want %q", dir, got, want)
@@ -969,7 +969,7 @@ func TestSubscriptionClaudeZeroTokenStaysExact(t *testing.T) {
 		claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "true"))
 	dir := t.TempDir()
 	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{}`))
-	u, err := buildUsage(dir, idx, testRates(t), loadSubscriptions(true))
+	u, err := buildUsageForTest(dir, idx, testRates(t), loadSubscriptions(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1042,7 +1042,7 @@ func TestSubscriptionOverageUnknownListShape(t *testing.T) {
 		claudeAccountBody("stripe_subscription", "2020-01-01T00:00:00Z", "true"))
 	dir := t.TempDir()
 	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(`{"input_tokens":100000}`))
-	u, err := buildUsage(dir, idx, nil, loadSubscriptions(true))
+	u, err := buildUsageForTest(dir, idx, nil, loadSubscriptions(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1078,7 +1078,7 @@ func TestSubscriptionOverageWebSearchOnlyIsEstimated(t *testing.T) {
 	dir := t.TempDir()
 	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name,
 		claudeUsageLine(`{"server_tool_use":{"web_search_requests":2}}`))
-	u, err := buildUsage(dir, idx, nil, loadSubscriptions(true))
+	u, err := buildUsageForTest(dir, idx, nil, loadSubscriptions(true))
 	if err != nil {
 		t.Fatal(err)
 	}

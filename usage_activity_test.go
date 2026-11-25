@@ -114,7 +114,7 @@ func TestBuildUsageActiveUsesCausalTurns(t *testing.T) {
 		`{"type":"message","timestamp":"2026-01-01T02:00:05Z","message":{"role":"assistant","model":"m","stopReason":"stop","usage":{"cost":{"total":1}}}}`,
 	}, "\n") + "\n"
 	writeFile(t, session, body, 0o644)
-	u, err := buildUsage(dir, sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}}, nil, subscriptions{})
+	u, err := buildUsageForTest(dir, sessionIndex{canonical(dir): {{path: session, harness: piAgent.name}}}, nil, subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

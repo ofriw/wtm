@@ -190,7 +190,7 @@ func derefText(p *string) string {
 // activity. Malformed lines are skipped, matching the session index's tolerant
 // owner scan; the count still lets the caller warn about the loss.
 func piUsageEvents(r *bufio.Reader) (sessionParse, error) {
-	s := piParseState{spawnAt: map[string]time.Time{}}
+	s := piParseState{spawnAt: map[string]time.Time{}, unsupported: map[string]int{}}
 	for {
 		line, oversized, prefix, rerr := sessionRecord(r)
 		err := sessionRecordErr(line, oversized, rerr)
@@ -208,19 +208,20 @@ func piUsageEvents(r *bufio.Reader) (sessionParse, error) {
 
 func (s *piParseState) result() sessionParse {
 	sortActivity(s.activity)
-	return sessionParse{events: s.events, activity: s.activity, dropped: s.dropped}
+	return sessionParse{events: s.events, activity: s.activity, dropped: s.dropped, unsupported: s.unsupported}
 }
 
 // piParseState is the running state of one session parse: the events collected,
 // the causal turn markers, the count of unread records, the spawn-call start
 // map, and the running model/provider attribution.
 type piParseState struct {
-	events   []usageEvent
-	activity []activityEvent
-	dropped  int
-	spawnAt  map[string]time.Time
-	current  string
-	provider string
+	events      []usageEvent
+	activity    []activityEvent
+	dropped     int
+	unsupported map[string]int
+	spawnAt     map[string]time.Time
+	current     string
+	provider    string
 }
 
 // consume folds one session line into the state. An oversized line was
@@ -244,20 +245,40 @@ func (s *piParseState) consume(line []byte, oversized bool, prefix []byte) {
 	s.consumePiRecord(line)
 }
 
-// consumeOversized counts a discarded line only when it could have billed.
+// consumeOversized counts a discarded line only when it could have billed. A
+// known free shape (a user message or a non-spawn tool result without usage)
+// does not taint; anything else fails closed, and an unknown usage-bearing type
+// is named for the disclosure.
 func (s *piParseState) consumeOversized(prefix []byte) {
-	if oversizedPiBillable(prefix) {
+	typ, typOK, hasUsage, _ := scanRecord(prefix)
+	switch {
+	case typ == "message":
+		if oversizedPiMessageBillable(prefix) {
+			s.dropped++
+		}
+	case !typOK || piBillsTime(typ):
 		s.dropped++
+	case hasUsage:
+		s.dropped++
+		s.unsupported[typ]++
 	}
 }
 
 // consumePiRecord folds one interesting line into priced events and turn
-// activity.
+// activity. A readable record whose type no branch consumes but that still
+// carries usage at a billing location would vanish silently; taint the total
+// like an unreadable record so a partial sum never reads as complete, and name
+// the type for the disclosure.
 func (s *piParseState) consumePiRecord(line []byte) {
 	var rec piUsageRecord
 	if json.Unmarshal(line, &rec) != nil {
 		s.dropped++
 		return
+	}
+	_, _, hasUsage, _ := scanRecord(line)
+	if !piBillsTime(rec.Type) && hasUsage {
+		s.dropped++
+		s.unsupported[rec.Type]++
 	}
 	at, atOK := transcriptTimestamp(rec.Timestamp)
 	s.current, s.provider = appendPiRecord(&s.events, &rec, s.current, s.provider, s.spawnAt, &s.dropped)
@@ -271,7 +292,7 @@ func (s *piParseState) consumePiRecord(line []byte) {
 // consumePiActivity decodes only the small activity shape, so a content-heavy
 // tool result never allocates its blocks. A present-but-absurd timestamp (a Go
 // zero time, an epoch-zero bug) is corrupt time: the record cannot open or close
-// a turn, so it counts as dropped and the caller taints the total . An
+// a turn, so it counts as dropped and the caller taints the total. An
 // absent timestamp keeps the old silent tolerance — it just contributes no turn.
 func (s *piParseState) consumePiActivity(line []byte) {
 	var rec piActivityRecord
@@ -289,24 +310,6 @@ func (s *piParseState) consumePiActivity(line []byte) {
 	model := preferredModel(rec.Message.ResponseModel, rec.Message.Model)
 	if a, ok := piActivityFromMessage(rec.Message.Role, rec.Message.StopReason, model, at); ok {
 		s.activity = append(s.activity, a)
-	}
-}
-
-// oversizedPiBillable reports whether a discarded Pi record could have billed.
-// An unknown type stays fail-closed; only a visible non-spawn tool result or a
-// usage-free unbilled record is free.
-func oversizedPiBillable(prefix []byte) bool {
-	t, ok := recordType(prefix)
-	if !ok {
-		return true
-	}
-	switch t {
-	case "usage", "compaction", "branch_summary":
-		return true
-	case "message":
-		return oversizedPiMessageBillable(prefix)
-	default:
-		return false
 	}
 }
 
@@ -395,7 +398,8 @@ func piBillsTime(t string) bool {
 // provider. Every usage-bearing record becomes an event: an assistant message,
 // a top-level `usage` record (cache warming), and a compaction or branch_summary
 // summary call. Only a model change moves the running attribution without
-// billing.
+// billing. An unhandled type returns untouched; consumePiRecord already decided
+// whether it carried usage and tainted the total.
 func appendPiRecord(events *[]usageEvent, rec *piUsageRecord, current, provider string, spawnAt map[string]time.Time, dropped *int) (string, string) {
 	if !piBillsTime(rec.Type) {
 		if rec.Type == "model_change" {
@@ -802,10 +806,16 @@ var (
 	// a record whose top-level type is not message, so a text value cannot add
 	// activity. Under-matching silently loses billable time.
 	piMessageKey = []byte("\"message\"")
+	// The escaped spelling of the usage key: a serialized key "\u0075sage"
+	// decodes to "usage" but evades the literal usageKey byte scan, so it must
+	// also route to consumePiRecord, where scanRecord's structural scan is the
+	// authority. Without it, an escaped usage key vanishes silently.
+	piEscapedUsageKey = []byte("\\u0075sage")
 )
 
 func piInteresting(line []byte) bool {
 	return bytes.Contains(line, usageKey) || bytes.Contains(line, piStatsKey) ||
 		bytes.Contains(line, piModelChangeKey) || bytes.Contains(line, piDetailsKey) ||
-		bytes.Contains(line, piToolCallKey) || bytes.Contains(line, piIsErrorKey)
+		bytes.Contains(line, piToolCallKey) || bytes.Contains(line, piIsErrorKey) ||
+		bytes.Contains(line, piEscapedUsageKey)
 }

@@ -606,9 +606,9 @@ func TestStatusPartialDerivedValuesAreMarked(t *testing.T) {
 		{path: filepath.Join(dir, "missing.jsonl"), harness: piAgent.name},
 		{path: good, harness: piAgent.name},
 	}}
-	u, err := buildUsage(dir, idx, nil, subscriptions{})
+	u, err := buildUsageForTest(dir, idx, nil, subscriptions{})
 	if err == nil {
-		t.Fatal("buildUsage must report the unreadable session")
+		t.Fatal("buildUsageForTest must report the unreadable session")
 	}
 	wt := worktree{Path: dir, Usage: &u}
 	if got := cellActive(wt, columnContext{}); got != "~10s" {
@@ -695,9 +695,9 @@ func TestBuildUsagePricesHarnesses(t *testing.T) {
 		{path: piFile, harness: "pi"},
 		{path: claudeFile, harness: "claude"},
 	}}
-	u, err := buildUsage(wt, idx, cat, subscriptions{})
+	u, err := buildUsageForTest(wt, idx, cat, subscriptions{})
 	if err != nil {
-		t.Fatalf("buildUsage: %v", err)
+		t.Fatalf("buildUsageForTest: %v", err)
 	}
 	if got := u.harnesses["pi"].cost.cell(); got != "$1.50" {
 		t.Errorf("pi cost = %q, want $1.50", got)
@@ -716,7 +716,7 @@ func TestBuildUsageMissingCatalogIsUnknown(t *testing.T) {
 	writeFile(t, claudeFile, `{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","requestId":"r","message":{"id":"x","model":"m1","usage":{"input_tokens":100,"service_tier":"standard"}}}
 `, 0o644)
 	idx := sessionIndex{canonical(dir): {{path: claudeFile, harness: "claude"}}}
-	u, err := buildUsage(dir, idx, nil, subscriptions{})
+	u, err := buildUsageForTest(dir, idx, nil, subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -815,7 +815,7 @@ func TestBuildUsageUnionsOverlappingSessions(t *testing.T) {
 {"type":"message","timestamp":"2026-01-01T00:00:20Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}
 `, 0o644)
 	idx := sessionIndex{canonical(dir): {{path: a, harness: "pi"}, {path: b, harness: "pi"}}}
-	u, err := buildUsage(dir, idx, nil, subscriptions{})
+	u, err := buildUsageForTest(dir, idx, nil, subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -840,9 +840,9 @@ func TestBuildUsageUnreadableSessionIsUnknown(t *testing.T) {
 		{path: good, harness: "pi"},
 		{path: spanned, harness: "pi"},
 	}}
-	u, err := buildUsage(dir, idx, nil, subscriptions{})
+	u, err := buildUsageForTest(dir, idx, nil, subscriptions{})
 	if err == nil {
-		t.Fatal("buildUsage must report the unreadable session")
+		t.Fatal("buildUsageForTest must report the unreadable session")
 	}
 	if got := u.cost().cell(); got != "unknown" {
 		t.Errorf("cost = %q, want unknown", got)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -14,7 +15,7 @@ import (
 // session records into usageEvent values; addBilledSession folds those into a
 // worktreeUsage. This file owns the folding, the money/span model, the
 // cross-file dedupe and the display grammar; the session loader that drives
-// addBilledSession (buildUsage) lives with the harness registry in agents.go.
+// addBilledSession (the report path) lives with the harness registry in agents.go.
 
 // estimateCause names the documented assumption behind an estimated amount.
 // It is a bit set, so a fold that mixes both assumptions keeps both reasons and
@@ -300,10 +301,111 @@ type pricedEvent struct {
 	tiers tokenTiers
 }
 
-// usageKey is the cheap pre-filter shared by the parsers: a session line without
-// it cannot carry cost or tokens, so content-heavy user, progress and tool-result
-// lines are never unmarshalled.
+// usageKey is the cheap byte pre-filter: a session line without it cannot bill,
+// so content-heavy lines are never unmarshalled.
 var usageKey = []byte("\"usage\"")
+
+// scanRecord reads a JSON record's top-level type and usage presence in one
+// token walk. typ/typOK are the top-level "type" string; hasUsage reports a
+// usage key at a billing location: the top level or one nested inside a message
+// object. malformed marks a body that did not read as a well-formed object, so
+// callers fail closed instead of trusting a partial record.
+func scanRecord(b []byte) (typ string, typOK, hasUsage, malformed bool) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return "", false, false, true
+	}
+	msg := 0 // open message objects whose members are being scanned
+	for {
+		if !dec.More() {
+			if msg == 0 {
+				return typ, typOK, hasUsage, false
+			}
+			if _, err := dec.Token(); err != nil { // close this message object
+				return typ, typOK, hasUsage, true
+			}
+			msg--
+			continue
+		}
+		key, err := dec.Token()
+		if err != nil {
+			return typ, typOK, hasUsage, true
+		}
+		name, ok := key.(string)
+		if !ok {
+			return typ, typOK, hasUsage, true
+		}
+		switch name {
+		case "usage":
+			hasUsage = true
+			if !skipJSONValue(dec, false) {
+				return typ, typOK, hasUsage, true
+			}
+		case "type":
+			if msg == 0 && !typOK {
+				v, err := dec.Token()
+				if err != nil {
+					return typ, typOK, hasUsage, true
+				}
+				if s, ok := v.(string); ok {
+					typ, typOK = s, true
+				}
+			} else if !skipJSONValue(dec, false) {
+				return typ, typOK, hasUsage, true
+			}
+		case "message":
+			tok, err := dec.Token()
+			if err != nil {
+				return typ, typOK, hasUsage, true
+			}
+			if d, ok := tok.(json.Delim); ok {
+				switch d {
+				case '{':
+					msg++
+				case '[':
+					if !skipJSONValue(dec, true) {
+						return typ, typOK, hasUsage, true
+					}
+				}
+			}
+		default:
+			if !skipJSONValue(dec, false) {
+				return typ, typOK, hasUsage, true
+			}
+		}
+	}
+}
+
+// skipJSONValue consumes one JSON value from dec, reporting false when the input
+// ends or corrupts mid-value; opened drains the rest of an already-open value.
+func skipJSONValue(dec *json.Decoder, opened bool) bool {
+	depth := 0
+	if opened {
+		depth = 1
+	}
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		d, ok := tok.(json.Delim)
+		if !ok {
+			if depth == 0 {
+				return true
+			}
+			continue
+		}
+		switch d {
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth == 1 {
+				return true
+			}
+			depth--
+		}
+	}
+}
 
 // promptTokens are the priced prompt classes shared by every harness. Pi keeps
 // one cache-write class (filled into cacheWrite5m); Claude keeps the 5-minute

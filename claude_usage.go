@@ -129,8 +129,11 @@ func (p *sessionParse) sortClaude() {
 	sortActivity(p.activity)
 }
 
-// consumeClaudeLine folds one record: a billed assistant drives cost, and any
-// user/assistant record drives the turn state.
+// consumeClaudeLine folds one record: a billed assistant drives cost and the
+// turn state, a usage-less user/assistant record drives the turn alone, a
+// malformed record that visibly carried usage taints the total, and a readable
+// record whose type no branch consumes but that still carries usage fails
+// closed, naming the type.
 func (p *sessionParse) consumeClaudeLine(line []byte, oversized bool, prefix []byte) {
 	if oversized {
 		p.consumeOversizedClaude(prefix)
@@ -139,24 +142,46 @@ func (p *sessionParse) consumeClaudeLine(line []byte, oversized bool, prefix []b
 	if len(line) == 0 {
 		return
 	}
-	// recordType reads the top-level type, so whitespace in a re-serialized
-	// transcript cannot hide a user or assistant record.
-	switch t, ok := recordType(line); {
-	case !ok && bytes.Contains(line, usageKey):
-		p.dropped++
-	case ok && t == "assistant" && bytes.Contains(line, usageKey):
+	typ, typOK, hasUsage, malformed := scanRecord(line)
+	switch {
+	case typOK && typ == "assistant" && hasUsage:
 		p.consumeClaudeBilled(line)
-	case ok && (t == "user" || t == "assistant"):
+	case malformed && (bytes.Contains(line, usageKey) || bytes.Contains(line, piEscapedUsageKey)):
+		p.dropped++
+	case hasUsage:
+		p.dropUnsupported(typ, typOK)
+	case typOK && (typ == "user" || typ == "assistant"):
 		p.consumeClaudeActivity(line)
 	}
 }
 
+// dropUnsupported counts a readable usage-bearing record whose type no branch
+// consumes, naming the type so the loss discloses what was unsupported.
+func (p *sessionParse) dropUnsupported(t string, ok bool) {
+	p.dropped++
+	if ok {
+		p.markUnsupported(t)
+	}
+}
+
+func (p *sessionParse) markUnsupported(t string) {
+	if p.unsupported == nil {
+		p.unsupported = map[string]int{}
+	}
+	p.unsupported[t]++
+}
+
 // consumeOversizedClaude counts a discarded record only when it could have
-// billed. A truncated prefix cannot prove usage absence, so an assistant prefix
-// stays billable.
+// billed; a truncated prefix cannot prove usage absence, so an assistant bills,
+// and an unknown usage-bearing type is named for the disclosure.
 func (p *sessionParse) consumeOversizedClaude(prefix []byte) {
-	if oversizedClaudeBillable(prefix) {
+	typ, typOK, hasUsage, _ := scanRecord(prefix)
+	switch {
+	case !typOK || typ == "assistant":
 		p.dropped++
+	case hasUsage:
+		p.dropped++
+		p.markUnsupported(typ)
 	}
 }
 
@@ -186,16 +211,6 @@ func (p *sessionParse) consumeClaudeActivity(line []byte) {
 	if a, ok := claudeActivityFromRecord(&rec); ok {
 		p.activity = append(p.activity, a)
 	}
-}
-
-// oversizedClaudeBillable reports whether a discarded Claude record could have
-// billed. Only an assistant type bills; an unknown type fails closed.
-func oversizedClaudeBillable(prefix []byte) bool {
-	t, ok := recordType(prefix)
-	if !ok {
-		return true
-	}
-	return t == "assistant"
 }
 
 func sortUsageEvents(events []usageEvent) {

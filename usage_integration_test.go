@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -36,7 +37,7 @@ func TestBuildUsageClaudeUnclassifiedCacheWriteIsEstimated(t *testing.T) {
 	dir := t.TempDir()
 	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name,
 		claudeUsageLine(`{"input_tokens":1000,"cache_creation_input_tokens":100}`))
-	u, err := buildUsage(dir, idx, testRates(t), subscriptions{})
+	u, err := buildUsageForTest(dir, idx, testRates(t), subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +68,7 @@ func TestBuildUsageClaudePricingModifiers(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name, claudeUsageLine(tc.usage))
-			u, err := buildUsage(dir, idx, testRates(t), subscriptions{})
+			u, err := buildUsageForTest(dir, idx, testRates(t), subscriptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -94,9 +95,9 @@ func TestBuildUsageCrossHarnessPartialIsUnknown(t *testing.T) {
 		{path: filepath.Join(dir, "missing.jsonl"), harness: piAgent.name},
 		{path: readable, harness: claudeAgent.name},
 	}}
-	u, err := buildUsage(dir, idx, testRates(t), subscriptions{})
+	u, err := buildUsageForTest(dir, idx, testRates(t), subscriptions{})
 	if err == nil {
-		t.Fatal("buildUsage must report the unreadable session")
+		t.Fatal("buildUsageForTest must report the unreadable session")
 	}
 	if got := cellCost(worktree{Path: dir, Usage: &u}, columnContext{}); got != "unknown" {
 		t.Errorf("total cost = %q, want unknown: a partial sum must not look complete", got)
@@ -155,7 +156,7 @@ func TestBuildUsageActivityOrderIndependent(t *testing.T) {
 			if order == "ba" {
 				refs[0], refs[1] = refs[1], refs[0]
 			}
-			u, err := buildUsage(dir, sessionIndex{canonical(dir): refs}, nil, subscriptions{})
+			u, err := buildUsageForTest(dir, sessionIndex{canonical(dir): refs}, nil, subscriptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -186,7 +187,7 @@ func TestBuildUsageDedupesPiForkAcrossSessionFiles(t *testing.T) {
 		{path: pathB, harness: piAgent.name},
 	}}
 	// Pi prices itself; no catalog is involved.
-	u, err := buildUsage(dir, idx, nil, subscriptions{})
+	u, err := buildUsageForTest(dir, idx, nil, subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +226,7 @@ func TestBuildUsageCorruptDuplicateLosesToValidSibling(t *testing.T) {
 				{path: af, harness: tc.harness},
 				{path: bf, harness: tc.harness},
 			}}
-			u, err := buildUsage(dir, idx, tc.cat, subscriptions{})
+			u, err := buildUsageForTest(dir, idx, tc.cat, subscriptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -248,9 +249,9 @@ func TestBuildUsageAllUnreadableIsUnknown(t *testing.T) {
 	idx := sessionIndex{canonical(dir): {
 		{path: filepath.Join(dir, "missing.jsonl"), harness: piAgent.name},
 	}}
-	u, err := buildUsage(dir, idx, nil, subscriptions{})
+	u, err := buildUsageForTest(dir, idx, nil, subscriptions{})
 	if err == nil {
-		t.Fatal("buildUsage must report the unreadable session")
+		t.Fatal("buildUsageForTest must report the unreadable session")
 	}
 	if u.hasEvents() {
 		t.Fatal("an all-unreadable worktree must keep no harness")
@@ -275,7 +276,7 @@ func TestBuildUsageDedupesTurnAcrossSessionFiles(t *testing.T) {
 		{path: pathA, harness: claudeAgent.name},
 		{path: pathB, harness: claudeAgent.name},
 	}}
-	u, err := buildUsage(dir, idx, testRates(t), subscriptions{})
+	u, err := buildUsageForTest(dir, idx, testRates(t), subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +308,7 @@ func TestBuildUsageDedupesProviderVariantTurns(t *testing.T) {
 			if order == "ba" {
 				refs[0], refs[1] = refs[1], refs[0]
 			}
-			u, err := buildUsage(dir, sessionIndex{canonical(dir): refs}, nil, subscriptions{})
+			u, err := buildUsageForTest(dir, sessionIndex{canonical(dir): refs}, nil, subscriptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -325,7 +326,7 @@ func TestBuildUsageBatchTierWith1hWriteIsUnknown(t *testing.T) {
 	dir := t.TempDir()
 	idx := usageIndex(t, dir, "s.jsonl", claudeAgent.name,
 		claudeUsageLine(`{"input_tokens":100,"service_tier":"batch","cache_creation":{"ephemeral_1h_input_tokens":50}}`))
-	u, err := buildUsage(dir, idx, testRates(t), subscriptions{})
+	u, err := buildUsageForTest(dir, idx, testRates(t), subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +457,7 @@ func TestBuildUsageProvenPiPlusEstimatedClaudeAsksNoOverageLegend(t *testing.T) 
 		{path: piPath, harness: piAgent.name},
 		{path: claudePath, harness: claudeAgent.name},
 	}}
-	u, err := buildUsage(dir, idx, testRates(t), loadSubscriptions(true))
+	u, err := buildUsageForTest(dir, idx, testRates(t), loadSubscriptions(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,12 +586,144 @@ func TestStatusDisclosesPartialPiUsage(t *testing.T) {
 	}
 }
 
+// TestStatusDisclosesUnsupportedTypePiUsage pins the disclosure through the real binary: a
+// readable record of an unhandled type that still reports usage drops, taints
+// the total, renders unknown, and stderr names the unsupported record type. The
+// usage key is spelled escaped (\u0075sage), which decodes to "usage": the byte
+// pre-filter must still route it to the structural scan, or the record would
+// vanish silently without tainting.
+func TestStatusDisclosesUnsupportedTypePiUsage(t *testing.T) {
+	sandbox(t)
+	t.Setenv(ratesEnv, "")
+	t.Setenv(nowEnv, "2026-01-01T01:00:00Z")
+	repo := nativeRepo(t)
+	path := mkSession(t, repo, "unsupported-type", time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC))
+	body := fmt.Sprintf("{\"type\":\"session\",\"cwd\":%q}\n", repo)
+	body += `{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"go"}}` + "\n"
+	body += `{"type":"message","timestamp":"2026-01-01T00:00:05Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1}}}}` + "\n"
+	body += `{"type":"turn_batch","timestamp":"2026-01-01T00:00:10Z","\u0075sage":{"input":9000,"output":900,"cost":{"total":4.9}}}` + "\n"
+	writeFile(t, path, body, 0o644)
+
+	out, errOut, rc := runWTM(t, repo, []string{"COLUMNS=200"}, "status", "--color=never")
+	if rc != 0 {
+		t.Fatalf("status exit %d: %s", rc, errOut)
+	}
+	if !strings.Contains(out, "unknown") {
+		t.Errorf("table must read unknown for the partial COST:\n%s", out)
+	}
+	for _, want := range []string{"unsupported", "turn_batch"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr must name the unsupported record type (%q):\n%s", want, errOut)
+		}
+	}
+
+	jsonOut, jsonErr, rc := runWTM(t, repo, nil, "status", "--json")
+	if rc != 0 {
+		t.Fatalf("status --json exit %d: %s", rc, jsonErr)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(jsonOut), &rows); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, jsonOut)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if rows[0]["partial"] != true {
+		t.Errorf("partial = %v, want true", rows[0]["partial"])
+	}
+	if v, present := rows[0]["cost"]; !present || v != nil {
+		t.Errorf("cost = %v (present %v), want null", v, present)
+	}
+	// The billed assistant's model row survives the dropped sibling and must
+	// render the same partial-unknown verdict at the model level, never a blank
+	// name key.
+	pi := subscriptionObject(t, subscriptionObject(t, rows[0]["usage"])["pi"])
+	m := subscriptionObject(t, subscriptionObject(t, pi["models"])["m"])
+	if m["cost"] != nil || m["partial"] != true {
+		t.Errorf("model m = %#v, want partial unknown", m)
+	}
+	if models, ok := pi["models"].(map[string]any); ok {
+		if _, blank := models[""]; blank {
+			t.Error("models must not carry an empty-name row")
+		}
+	}
+}
+
+// TestMetadataTextMentionsUsageDoesNotDrop pins the structural policy on both
+// parsers: text that merely spells "usage" — plain or escaped — is not a
+// billing key, so queue-operation, summary and progress metadata never taint a
+// total.
+func TestMetadataTextMentionsUsageDoesNotDrop(t *testing.T) {
+	lines := []string{
+		`{"type":"queue-operation","operation":"dequeue","note":"usage"}`,
+		`{"type":"summary","text":"usage"}`,
+		`{"type":"progress","detail":"a\u0075sage b"}`,
+	}
+	for _, tc := range []struct {
+		name  string
+		parse func(*bufio.Reader) (sessionParse, error)
+	}{
+		{"claude", claudeUsageEvents},
+		{"pi", piUsageEvents},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := tc.parse(bufio.NewReader(strings.NewReader(strings.Join(lines, "\n") + "\n")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parsed.dropped != 0 {
+				t.Errorf("dropped = %d, want 0", parsed.dropped)
+			}
+			if len(parsed.events) != 0 || len(parsed.activity) != 0 {
+				t.Errorf("metadata must produce no events or activity")
+			}
+		})
+	}
+}
+
+// TestBuildUsageMessageNotLastStillBills pins field-order independence: a
+// record whose message block is not the final key still bills exactly, so a
+// trailing key never pushes a priced record into the silent-loss path.
+func TestBuildUsageMessageNotLastStillBills(t *testing.T) {
+	cat, err := parseCatalog(strings.NewReader(claudeSiblingRates), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, harness, line string
+		cost                float64
+	}{
+		{"pi", piAgent.name,
+			`{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":1.5}}},"meta":{"k":"v"}}`,
+			1.5},
+		{"claude", claudeAgent.name,
+			`{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","requestId":"r1","message":{"id":"x","model":"m","usage":{"input_tokens":1000,"output_tokens":500}},"meta":{"k":"v"}}`,
+			20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			idx := usageIndex(t, dir, "s.jsonl", tc.harness, tc.line)
+			u, err := buildUsageForTest(dir, idx, cat, subscriptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if u.partial {
+				t.Error("trailing keys must not taint the total")
+			}
+			b := u.cost().billed
+			if !b.known() || math.Abs(b.amount-tc.cost) > 1e-9 {
+				t.Errorf("billed cost = %+v, want %v", b, tc.cost)
+			}
+		})
+	}
+}
+
 // TestBuildUsageGoodSessionStaysExact pins the other half: a fully readable
 // session stays exact, with no warning and no partial flag.
 func TestBuildUsageGoodSessionStaysExact(t *testing.T) {
 	dir := t.TempDir()
 	idx := usageIndex(t, dir, "s.jsonl", piAgent.name, piUsageLine(1.5))
-	u, err := buildUsage(dir, idx, nil, subscriptions{})
+	u, err := buildUsageForTest(dir, idx, nil, subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +752,7 @@ func TestBuildUsageCorruptTierLosesToValidTierSibling(t *testing.T) {
 		{path: af, harness: piAgent.name},
 		{path: bf, harness: piAgent.name},
 	}}
-	u, err := buildUsage(dir, idx, nil, subscriptions{})
+	u, err := buildUsageForTest(dir, idx, nil, subscriptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
