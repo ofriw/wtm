@@ -1,8 +1,6 @@
 # wtm
 
-**A new git worktree, ready to work in — in one command. And the worktrees you've abandoned, reclaimed safely.**
-
-`wtm` manages the worktree lifecycle of a [ChunkHound](https://chunkhound.ai) + [Pi.dev](https://pi.dev) + Claude Code software factory.
+**A Git worktree manager for AI-native software factories.** One command turns a bare checkout into a workplace that is ready — agent harness wired up, search index seeded — and prices everything it hosts.
 
 [![ci](https://github.com/ofriw/wtm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ofriw/wtm/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go)
@@ -10,19 +8,40 @@
 
 ## The problem
 
-A fresh `git worktree add` gives you checked-out files and nothing else — no agent harness, no search index — so every new checkout starts with the same manual setup. Meanwhile, the worktrees you're done with stay on disk forever, invisible until you run out of space or branch names collide.
+A fresh `git worktree add` gives you checked-out files. Nothing else. No agent harness, no search index, no record of what a branch has already spent. Every new checkout starts from zero.
+
+Meanwhile, finished worktrees stay on disk forever — invisible until you run out of space or a branch name collides. And no one can say what a feature actually cost to build.
+
+## What wtm is
+
+`wtm` runs the floor of a software factory. One command makes a checkout ready to work in, `status` shows the whole floor at a glance, and `gc` reclaims what has been abandoned. It plays two roles:
+
+**Butler.** Makes checkouts ready: harness wired up, index seeded, branch attached. Knows what exists, what is active, and what is abandoned. Reclaims the abandoned ones — safely, with every destructive step disclosed first. Scratch checkouts clean up after themselves.
+
+**Accountant.** Prices each worktree: age, active time, and model spend. Without measurement, no part has a price. With it, planning runs on real numbers.
+
+`wtm` is harness-agnostic. It serves Pi, Claude Code, ChunkHound, or plain MCP — and reports what each worktree carries instead of depending on it.
 
 ## What it does
 
-- **`add`** — create a worktree that's ready to work in: agent harness wired up, ChunkHound index seeded and refreshed. If the branch already exists, `add` attaches to it instead of creating a new one.
-- **`status`** — see every worktree at a glance, and whether it's `ACTIVE` or `UNUSED`.
-- **`delete`** — reclaim a single worktree by branch, even if it's `ACTIVE`.
-- **`gc`** — reclaim the `UNUSED` ones, and nothing else, with every destructive step disclosed first.
-- **`add --temp` / `promote`** — `add --temp` makes a throwaway checkout on a `tmp/` branch for collection by `gc`; `promote` makes it permanent.
+| Command | What it does |
+|---|---|
+| `add` | Create a worktree, ready to work in. If the branch exists, attach to it. |
+| `status` | See every worktree: active or unused, age, active time, cost, integrations. |
+| `delete` | Reclaim a single worktree by branch — even an active one. |
+| `gc` | Reclaim the unused ones, and nothing else. Every destructive step is disclosed first. |
+| `promote` | Make a temporary worktree permanent. |
+| `config` | One setting today: `unusedTTL`. |
+
+## Where it fits
+
+**Stacked PRs.** Give each tier of a stack its own worktree. `wtm add` attaches to any existing branch mid-stack; the double-checkout guard stops two worktrees from fighting over one branch. Want a scratch tier? `--temp` creates one, and `promote` makes it permanent when it earns its place. `status` shows which tiers went cold, so you know what to rebase and what to reclaim.
+
+**Attaching to existing branches.** Pick up a teammate's branch, or revisit a tier of your own stack. `wtm add <branch>` attaches when the branch exists locally: the checkout lands on it, its upstream is preserved, and the same setup runs. Matching is forgiving but safe — raw name first, then normalized spelling, ambiguous matches refused, and a loud, helpful failure when the branch is checked out elsewhere. Full rules below.
 
 ## Install
 
-Requires **git**, **Go 1.26+** to build (CI covers macOS, Linux, and Windows), and optionally **ChunkHound** — without it, `add` still seeds the worktree and simply skips indexing. Lint is pinned to the golangci-lint version in `.golangci-lint-version` and is enforced in CI; `make lint` runs that exact pin via `go run`, so a locally installed linter of another version is not authoritative.
+Requires **git** and **Go 1.26+**. ChunkHound is optional — without it, `add` seeds the worktree and skips indexing.
 
 ```sh
 git clone https://github.com/ofriw/wtm
@@ -30,7 +49,7 @@ cd wtm
 go build -o wtm .
 ```
 
-Put `wtm` on your `PATH`; it works from any repo. `--root` targets one explicitly.
+Put `wtm` on your `PATH`. It works from any repo; `--root` targets one explicitly.
 
 ## Quick start
 
@@ -44,12 +63,10 @@ source:   /Users/you/dev/app
 indexed:  true
 
 $ wtm                      # bare `wtm` is `wtm status`
-PATH                           BRANCH               UPSTREAM            LAST USED   AGE  ACTIVE   COST    LIST  STATUS  INTEGRATIONS
-~/dev/app                      main                 origin/main         2026-09-30  12d  8h 20m  $0.00  $41.20  ACTIVE  chunk mcp claude
-~/dev/app-feature-billing-fix  feature/billing-fix  origin/feature/...  2026-09-28   6h  2h 14m  $4.10       -  ACTIVE  chunk mcp claude
-~/dev/old-spike                spike-search         -                   2026-03-02   8M     45m  $0.00       -  UNUSED  chunk~ mcp
-
-list = pay-as-you-go price of the same tokens
+PATH                            BRANCH                UPSTREAM               LAST USED   STATUS    INTEGRATIONS
+~/dev/app                       main                  origin/main            2026-09-30  ACTIVE    chunk mcp claude
+~/dev/app-feature-billing-fix   feature/billing-fix   origin/feature/...     2026-09-28  ACTIVE    chunk mcp claude
+~/dev/old-spike                 spike-search          -                      2026-03-02  UNUSED    chunk~ mcp
 
 $ wtm gc --all --yes
 removed /Users/you/dev/old-spike
@@ -57,89 +74,25 @@ pruned
 sessions purged: 1
 ```
 
-## Attaching an existing branch
+## Cost & time tracking
 
-`wtm add <branch>` attaches when the branch already exists locally. The checkout lands on that
-branch, its configured upstream is preserved, and the same harness and index setup runs. A
-branch that is already checked out in another worktree fails and names that worktree. A supplied
-start-point must match the branch tip. `--temp` always requires a new branch.
-
-Matching keeps Git's stored spelling. `wtm add` tries the raw name first, exact then as a unique
-case-insensitive match. If neither matches, it tries the normalized name (lowercase, `_` and
-spaces become `-`), again exact then case-insensitive. A request that matches several branches
-only by case is refused as ambiguous; an exact spelling wins. Names that normalization would
-rewrite or reject, such as `Feature/under_score` or `Feature/C++`, attach as written.
-
-Use the branch name reported by `add`: `--json` sets `attached` to `true` or `false`, and human
-output appends `(existing)`.
-
-```console
-$ wtm add feature/under_score --no-index
-worktree: /Users/you/dev/app-feature-under-score
-branch:   Feature/under_score (existing)
-base:     refs/heads/Feature/under_score (local)
-source:   /Users/you/dev/app
-indexed:  false
-
-$ wtm add feature/under_score --no-index --json
-{
-  "path": "/Users/you/dev/app-feature-under-score",
-  "branch": "Feature/under_score",
-  "base": "refs/heads/Feature/under_score",
-  "source": "/Users/you/dev/app",
-  "indexed": false,
-  "attached": true,
-  "temp": false
-}
-```
+Every part has a price. `wtm status` measures each worktree: **AGE**, **ACTIVE** time, and **COST** in model spend. The detail block breaks cost down per model. Subscription proof shows billed cost beside list price — e.g. `$0.00/$41.20` — so you can tell coverage from metered burn. Unknown costs stay unknown, never a silent zero, and estimates carry a `*`.
 
 ## Temporary worktrees
 
-For short-lived tasks — PR reviews, repros, throwaway experiments — `wtm add <name> --temp`
-creates a checkout on a `tmp/<name>` branch that `wtm gc` reclaims once it has been idle longer
-than its window (`--ttl`, default `1h`). Activity pushes the deadline forward, so the window
-measures idleness, not age. `wtm promote <branch>` makes a temp worktree permanent, and
-`wtm status` shows a `TEMP` countdown column — always present, `-` for permanent checkouts.
+For short-lived work — PR reviews, repros, experiments — `wtm add <name> --temp` creates a checkout on a `tmp/<name>` branch that `gc` reclaims once it has been idle longer than its window (`--ttl`, default `1h`). Activity pushes the deadline forward, so the window measures idleness, not age.
 
-See [temp-worktrees.md](temp-worktrees.md) for the full contract: registry and identity,
-reclamation and safety rules, and promotion.
+## Attaching an existing branch
+
+`wtm add <branch>` attaches when the branch already exists locally. The checkout lands on that branch, its configured upstream is preserved, and the same harness and index setup runs. A branch already checked out in another worktree fails and names that worktree. A supplied start-point must match the branch tip. `--temp` always requires a new branch.
+
+Matching keeps Git's stored spelling. `wtm add` tries the raw name first, exact then as a unique case-insensitive match. If neither matches, it tries the normalized name (lowercase; `_` and spaces become `-`), again exact then case-insensitive. A request that matches several branches only by case is refused as ambiguous; an exact spelling wins. Names that normalization would rewrite or reject — `Feature/under_score`, `Feature/C++` — attach as written.
 
 ## Commands
 
 `add` · `promote` · `delete` · `gc` · `status` · `config` — run **`wtm --help`** for usage, flags, and exit codes.
 
 `INTEGRATIONS` lists what each worktree carries (`~` marks a partial setup, e.g. a ChunkHound config without a database). `wtm status --wide` expands one column per integration; `--json` reports the same states in an `integrations` map (`yes` / `partial` / `-` / `n/a`).
-
-`AGE` is the wall-clock life of the worktree (the filesystem birth time of its `.git` entry is the creation mark); `ACTIVE` is the time an agent turn was working: a human prompt opens it, tool use and tool results keep it open, and end/error/abort closes it, so idle between turns is excluded (overlapping turns count once; a session run from a subdirectory counts toward that worktree's ACTIVE and COST, and a nested worktree keeps its own). `ACTIVE` and `COST` count only transcripts still on disk: a harness may remove older session files, so a worktree can show less history than its age. `LAST USED` also sees sessions from subdirectories, so a checkout whose only recent work ran there is never reclaimed as abandoned. `COST` is the actual agent charge, and `LIST` is what the same tokens would cost metered. All three time figures share one grammar: the non-zero units from years down to minutes (`2d 5h 11m`), with seconds only below a minute. A worktree with no recorded agent turns shows `-` for `ACTIVE`, `COST` and `LIST`; a turn without usage still proves `ACTIVE` and leaves `COST` at `-`. `AGE` shows `-` when the worktree has no creation mark, or when the mark is later than the report instant (a future stamp is no age). `COST` reads `unknown` when a recorded event carries no price, a corrupt price, or a corrupt count the price derives from (the run warns once per distinct cause), so a partial sum never looks complete; a Pi event that reports its own charge keeps that exact `COST` even when a token count is rejected, and only its token cells read `unknown`. `~` marks a value from a partial total: an unreadable session or record may change it. A readable record of a type this build does not recognize that still reports usage drops the same way — it taints the total, and stderr names the unsupported record type instead of a generic loss. When the readable subset is zero, `ACTIVE` and the token cells read `unknown` instead of `~0`. A filesystem that records no birth time (some Linux mounts) leaves `AGE` at `-`; `wtm` never guesses it from mtime.
-
-A subscription changes what "actual charge" means. When the current credentials prove an active subscription, `wtm` splits the price into two columns: `COST` (`$0.00` above) is what you actually pay and `LIST` (`$41.20`) is what the same tokens would cost metered, each with its own right-aligned header. `LIST` appears only when some row carries a list price, so a table of single prices keeps its old shape, and a legend under the block that renders it repeats what the column holds. `unknown` replaces either value when no price is available. A Claude account that enables extra usage — or a legacy account file with no `hasExtraUsageEnabled` field — renders the covered `$0.00` as `~$0.00` — an estimate, because usage can overflow the allowance and bill at list price. Without proof, `wtm` shows the list price alone — exactly as if no subscription existed. The proof rules:
-
-- **Pi** — `openai-codex` authenticates only through OAuth, so a session naming it is covered. Every other subscription-backed provider (`anthropic`, `github-copilot`, `meta`, `openai`, `xai`) also accepts an API key, so its `auth.json` entry must say `oauth`. `kimi-coding` is always covered, mirroring Pi, even with an API key. Any other provider, or a missing or unreadable `auth.json`, is unproven. A proven `$0` is the subscription's marginal cost only — overage and other metered usage still bill.
-- **Claude Code** — the account file must bill by one of `stripe_subscription`, `stripe_subscription_contracted`, `apple_subscription`, or `google_play_subscription`. wtm reads `<configDir>/.config.json` when it exists, else `<$CLAUDE_CONFIG_DIR or $HOME>/.claude[-custom-oauth].json` (the suffix when `CLAUDE_CODE_CUSTOM_OAUTH_URL` is set), where `<configDir>` is `$CLAUDE_CONFIG_DIR` or `~/.claude`. No metered override may be configured in the settings of the session's own directory (its cwd), any parent directory, or the enterprise managed-settings file (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_UNIX_SOCKET`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `apiKeyHelper`, and the provider switches `CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`, `_ANTHROPIC_AWS`, `_MANTLE`), and the session must not predate the subscription. An unreadable account file voids coverage instead of falling back to a secondary file, so costs price at list. Each session prices with the settings of its own directory; the worktree root bounds every session below it, so a metered root setting voids each descendant's proof, while a descendant's own settings void only that session. The key variables void the proof when set; a provider switch voids it only when its value is `1`, `true`, `yes`, or `on` after trimming and lowercasing. `0`, `false`, `no`, `off`, and empty leave coverage intact. When the subscription start date is missing or unparseable, dated events stay at list price — only a dateless event (no timestamp to contradict the proof) is treated as covered.
-
-`WTM_CLAUDE_PARENT_SCOPE=0` skips only the ancestor-settings walk above each session's directory; the session's own `.claude/settings*.json` and the worktree root's settings still void its proof, so the default root bound survives. Set it only when you know the harness never merges parent `.claude/settings*.json`. wtm warns once when it is active.
-
-Because session files record no credential type, the dual-provider and Claude proofs read the *current* credentials; a past metered run under today's subscription credential reads as covered. A missing credential file proves nothing and never fails the command. Missing Claude settings files are harmless; malformed or unreadable settings invalidate the Claude subscription proof, so costs fall back to list price.
-
-Pi prices its own sessions. Claude Code records tokens, not prices, so `wtm` derives its cost from the [LiteLLM public rate catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json): the catalog is cached at `~/.wtm/rates.json` (24h TTL) and `WTM_RATES` pins a local copy for offline use. The first run on a Claude-only repo may wait briefly on the network; with no catalog and no cache, the Claude cost reads `unknown`. Test goldens pin a minimal subset of that catalog in `test/fixtures/rates.json`, so scenario runs never touch the network.
-
-`WTM_NOW` (RFC3339) pins the clock; the container test suite sets it so worktree ages and the gc TTL boundary are byte-stable. It is a test seam, not a user setting. `WTM_CREATED_AT` (RFC3339) pins every worktree's creation mark; the container test suite sets it because fixtures cannot seed a filesystem birth time. It is a test seam, not a user setting. `WTM_REQUIRE_RACE` and `WTM_REQUIRE_BTIME` are CI-only: each turns a test skip into a failure, so a skip is never mistaken for a pass.
-
-Running `wtm status` below the table prints the current worktree's age, active time, and cost, then — when the worktree recorded output — its input-to-output shares (`total in:out`, `cached in:out`, `uncached in:out`, all dividing the same recorded output, so they add up before rounding; displayed 1-decimal values can differ by 0.1), then one row per model that answered (models with the same name in two harnesses merge to one row, summing cost, tokens, and active time; `--json` keeps the per-harness split). A model row can exist without usage events: a named answer with no recorded usage still proves time. An assistant record that names no model (absent or empty) renders under the shared `unknown` label and never reads a catalog price: the reserved `unknown` label is not a rate-lookup key, so a pinned catalog `unknown` entry cannot bill an unnamed session. Each row shows the model's time — its clipped usage spans plus the turn's uncovered opening, which the answering model owns — its billed `COST` and — for a proven subscription — the `LIST` price beside it, then the token group: `↑ in` (total prompt tokens — uncached input plus cache read plus cache write), `↓ out`, `↩ hit` (cache read), `↪ write` (cache write), `× miss` (uncached input plus cache write), and `● hit%` (`hit / in`, caps at 99.9%). `-` marks a class the model never recorded; a rejected count reads `unknown` in its cell, `↑ in`, `× miss`, and `● hit%` read `unknown` when a prompt class is rejected, and `hit%` also reads `unknown` when a hit has no recorded build to divide by. A legend under the rows repeats the counting. A narrow terminal hides the whole token group at once — never a partial breakdown — but only after `LIST` is gone and `MODEL` has elided to its floor; the ratio group drops as a unit too, and each drop is disclosed on stderr; `--json` always carries the numbers. Status-table measurements (`AGE`, `ACTIVE`, `LAST USED`, `INTEGRATIONS`) drop whole with a stderr warning too; a value is never middle-elided. Spawn-child tokens join the same columns: modern Pi records them in `details.stats`, older Pi in `details.results[].usage`; a legacy cost-only child still shows no token classes. Web-search cost joins the total only, so tier costs can sum below the model total.
-
-The JSON output adds `current`, `ageSeconds` (null when unknown, or when the creation mark lies after the report instant), `cost` (null when unknown or absent), and — for worktrees with recorded usage — `activeSeconds` (the union of causal agent turns; idle between turns is excluded) and a `usage` map keyed by harness, each with `cost`, `activeSeconds`, and a per-`models` breakdown; an unnamed assistant record keys its breakdown as `unknown` and carries no catalog-derived cost. `cost` is the billed amount; a `listCost` key appears beside it at the worktree, harness, model, and token-tier levels only when a proven subscription makes the billed and list values differ. When present, its value is `null` if the list is unknown. The key is omitted when no subscription is proven, when a proven price is equal, or when both sides are unknown. A model with recorded tokens adds a `tiers` map (`input`, `cacheRead`, `cacheWrite`, `output`), each tier carrying its `tokens` count (`null` when the record's count was rejected), `cost`, and optional `listCost`, plus `cacheMissTokens` (uncached input plus cache write) and `cacheHitRate` (`cacheRead / in`, caps at 0.999, where `in` holds all prompt tokens with unclassified writes, omitted when no build is recorded or the prompt count is rejected). A worktree with recorded output adds `inputOutputRatio` — `total`, `cached`, and `uncached` input-to-output shares that all divide the same recorded output, so they add up before rounding (`total = cached + uncached`); the key is omitted when no output was recorded, because a ratio without a denominator is undefined, or when any token class was rejected. A partial total keeps its readable numbers and marks the loss: the worktree, each affected harness, and each affected model carry `partial:true`; when `inputOutputRatio` is present, it carries `partial:true` too. A partial harness or model can report `activeSeconds: 0`; `partial:true` marks that zero as a readable lower bound. A total with no readable events omits `activeSeconds` and `usage` and keeps `partial:true`. Worktrees with no recorded agent turns omit `activeSeconds` and `usage`; turns without usage still carry `activeSeconds` and a `usage` block whose harness `cost` is `null`.
-
-**Breaking (earlier integrations change):** the `config`, `db`, `mcp`, and `mcpNative` boolean keys were removed when the integrations were unified — not by cost tracking. Update consumers to use the `integrations` string map instead (`wtm status --json | jq '.[].integrations'`). `mcp` keeps its old meaning — any recognized MCP config counts (`yes`); a harness's own config (`.pi/mcp.json`, `.claude/settings*.json`) also lights that harness's key. `chunk~` (and `partial` in `--wide`/JSON) is config-xor-database: exactly one side is present. `wtm` no longer reports which side — inspect the worktree to find out.
-
-**Changed:** `wtm add` now seeds a new branch with no `--from` and no start-point from a usable worktree that has the default branch checked out, even when that worktree is ahead of or behind the resolved default ref. The new branch still forks from the resolved default ref. If several usable worktrees check out the default branch, the primary worktree seeds first; otherwise the linked worktree with the lowest path wins. Equal committed trees produce no notice. If no usable default-branch worktree exists, the source falls back to the worktree at the resolved ref, then the main worktree, and warns only when the committed trees differ. `--from` remains silent.
-
-- Default-branch source with a different tree: `seeding from <path>: default branch <name> is checked out there, but the start-point is <ref>`.
-- Create fallback with a different tree: `no usable worktree for <ref>; seeding from <path>`. A create fallback with equal committed trees no longer warns.
-- Attach fallback: `branch <ref> is not checked out; seeding from <path>` (unchanged).
-- `--no-index` with a copied database appends: `; the copied ChunkHound index is stale: indexing was skipped`.
-- The old `the copied ChunkHound index cannot match and indexing will re-embed` suffix is removed. It appeared only when indexing ran over a copied database. `--no-index` did not emit it. Scripts that match it must change.
-
-**Changed:** `-h` on a subcommand lists only that subcommand's own flags. The global flags (`--root`, `--json`, `--color`, `--progress`, `--yes`) appear once, in the usage block.
 
 Copied worktree configs may hold API keys. `wtm` never commits them — add them to `.gitignore` if they do.
 
