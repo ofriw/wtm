@@ -48,7 +48,7 @@ func TestGCSelectionNonInteractive(t *testing.T) {
 	})
 }
 
-// TestFailAbortedExitZero pins Fix A: a declined gc returns errAborted, which
+// TestFailAbortedExitZero pins that a declined gc returns errAborted, which
 // fail maps to exit 0 (the "aborted" message is already on stderr, so fail is
 // silent). The exit-code contract (0/1/2) lives in main.go's fail().
 func TestFailAbortedExitZero(t *testing.T) {
@@ -179,7 +179,7 @@ func TestGCPickerGridAlwaysIncludesTempColumn(t *testing.T) {
 	}
 }
 
-// TestGCPickerDescription pins the D3/D4 disclosure contract: the destructive
+// TestGCPickerDescription pins the disclosure contract: the destructive
 // remote effect is stated once, the temp force-delete clause appears only when
 // a temp candidate is present, and the grid header is indented by exactly the
 // option prefix so it sits above the keys.

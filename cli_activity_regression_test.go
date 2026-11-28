@@ -68,7 +68,7 @@ func assertNoModelAbove(t *testing.T, models map[string]any, limit float64) {
 	}
 }
 
-// TestThreeTurnAnswerModelAttribution pins the f1 fix: a same-model chain of
+// TestThreeTurnAnswerModelAttribution pins that a same-model chain of
 // point events must never bridge a turn answered by another model. Three
 // ten-second turns answer A, B, A; only A records usage. The report must give
 // A both its turns (20s), B the middle turn (10s), and never let a chain of
@@ -94,7 +94,7 @@ func TestThreeTurnAnswerModelAttribution(t *testing.T) {
 	assertNoModelAbove(t, models, 30)
 }
 
-// TestPre2000ClockAccepted pins the f13 split: plausibility belongs to
+// TestPre2000ClockAccepted pins that plausibility belongs to
 // transcript timestamps alone, so the nowEnv clock seam accepts a pre-2000
 // value without the misleading "not RFC3339" warning.
 func TestPre2000ClockAccepted(t *testing.T) {
@@ -203,7 +203,7 @@ func TestFutureStampsClampActiveTime(t *testing.T) {
 	}
 }
 
-// TestCorruptTimestampTimeExcludedFromActiveTime pins  at the CLI boundary: a
+// TestCorruptTimestampTimeExcludedFromActiveTime pins the corrupt-timestamp exclusion at the CLI boundary: a
 // parseable-but-absurd timestamp (a Go zero time, an epoch-zero bug) is corrupt
 // data and must never publish an exact ACTIVE figure. The corrupt record drops,
 // the total turns partial, ACTIVE clamps to the remaining valid turn, and

@@ -184,7 +184,7 @@ func TestCmdConfigUsageError(t *testing.T) {
 	}
 }
 
-// TestCmdConfigSetPreservesUnknownKey pins Fix G: a `config set` round-trip
+// TestCmdConfigSetPreservesUnknownKey pins that a `config set` round-trip
 // must not drop forward-compat keys already present in settings.json.
 func TestCmdConfigSetPreservesUnknownKey(t *testing.T) {
 	sandbox(t)

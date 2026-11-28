@@ -72,7 +72,8 @@ type progressEvent struct {
 var errInterrupted = errors.New("interrupted")
 
 // interruptGrace bounds the teardown join for work that ignores cancellation.
-var interruptGrace = 2 * time.Second
+// Tests inject a shorter grace via progressOptions, so this is a const.
+const interruptGrace = 2 * time.Second
 
 // childCtx is the run's kill scope for git/cp (see childCommand): one renderer.
 var childCtx atomic.Pointer[context.Context]

@@ -759,10 +759,6 @@ func TestStatusNarrowWidthSweep(t *testing.T) {
 	}
 }
 
-// TestStatusDetailProvenPricesNarrow pins the breakdown's shared width policy
-// for a proven subscription: the block fits the budget and keeps the full COST
-// and LIST values while the identity columns give up width first, and each
-// price column drops whole with disclosure only when it cannot fit.
 // TestCostLegendDetailMatchesBreakdown pins the legend's agreement with the
 // rendered breakdown: the LIST column's explanation appears in the detail
 // legend exactly when the breakdown table carries the column. Both derive from
@@ -834,6 +830,10 @@ func TestTokenGroupDisclosurePrintsOnce(t *testing.T) {
 	}
 }
 
+// TestStatusDetailProvenPricesNarrow pins the breakdown's shared width policy
+// for a proven subscription: the block fits the budget and keeps the full COST
+// and LIST values while the identity columns give up width first, and each
+// price column drops whole with disclosure only when it cannot fit.
 func TestStatusDetailProvenPricesNarrow(t *testing.T) {
 	env := sandbox(t)
 	u := piUsageOne(t, piProviderLine("openai-codex", 41.20))
@@ -1099,7 +1099,7 @@ func TestPrintStatusJSON(t *testing.T) {
 	}
 }
 
-// TestDispatchValidatesColor pins Fix C: --color is validated once in
+// TestDispatchValidatesColor pins that --color is validated once in
 // dispatch, so every subcommand rejects a bogus value as a usage error (exit 2)
 // before touching the repo.
 func TestDispatchValidatesColor(t *testing.T) {
@@ -1225,7 +1225,7 @@ func TestStatusColumnsForNoAliasing(t *testing.T) {
 	}
 }
 
-// TestRenderStatusNarrowDisclosesEachHiddenHeaderOnce pins the B2 per-run
+// TestRenderStatusNarrowDisclosesEachHiddenHeaderOnce pins the per-run
 // dedupe contract: a header hidden by the table grid and again by the detail
 // block warns once, not once per grid. At COLUMNS=10 the LIST column drops in
 // both grids, so without the shared seen set its disclosure appears twice.

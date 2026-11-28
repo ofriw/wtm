@@ -174,7 +174,7 @@ func TestClampSpansBoundsFutureTurns(t *testing.T) {
 	}
 }
 
-// TestAttributeTurnsClampsClippedModelSpans pins  at the fold boundary: a
+// TestAttributeTurnsClampsClippedModelSpans pins the clipped-span clamp at the fold boundary: a
 // model span stamped after the report instant must never let a model row exceed
 // the harness total in the same run. It drives addBilledSession, the real fold
 // entry, instead of re-enacting its composition.

@@ -943,7 +943,7 @@ func TestSubscriptionUnprovenOutputUnchanged(t *testing.T) {
 	}
 }
 
-// TestSubscriptionClaudeLegacyMissingFieldIsOveragePossible pins 2D: a legacy
+// TestSubscriptionClaudeLegacyMissingFieldIsOveragePossible pins that a legacy
 // account file without hasExtraUsageEnabled may still bill overage, so the
 // covered $0 is an estimate. A future upgrade that writes the field as false
 // flips this to an exact $0.

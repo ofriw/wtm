@@ -331,10 +331,9 @@ func writeJSON(path string, v any) error {
 }
 
 // fileModeOrDefault resolves the mode for a rewritten file. An existing file
-// keeps its permission bits, so a copied 0600 secret config stays private; a new
-// file gets world-readable 0644. A stat failure is an error, never a silent
-// 0644: every writer shares this one policy, so a rewritten JSON never widens
-// or narrows permissions by accident.
+// keeps its permission bits; see writeJSON for the rule. A stat failure is an
+// error, never a silent 0644: every writer shares this one policy, so a
+// rewritten JSON never widens or narrows permissions by accident.
 func fileModeOrDefault(path string) (os.FileMode, error) {
 	info, err := os.Stat(path)
 	if err == nil {

@@ -225,7 +225,7 @@ func TestParseCatalogMissingVsZero(t *testing.T) {
 	}
 }
 
-// TestCatalogNegativeZeroAmountRejected pins f5 at the catalog boundary: a
+// TestCatalogNegativeZeroAmountRejected pins at the catalog boundary that a
 // negative underflow (-1e-999) rounds to negative zero and must read unknown
 // with an out-of-range disclosure, never as an exact free figure; an explicit
 // numeric zero stays a valid, exact free class.
@@ -1356,10 +1356,10 @@ func TestCorruptFreshCacheAndFailedFetchShowBothCauses(t *testing.T) {
 	}
 }
 
-// TestReviewRepeatedCatalogWarning pins f6: a corrupt-rate cause is disclosed
+// TestCorruptRateCauseDisclosedOnceAcrossRetry pins that a corrupt-rate cause is disclosed
 // once per run, even when the retry path re-parses the same cache file after a
 // failed refresh.
-func TestReviewRepeatedCatalogWarning(t *testing.T) {
+func TestCorruptRateCauseDisclosedOnceAcrossRetry(t *testing.T) {
 	pinStaleCatalog(t, invalidRates)
 	url := serveRates(t, http.StatusInternalServerError, "boom")
 	out, _ := runCatalogProgress(t, func(p *progress) error {
@@ -1376,10 +1376,10 @@ func TestReviewRepeatedCatalogWarning(t *testing.T) {
 	}
 }
 
-// TestReviewSecondarySearch pins f12: every stated search size is validated and
+// TestSecondarySearchWarningSurvivesBrokenAuthoritative pins that every stated search size is validated and
 // warned, even when the authoritative (first stated) size is broken and the
 // class must stay unknown.
-func TestReviewSecondarySearch(t *testing.T) {
+func TestSecondarySearchWarningSurvivesBrokenAuthoritative(t *testing.T) {
 	m := map[string]json.RawMessage{
 		"search_context_size_medium": json.RawMessage(`"not-a-number"`),
 		"search_context_size_low":    json.RawMessage(`[1]`),
@@ -1394,10 +1394,10 @@ func TestReviewSecondarySearch(t *testing.T) {
 	}
 }
 
-// TestArchitectureProbeSpec pins f18: documentation rows (sample_spec and
+// TestCatalogDocumentationRowsRecognizedSilently pins that documentation rows (sample_spec and
 // comment rows) are recognised before any price decode, so their prose values
 // never warn and never become catalog entries.
-func TestArchitectureProbeSpec(t *testing.T) {
+func TestCatalogDocumentationRowsRecognizedSilently(t *testing.T) {
 	var warns []string
 	c, err := parseCatalog(strings.NewReader(`{"sample_spec":{"input_cost_per_token":"float","search_context_cost_per_query":"prose"},"#comment":{"note":"ignore"},"m":{"input_cost_per_token":0.000001}}`),
 		func(err error) { warns = append(warns, err.Error()) })
@@ -1412,10 +1412,10 @@ func TestArchitectureProbeSpec(t *testing.T) {
 	}
 }
 
-// TestArchitectureProbeSearch pins f21: every stated search size is validated on
+// TestSearchRateFirstStatedSizeWinsInvalidWarn pins that every stated search size is validated on
 // decode (negative and over-limit figures warn once each), while the first
 // stated size keeps precedence and the selected price survives.
-func TestArchitectureProbeSearch(t *testing.T) {
+func TestSearchRateFirstStatedSizeWinsInvalidWarn(t *testing.T) {
 	m := map[string]json.RawMessage{
 		"search_context_size_medium": json.RawMessage(`0.01`),
 		"search_context_size_low":    json.RawMessage(`-1`),
@@ -1442,7 +1442,7 @@ func TestArchitectureProbeSearch(t *testing.T) {
 	}
 }
 
-// TestRateCatalogStaleMalformedReportsBothCauses pins f15: when a stale cache is
+// TestRateCatalogStaleMalformedReportsBothCauses pins that when a stale cache is
 // itself malformed and the refresh fails, both distinct causes are reported once
 // — the cache parse failure as a warning, the fetch cause as the returned error.
 func TestRateCatalogStaleMalformedReportsBothCauses(t *testing.T) {
@@ -1460,7 +1460,7 @@ func TestRateCatalogStaleMalformedReportsBothCauses(t *testing.T) {
 	}
 }
 
-// TestRateCatalogColdStartFetchFailStaysSilent pins f15: an absent cache (cold
+// TestRateCatalogColdStartFetchFailStaysSilent pins that an absent cache (cold
 // start) stays silent even when the refresh fails — the fetch cause is the only
 // report, never a spurious cache-parse warning.
 func TestRateCatalogColdStartFetchFailStaysSilent(t *testing.T) {
@@ -1478,7 +1478,7 @@ func TestRateCatalogColdStartFetchFailStaysSilent(t *testing.T) {
 	}
 }
 
-// TestRateCatalogFetchedBodySharesDedupeSink pins f19: the fetched body is
+// TestRateCatalogFetchedBodySharesDedupeSink pins that the fetched body is
 // parsed through the run's shared deduplicated sink, so a malformed search row
 // in the fetched body is reported exactly once after a fresh-corrupt cache
 // forced the refetch.

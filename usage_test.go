@@ -206,11 +206,11 @@ func TestUnionDurationSaturatesOverflow(t *testing.T) {
 	}
 }
 
-// TestReviewAmounts pins that the fixed-point cost rounding must never wrap a
+// TestRoundCostNeverWraps pins that the fixed-point cost rounding must never wrap a
 // representable float into a wrong exact figure. A total above the int64
 // fixed-point range keeps its exact float value instead of wrapping to a huge
 // negative, and still renders and serializes as a known positive number.
-func TestReviewAmounts(t *testing.T) {
+func TestRoundCostNeverWraps(t *testing.T) {
 	for _, v := range []float64{1e13, 1e15, 9e18} {
 		if got := roundCost(v); got != v {
 			t.Errorf("roundCost(%g) = %g, want the unchanged exact float", v, got)
@@ -223,10 +223,10 @@ func TestReviewAmounts(t *testing.T) {
 	}
 }
 
-// TestReviewNoCatalogSearch pins f3: a corrupt web-search count warns during
+// TestSanitizeWarnsOnNegativeWebSearch pins that a corrupt web-search count warns during
 // sanitization, before any rate lookup, so a missing catalog cannot suppress the
 // disclosure.
-func TestReviewNoCatalogSearch(t *testing.T) {
+func TestSanitizeWarnsOnNegativeWebSearch(t *testing.T) {
 	events := []usageEvent{{model: "m", webSearch: -3}}
 	var warns []string
 	sanitizeEvents(events, func(err error) { warns = append(warns, err.Error()) })
@@ -235,9 +235,9 @@ func TestReviewNoCatalogSearch(t *testing.T) {
 	}
 }
 
-// TestReviewSum pins that aggregates accumulate without wrapping and keep the
+// TestCostPairSumsWithoutWrapping pins that aggregates accumulate without wrapping and keep the
 // unknown taint sticky when any contributor is unpriced.
-func TestReviewSum(t *testing.T) {
+func TestCostPairSumsWithoutWrapping(t *testing.T) {
 	var p costPair
 	for i := 0; i < 1000; i++ {
 		var m money
@@ -506,12 +506,12 @@ func TestDedupeEqualScoresElectFirst(t *testing.T) {
 	}
 }
 
-// TestReviewDuplicate pins the measurement/coverage decoupling: election selects
+// TestMeteredTwinDisputesKeyAtListPrice pins the measurement/coverage decoupling: election selects
 // the best measurement copy (the richer one) regardless of coverage, while a
 // metered twin makes the key disputed so the bill stays at list price instead of
 // substituting a covered $0. The outcome — not which physical copy is elected —
 // is what the contract guarantees, in either session order.
-func TestReviewDuplicate(t *testing.T) {
+func TestMeteredTwinDisputesKeyAtListPrice(t *testing.T) {
 	priceAtList := func(e usageEvent) pricedEvent {
 		var p pricedEvent
 		if e.tokens.total() > 0 {

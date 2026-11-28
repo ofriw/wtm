@@ -122,7 +122,7 @@ func subscriptionSettingsPath(repo string, env sandboxEnv, scope, file string) s
 	return filepath.Join(repo, ".claude", file)
 }
 
-// TestStatusDanglingPrimaryAccountVoidsFallbackCoverage pins  at the CLI
+// TestStatusDanglingPrimaryAccountVoidsFallbackCoverage pins the dangling-account void at the CLI
 // boundary: a primary `.config.json` that is a dangling symlink voids the
 // fallback proof, so a Claude event bills at its metered list price and stderr
 // discloses the unreadable account instead of silently claiming coverage.
@@ -154,7 +154,7 @@ func TestStatusDanglingPrimaryAccountVoidsFallbackCoverage(t *testing.T) {
 	}
 }
 
-// TestMixedPiDirDoesNotVoidClaudeCoverage pins  at the CLI boundary: a Pi
+// TestMixedPiDirDoesNotVoidClaudeCoverage pins the sibling-subdirectory isolation at the CLI boundary: a Pi
 // session recorded from a sibling subdirectory whose own `.claude/settings.json`
 // is malformed must not taint the Claude proof. The root Claude session stays
 // covered (cost 0, listCost visible) and no list-price warning fires.
@@ -185,7 +185,7 @@ func TestMixedPiDirDoesNotVoidClaudeCoverage(t *testing.T) {
 	}
 }
 
-// TestStatusMeteredDuplicateNotSubstitutedByCoveredCopy pins  at the CLI
+// TestStatusMeteredDuplicateNotSubstitutedByCoveredCopy pins the metered-copy precedence at the CLI
 // boundary: when identical copies of a billed turn exist in a metered and a
 // covered session, the metered copy must win the slot so the bill stays at list
 // price. Transcript placement must not decide whether a subscription proves the
@@ -236,7 +236,7 @@ func TestStatusMeteredDuplicateNotSubstitutedByCoveredCopy(t *testing.T) {
 	}
 }
 
-// TestStatusLargerCoveredDuplicateCannotEraseMeteredCharge pins  at the CLI
+// TestStatusLargerCoveredDuplicateCannotEraseMeteredCharge pins the metered-evidence precedence at the CLI
 // boundary: when the covered copy of a billed turn reports more tokens than the
 // metered copy, the larger score must not erase the metered evidence. The
 // metered copy still wins the slot, so the bill stays at list price.
@@ -269,7 +269,7 @@ func TestStatusLargerCoveredDuplicateCannotEraseMeteredCharge(t *testing.T) {
 	}
 }
 
-// TestPiDualModeMeteredTwinWinsBothOrders pins  at the fold boundary: the
+// TestPiDualModeMeteredTwinWinsBothOrders pins the metered-twin election at the fold boundary: the
 // same billed turn recorded under an OAuth-proven provider (anthropic) and an
 // API-key provider (openai) must elect the metered copy regardless of which
 // session file comes first, so transcript placement never decides whether a

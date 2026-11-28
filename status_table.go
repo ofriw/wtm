@@ -266,6 +266,16 @@ func columnRegistry() map[string]worktreeColumn { return columnRegistryFor(capab
 // The list is a literal, never registry state, so it cannot be mutated and
 // each entry names its column directly — duplicate style key stays beside the
 // column that carries it.
+var fixedStyledColumns = []string{
+	colStatus.header,
+	colTemp.header,
+	colUpstream.header,
+	colCost.header,
+	colList.header,
+	colBranch.header,
+	colLastUsed.header,
+}
+
 func init() {
 	// WHY (an eager guard, not registry state): capability ids become --wide
 	// headers; a collision with a core header must fail at startup, not at the
@@ -273,7 +283,7 @@ func init() {
 	// before init runs. The same pass guards that every fixed styled column
 	// still carries a style key.
 	registry := columnRegistry()
-	for _, h := range []string{colStatus.header, colTemp.header, colUpstream.header, colCost.header, colList.header, colBranch.header, colLastUsed.header} {
+	for _, h := range fixedStyledColumns {
 		if registry[h].style == stylePlain {
 			panic(fmt.Sprintf("styled header %q has no style key", h))
 		}

@@ -136,7 +136,7 @@ func piUsageLine(total float64) string {
 	return fmt.Sprintf(`{"type":"message","timestamp":"2026-01-01T00:00:00Z","message":{"role":"assistant","model":"m","usage":{"cost":{"total":%v}}}}`, total)
 }
 
-// TestBuildUsageActivityOrderIndependent pins D1: activity time comes from the
+// TestBuildUsageActivityOrderIndependent pins that activity time comes from the
 // original events, so deduplicating a shared transcript never shrinks a session
 // span. Both session orders yield the same active time and the same total.
 func TestBuildUsageActivityOrderIndependent(t *testing.T) {
@@ -319,7 +319,7 @@ func TestBuildUsageDedupesProviderVariantTurns(t *testing.T) {
 	}
 }
 
-// TestBuildUsageBatchTierWith1hWriteIsUnknown pins 3B: the catalog has no
+// TestBuildUsageBatchTierWith1hWriteIsUnknown pins that the catalog has no
 // batch 1-hour-write rate, so a batch-tier turn with 1h cache writes reads
 // unknown rather than silently mispriced.
 func TestBuildUsageBatchTierWith1hWriteIsUnknown(t *testing.T) {
@@ -338,7 +338,7 @@ func TestBuildUsageBatchTierWith1hWriteIsUnknown(t *testing.T) {
 	}
 }
 
-// TestBuildUsageActiveTimeSurvivesDedupe pins 3D: dedupe decides which copy of
+// TestBuildUsageActiveTimeSurvivesDedupe pins that dedupe decides which copy of
 // a billed turn prices, but activity time folds every event, so the billed mask
 // never changes the active total while the cost drops the repeat.
 func TestBuildUsageActiveTimeSurvivesDedupe(t *testing.T) {
@@ -443,8 +443,8 @@ func TestBuildUsageOversizedUnbilledRecordDoesNotTaint(t *testing.T) {
 	}
 }
 
-// TestBuildUsageProvenPiPlusEstimatedClaudeAsksNoOverageLegend pins B1 end to
-// end: an exact proven Pi charge beside an unproven Claude cache-write estimate
+// TestBuildUsageProvenPiPlusEstimatedClaudeAsksNoOverageLegend pins end-to-end that an exact proven
+// Pi charge beside an unproven Claude cache-write estimate
 // carries the cache cause only, so the allowance caveat must not print.
 func TestBuildUsageProvenPiPlusEstimatedClaudeAsksNoOverageLegend(t *testing.T) {
 	sandbox(t)
@@ -470,7 +470,7 @@ func TestBuildUsageProvenPiPlusEstimatedClaudeAsksNoOverageLegend(t *testing.T) 
 	}
 }
 
-// TestLoadUsagePiOnlyNeedsNoRatesCatalog pins T1: a repo with only Pi sessions
+// TestLoadUsagePiOnlyNeedsNoRatesCatalog pins that a repo with only Pi sessions
 // resolves cost from the harness record without loading the catalog, so a
 // missing WTM_RATES and an offline host change nothing.
 func TestLoadUsagePiOnlyNeedsNoRatesCatalog(t *testing.T) {
@@ -537,7 +537,7 @@ func TestStatusClaudeCatalogOutageWarnsAndReportsUnknown(t *testing.T) {
 	}
 }
 
-// TestStatusDisclosesPartialPiUsage pins T5 through the real binary: one
+// TestStatusDisclosesPartialPiUsage pins through the real binary that a
 // dropped record taints the total, so the table marks ACTIVE with "~", COST
 // reads unknown, the partial legend prints, and JSON carries the flag.
 func TestStatusDisclosesPartialPiUsage(t *testing.T) {

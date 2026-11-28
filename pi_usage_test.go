@@ -279,7 +279,7 @@ func TestPiEventKeyIgnoresProvider(t *testing.T) {
 	}
 }
 
-// TestPiTopLevelUsageRecords pins P1: a top-level `usage` record (cache
+// TestPiTopLevelUsageRecords pins that a top-level `usage` record (cache
 // warming) and a compaction/branch_summary that carries usage all bill. The
 // top-level usage record names its own model and provider and seeds the
 // running attribution the model-less summary records inherit.
@@ -300,7 +300,7 @@ func TestPiTopLevelUsageRecords(t *testing.T) {
 	assertPiEvent(t, events[2], "m-warm", fptr(0.1))
 }
 
-// TestPiRecordIdentityUsesID pins P2: the entry id is the identity, so two
+// TestPiRecordIdentityUsesID pins that the entry id is the identity, so two
 // distinct records with equal content stay two, while the same id repeated (a
 // fork copy) bills once.
 func TestPiRecordIdentityUsesID(t *testing.T) {
@@ -320,7 +320,7 @@ func TestPiRecordIdentityUsesID(t *testing.T) {
 	}
 }
 
-// TestPiMissingCostAndZeroCostDiffer pins P2's cost-presence rule: with no id
+// TestPiMissingCostAndZeroCostDiffer pins the cost-presence rule: with no id
 // the content fallback still separates a known zero from a missing cost, so an
 // unknown total is never hidden behind a zero.
 func TestPiMissingCostAndZeroCostDiffer(t *testing.T) {
@@ -659,7 +659,7 @@ func TestPiSameIDDifferentTimestampBillsTwice(t *testing.T) {
 	}
 }
 
-// TestPiIdlessSameTimestampCollisionBillsOnce pins 3C: id-less records with
+// TestPiIdlessSameTimestampCollisionBillsOnce pins that id-less records with
 // equal time, model and cost share one fallback key, so the same record seen in
 // two sessions bills once. Both sessions still count toward active time.
 func TestPiIdlessSameTimestampCollisionBillsOnce(t *testing.T) {
@@ -715,7 +715,7 @@ func TestPiSpawnCopyPairingBillsOnce(t *testing.T) {
 	}
 }
 
-// TestPiSpawnWithoutIDCrossSessionBillsOnce pins 3C: a spawn batch without a
+// TestPiSpawnWithoutIDCrossSessionBillsOnce pins that a spawn batch without a
 // record id still dedupes across sessions — the content fallback plus the child
 // index is the identity — so a repeated transcript bills each child once.
 func TestPiSpawnWithoutIDCrossSessionBillsOnce(t *testing.T) {
@@ -822,9 +822,6 @@ func TestPiOversizedNonBilledRecordsDoNotDrop(t *testing.T) {
 	}
 }
 
-// TestOversizedPiBillable pins the classifier for a discarded record. A body
-// may hold any text, so only structured evidence bills: escaped words must not,
-// but visible usage, spawn details, or an unknown type must.
 // TestOversizedPiMessageBillable pins the fail-closed classifier for a discarded
 // message. Only a readable user message is provably free: the 8 KiB prefix
 // cannot prove a >4 MiB record has no usage, so assistant and toolResult (even

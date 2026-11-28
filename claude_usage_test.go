@@ -112,7 +112,7 @@ func TestClaudeUsageDedupeAcrossSessions(t *testing.T) {
 	}
 }
 
-// TestClaudeDedupeWebSearchBreaksTokenTie pins D3: two streaming records of one
+// TestClaudeDedupeWebSearchBreaksTokenTie pins that two streaming records of one
 // turn that tie on tokens must keep the larger web-search count, whose catalog
 // price is real money.
 func TestClaudeDedupeWebSearchBreaksTokenTie(t *testing.T) {
@@ -145,7 +145,7 @@ func TestClaudeCorruptWebSearchDuplicateLosesToValidSibling(t *testing.T) {
 	}
 }
 
-// TestClaudeKeylessRecordsSurviveDedupe pins D2: an assistant record with
+// TestClaudeKeylessRecordsSurviveDedupe pins that an assistant record with
 // neither a message id nor a request id gets an empty key, so unrelated id-less
 // records both bill instead of collapsing to one winner.
 func TestClaudeKeylessRecordsSurviveDedupe(t *testing.T) {
@@ -376,7 +376,7 @@ func claudeCatalogStatus(t *testing.T, rates, usage string) (map[string]any, str
 	return statusModel(t, statusRows(t, stdout)[0], claudeAgent.name, "m"), stderr
 }
 
-// TestClaudeUnreadableFigureKeepsSiblings pins  for Claude: a count this
+// TestClaudeUnreadableFigureKeepsSiblings pins the unreadable-figure scoping for Claude: a count this
 // build cannot read voids only its own class. The turn stays billed, its
 // readable counts keep their exact prices, and one warning names the field.
 func TestClaudeUnreadableFigureKeepsSiblings(t *testing.T) {

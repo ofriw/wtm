@@ -11,7 +11,8 @@ import (
 // from 4.5s to 0.5s, and 8/16 workers add nothing because the disk is the
 // limit. Keeping the pool here keeps every concurrent stage at one tuning point.
 
-// scanWorkers is the pool size for read-only discovery stages.
+// scanWorkers is the pool size for read-only discovery stages. It is also a
+// test seam: parallel_test.go rewrites it to exercise pool bounds.
 var scanWorkers = min(8, max(4, runtime.NumCPU()))
 
 // mapParallel runs fn for every index in [0,n) with a bounded pool and returns

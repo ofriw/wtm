@@ -325,7 +325,7 @@ func TestGCPlainProgressPhases(t *testing.T) {
 	assertOrdered(t, stderr, "start removing worktrees", "start pruning", "✓ done in")
 }
 
-// TestGCTUIDeclineAborts pins Fix A end to end: declining prints "aborted" on
+// TestGCTUIDeclineAborts pins end-to-end that declining prints "aborted" on
 // stderr, exits 0 with nothing on stdout, and keeps the worktree.
 func TestGCTUIDeclineAborts(t *testing.T) {
 	repo, wt1, session := gcTUIFixture(t)

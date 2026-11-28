@@ -163,11 +163,11 @@ func TestPiCorruptTierWithoutTotalStaysUnknown(t *testing.T) {
 	}
 }
 
-// TestArchitectureProbeDuplicate pins the pre-election price disclosure: a bad
+// TestForkedBadPriceDuplicateWarnsOnceValidSiblingWins pins the pre-election price disclosure: a bad
 // price in a forked transcript (a duplicate of the winning record) must warn
 // once per cause without mutating the event, so the valid sibling still wins
 // dedupe and prices unchanged.
-func TestArchitectureProbeDuplicate(t *testing.T) {
+func TestForkedBadPriceDuplicateWarnsOnceValidSiblingWins(t *testing.T) {
 	sandbox(t)
 	pinClock(t)
 	repo := nativeRepo(t)
@@ -191,7 +191,7 @@ func TestArchitectureProbeDuplicate(t *testing.T) {
 	}
 }
 
-// TestPiNegativeZeroAmountRejected pins f5 at the Pi transcript boundary: a
+// TestPiNegativeZeroAmountRejected pins at the Pi transcript boundary that a
 // negative underflow (-1e-999) rounds to negative zero and must read unknown
 // with a warning, never as an exact free figure; an explicit numeric zero stays
 // a valid, exact free class.
