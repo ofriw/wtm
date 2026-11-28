@@ -98,7 +98,7 @@ func TestIndexSeedSkipsWithoutChunkHound(t *testing.T) {
 }
 
 // TestWarnIfChunkHoundExpected pins the warn routing directly: silence
-// without a core.Workspace, a warning when a workspace goes unindexed.
+// without a workspace, a warning when a workspace goes unindexed.
 func TestWarnIfChunkHoundExpected(t *testing.T) {
 	if out := CaptureStderr(t, func() { warnIfChunkHoundExpected(t.TempDir()) }); out != "" {
 		t.Fatalf("no workspace must stay silent, got %q", out)

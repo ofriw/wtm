@@ -246,7 +246,7 @@ func PrintStatusJSON(wts []Worktree, now time.Time, ttl time.Duration) error {
 	out := make([]JSONWorktree, 0, len(wts))
 	for _, w := range wts {
 		j := JSONWorktree{
-			// WHY: branchName() is the SSOT for detached display so JSON matches the table's "(detached)".
+			// WHY: BranchName() is the SSOT for detached display so JSON matches the table's "(detached)".
 			Path: w.Path, Branch: w.BranchName(), Upstream: w.Upstream.Short, Main: w.Main, Status: w.Status(now, ttl),
 			Temp: w.Temp, Integrations: IntegrationStates(w, active),
 		}

@@ -44,8 +44,8 @@ func cmdStatus(g *globals, args []string, hooks core.Hooks) error {
 }
 
 // printStatusTable renders the table for a column schema with the shared grid
-// engine and the status cell renderer. Column IDs (stable, never displayed)
-// route the styling, so a header rename cannot silently recolor a column.
+// engine and the status cell renderer. Styling keys off the rendered header
+// (and the capability registry for --wide columns), never off column ids.
 func printStatusTable(cols []core.WorktreeColumn, wts []core.Worktree, now time.Time, ttl time.Duration, colorMode string) {
 	ctx := core.ColumnContext{Now: now, TTL: ttl}
 	headers := core.ColumnHeaders(cols)

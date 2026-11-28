@@ -137,7 +137,8 @@ func TestRenameReplaceJoinsBothCauses(t *testing.T) {
 }
 
 // Success after premise failure proves the POSIX fallback ran: MoveFileEx
-// alone refuses the held destination, so only fs.posixRename can complete it.
+// alone refuses the held destination, so only the POSIX fallback rename can
+// complete it.
 func TestRenameReplaceUsesPosixFallbackOverSharedHandle(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "store.json")
 	mustWriteWindowsStore(t, dest, "old")
@@ -231,7 +232,7 @@ func longWindowsStorePath(t *testing.T, name string) string {
 func mustWriteWindowsStore(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := WriteFileAtomic(path, []byte(contents), 0o600); err != nil {
-		t.Fatalf("fs.WriteFileAtomic %q: %v", path, err)
+		t.Fatalf("atomic write %q: %v", path, err)
 	}
 }
 

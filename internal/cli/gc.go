@@ -68,8 +68,8 @@ func abortGCResult(o gcOptions) gcResult {
 
 // remotePlan is the single computation of which remote upstreams gc will
 // delete: veto-free targets plus the veto reasons already disclosed. Computed
-// once after selection; ui.Confirm, purge, and report all read it instead of
-// re-threading root+surviving.
+// once after selection; the confirmation prompt, purge, and report all read it
+// instead of re-threading root+surviving.
 type remotePlan struct {
 	keep    bool
 	targets map[string]git.Upstream // deduped delete candidates
@@ -213,9 +213,10 @@ func promptGC(g *globals, selected []core.Worktree, plan remotePlan) (bool, erro
 }
 
 // selectAndConfirmGC picks the worktrees to remove and gets consent. The
-// candidate scan runs under the progress renderer; the huh picker and ui.Confirm
-// run after it exits, because two tea programs must never share the tty. The
-// remote plan is computed once here so ui.Confirm and purge share one source.
+// candidate scan runs under the progress renderer; the huh picker and the
+// confirmation prompt run after it exits, because two tea programs must never
+// share the tty. The remote plan is computed once here so the confirmation
+// prompt and purge share one source.
 func selectAndConfirmGC(g *globals, wts []core.Worktree, o gcOptions, ttl time.Duration, root string, now time.Time) ([]core.Worktree, remotePlan, error) {
 	var none remotePlan
 	candidates, err := scanSelection(g, wts, o, ttl, now)
@@ -249,7 +250,7 @@ func scanSelection(g *globals, wts []core.Worktree, o gcOptions, ttl time.Durati
 	return candidates, err
 }
 
-// chooseCandidates resolves the ui.Interactive picker for scanned candidates;
+// chooseCandidates resolves the interactive picker for scanned candidates;
 // explicit --path and --all selections are already final.
 func chooseCandidates(candidates []core.Worktree, o gcOptions, ttl time.Duration, now time.Time) ([]core.Worktree, error) {
 	if o.all || len(o.paths) > 0 {

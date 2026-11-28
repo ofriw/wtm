@@ -133,7 +133,7 @@ func TestPromoteRefusesMainAndDefaultBranch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var err error
 			if tc.name == "default branch" {
-				// A linked worktree on the default branch; only the main core.Worktree
+				// A linked worktree on the default branch; only the main worktree
 				// can satisfy that, so call the resolver directly.
 				_, err = checkedDeleteTarget(&core.Worktree{Path: "/linked", Branch: "main"}, "main", "main")
 			} else {
