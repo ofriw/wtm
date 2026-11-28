@@ -264,20 +264,6 @@ func cacheJSON(t promptTokens) (*int64, *float64) {
 	return &miss, nil
 }
 
-// set populates one field by JSON key. The switch keeps the struct type-safe
-// while the meta list drives the enumeration, so display and JSON share one
-// source of truth for the ratio set.
-func (r *jsonInputOutputRatio) set(key string, v float64) {
-	switch key {
-	case "total":
-		r.Total = v
-	case "cached":
-		r.Cached = v
-	case "uncached":
-		r.Uncached = v
-	}
-}
-
 // inputOutputRatioJSON projects the worktree's input:output ratios. It returns
 // nil when no output was recorded: a ratio without a denominator is undefined,
 // so the contract stays silent rather than emit an infinity.
@@ -291,8 +277,11 @@ func inputOutputRatioJSON(u *worktreeUsage) *jsonInputOutputRatio {
 	}
 	r := jsonInputOutputRatio{Partial: u.partial}
 	for _, d := range detailRatioMeta {
+		if d.set == nil {
+			panic("detailRatioMeta row has no JSON projection")
+		}
 		v, _ := t.outputRatio(d.num(t))
-		r.set(d.jsonKey, roundRate(v))
+		d.set(&r, roundRate(v))
 	}
 	return &r
 }

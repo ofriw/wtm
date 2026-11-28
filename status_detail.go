@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -318,10 +319,11 @@ var detailRatioMeta = []struct {
 	label   string
 	jsonKey string
 	num     func(promptTokens) int64
+	set     func(*jsonInputOutputRatio, float64)
 }{
-	{"total in:out", "total", promptTokens.context},
-	{"cached in:out", "cached", func(t promptTokens) int64 { return t.cacheRead }},
-	{"uncached in:out", "uncached", promptTokens.miss},
+	{"total in:out", "total", promptTokens.context, func(r *jsonInputOutputRatio, v float64) { r.Total = v }},
+	{"cached in:out", "cached", func(t promptTokens) int64 { return t.cacheRead }, func(r *jsonInputOutputRatio, v float64) { r.Cached = v }},
+	{"uncached in:out", "uncached", promptTokens.miss, func(r *jsonInputOutputRatio, v float64) { r.Uncached = v }},
 }
 
 // tokenRatioRows renders the summary's ratio group. A whole total with no output
@@ -584,10 +586,11 @@ func detailRows(u *worktreeUsage, showList bool) [][]string {
 // detailRow projects one model: name, time, billed cost, optional list price,
 // then one cell per token-group column. The name is display text: ANSI
 // sequences and newlines are stripped so a corrupt transcript model label can
-// never inject styling or split the row; the JSON report keeps the raw model
-// identity (see status_json.go).
+// never inject styling, move the cursor, or split the row; the JSON report
+// keeps the raw model identity (see status_json.go).
 func detailRow(name string, m *modelUsage, showList bool) []string {
 	name = ansi.Strip(name)
+	name = stripControlChars(name)
 	name = strings.Join(strings.Fields(name), " ")
 	row := []string{name, modelTimeCell(m), m.cost.billed.cell()}
 	if showList {
@@ -597,6 +600,18 @@ func detailRow(name string, m *modelUsage, showList bool) []string {
 		row = append(row, d.cell(m))
 	}
 	return row
+}
+
+// stripControlChars removes remaining control bytes after ANSI stripping, so a
+// model label cannot move the cursor or overwrite part of its row. JSON keeps
+// the raw identity.
+func stripControlChars(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // modelTimeCell owns the partial-time grammar: a partial total with no readable

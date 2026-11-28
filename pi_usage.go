@@ -4,9 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"time"
 )
 
@@ -36,9 +34,7 @@ type piUsage struct {
 	Cost       *piCost `json:"cost"`
 }
 
-// UnmarshalJSON reads each figure on its own. A typed decode of the whole block
-// fails on the first number this build cannot hold, and with it loses the
-// record's charge, its other counts, and its timestamp (see rawFields).
+// UnmarshalJSON reads each figure on its own (see rawFields for why).
 func (u *piUsage) UnmarshalJSON(b []byte) error {
 	f, err := rawObject(b)
 	if err != nil {
@@ -192,25 +188,7 @@ func derefText(p *string) string {
 // owner scan; the count still lets the caller warn about the loss.
 func piUsageEvents(r *bufio.Reader) (sessionParse, error) {
 	s := piParseState{spawnAt: map[string]time.Time{}, unsupported: map[string]int{}}
-	for {
-		line, oversized, prefix, rerr := sessionRecord(r)
-		err := sessionRecordErr(line, oversized, rerr)
-		s.consume(line, oversized, prefix)
-		if err == io.EOF {
-			return s.result(), nil
-		}
-		if err != nil {
-			if errors.Is(err, io.ErrUnexpectedEOF) {
-				// A killed writer cut the final record mid-line. The completed
-				// records survive; the tail is a record-level loss the caller
-				// taints, instead of dropping the whole session.
-				return s.result(), err
-			}
-			// One error policy: any other read failure drops the session and
-			// taints the total, so a partial result must never read as complete.
-			return sessionParse{}, err
-		}
-	}
+	return runSessionDriver(r, s.consume, s.result)
 }
 
 func (s *piParseState) result() sessionParse {
@@ -447,7 +425,7 @@ func appendPiMessageRecord(events *[]usageEvent, rec *piUsageRecord, at time.Tim
 		provider = rec.Message.Provider
 	}
 	recordSpawnCalls(rec.Message, at, spawnAt)
-	return appendPiMessage(events, rec.Message, rec.ID, at, current, provider, spawnAt), provider
+	return appendPiMessage(events, rec.Message, rec.ID, at, current, provider, spawnAt, rec.Usage), provider
 }
 
 // appendPiUsageRecord bills a top-level usage record (cache warming). It names
@@ -483,15 +461,20 @@ func recordSpawnCalls(msg *piMessage, at time.Time, spawnAt map[string]time.Time
 	}
 }
 
-func appendPiMessage(events *[]usageEvent, msg *piMessage, id string, at time.Time, current, provider string, spawnAt map[string]time.Time) string {
+// appendPiMessage folds a message record in. A message record can carry usage
+// at the record level (a top-level usage key) even when its message body is
+// absent or its per-message usage is nil; billing must not vanish silently, so
+// record-level usage is the fallback.
+func appendPiMessage(events *[]usageEvent, msg *piMessage, id string, at time.Time, current, provider string, spawnAt map[string]time.Time, recordUsage *piUsage) string {
 	if msg == nil {
+		addPiEvent(events, at, id, current, provider, recordUsage)
 		return current
 	}
 	switch msg.Role {
 	case "assistant":
-		return appendPiAssistantMessage(events, msg, id, at, current, provider)
+		return appendPiAssistantMessage(events, msg, id, at, current, provider, recordUsage)
 	case "toolResult":
-		appendPiToolResult(events, msg, id, at, current, provider, spawnAt)
+		appendPiToolResult(events, msg, id, at, current, provider, spawnAt, recordUsage)
 	}
 	return current
 }
@@ -499,7 +482,7 @@ func appendPiMessage(events *[]usageEvent, msg *piMessage, id string, at time.Ti
 // appendPiAssistantMessage bills an assistant message and moves the running
 // model to it. A usage record can omit its model; attribute it to the session's
 // current model instead of losing the attribution to "unknown".
-func appendPiAssistantMessage(events *[]usageEvent, msg *piMessage, id string, at time.Time, current, provider string) string {
+func appendPiAssistantMessage(events *[]usageEvent, msg *piMessage, id string, at time.Time, current, provider string, recordUsage *piUsage) string {
 	model := piMessageModel(msg)
 	if model == "" {
 		model = current
@@ -507,19 +490,27 @@ func appendPiAssistantMessage(events *[]usageEvent, msg *piMessage, id string, a
 	if model != "" {
 		current = model
 	}
-	addPiEvent(events, at, id, model, provider, msg.Usage)
+	usage := msg.Usage
+	if usage == nil {
+		usage = recordUsage
+	}
+	addPiEvent(events, at, id, model, provider, usage)
 	return current
 }
 
 // appendPiToolResult bills a non-spawn tool result. A spawn result is the child
 // agent's only record. Pi may express its cost in the tool-result usage or in
 // details.stats; the two hold the same number, so read one, never both.
-func appendPiToolResult(events *[]usageEvent, msg *piMessage, id string, at time.Time, current, provider string, spawnAt map[string]time.Time) {
+func appendPiToolResult(events *[]usageEvent, msg *piMessage, id string, at time.Time, current, provider string, spawnAt map[string]time.Time, recordUsage *piUsage) {
 	if msg.ToolName == "spawn" {
 		appendPiSpawn(events, at, id, current, provider, msg, spawnAt)
 		return
 	}
-	addPiEvent(events, at, id, current, provider, msg.Usage)
+	usage := msg.Usage
+	if usage == nil {
+		usage = recordUsage
+	}
+	addPiEvent(events, at, id, current, provider, usage)
 }
 
 // piMessageModel prefers the physical model that answered, so a virtual model
@@ -789,8 +780,7 @@ func piCostTag(e usageEvent) string {
 // piInteresting is the cheap pre-filter: only usage records, a spawn child's
 // stats and details, a model change, and an error result can affect cost or
 // model attribution, so the decoder never touches content-heavy lines. isError
-// matters on its own: a failed spawn that reports neither a child nor a cost is
-// still an event (a known zero), and such a record may carry no other key.
+// marks a failed spawn, whose known-zero billing rule lives in piModernSpawnChild.
 var (
 	piStatsKey       = []byte("\"stats\"")
 	piModelChangeKey = []byte("\"model_change\"")

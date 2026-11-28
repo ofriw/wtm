@@ -832,8 +832,8 @@ func pricedEntry(name string, raw json.RawMessage, warn warnSink) (modelRate, bo
 func decodeLitellm(f rawFields) (litellmEntry, catalogFigures) {
 	c := catalogFigures{f: f}
 	var above, aboveBroken tokenRates
-	for i := range aboveFieldKeys {
-		c.above(i, &above, &aboveBroken)
+	for _, f := range aboveFields {
+		c.above(f, &above, &aboveBroken)
 	}
 	return litellmEntry{
 		standard: tokenRates{
@@ -853,52 +853,41 @@ func decodeLitellm(f rawFields) (litellmEntry, catalogFigures) {
 	}, c
 }
 
-// aboveFieldKeys names the long-context catalog keys in slot order. It is the
-// single place the key-to-set mapping lives: the decode drives both the value
-// slot and its broken sibling off the same index.
-var aboveFieldKeys = [...]string{
-	"input_cost_per_token_above_200k_tokens",
-	"output_cost_per_token_above_200k_tokens",
-	"cache_read_input_token_cost_above_200k_tokens",
-	"cache_creation_input_token_cost_above_200k_tokens",
-	"cache_creation_input_token_cost_above_1hr_above_200k_tokens",
+// aboveField is one long-context catalog key plus the tokenRates slot it fills,
+// so the key list and the slot order live in one table. A future key must be
+// wired to a slot here; there is no other place to add one.
+type aboveField struct {
+	key  string
+	slot func(*tokenRates) **float64
 }
 
-// slot returns a pointer to the tokenRates slot at aboveFieldKeys index i.
-func (r *tokenRates) slot(i int) **float64 {
-	switch i {
-	case 0:
-		return &r.input
-	case 1:
-		return &r.output
-	case 2:
-		return &r.cacheRead
-	case 3:
-		return &r.cacheWrite5m
-	case 4:
-		return &r.cacheWrite1h
-	}
-	panic("aboveFieldKeys index out of range")
+// aboveFields is the single long-context key-to-slot table in slot order. The
+// decode drives both the value slot and its broken sibling off the same row.
+var aboveFields = [...]aboveField{
+	{"input_cost_per_token_above_200k_tokens", func(r *tokenRates) **float64 { return &r.input }},
+	{"output_cost_per_token_above_200k_tokens", func(r *tokenRates) **float64 { return &r.output }},
+	{"cache_read_input_token_cost_above_200k_tokens", func(r *tokenRates) **float64 { return &r.cacheRead }},
+	{"cache_creation_input_token_cost_above_200k_tokens", func(r *tokenRates) **float64 { return &r.cacheWrite5m }},
+	{"cache_creation_input_token_cost_above_1hr_above_200k_tokens", func(r *tokenRates) **float64 { return &r.cacheWrite1h }},
 }
 
 // above decodes one stated long-context figure into its slot and marks the
 // sibling broken slot when the figure cannot be decoded: both destinations are
 // set from one decode of the same raw value. An absent or null figure is
 // unstated, so nothing is set.
-func (c *catalogFigures) above(i int, value, broken *tokenRates) {
-	key := aboveFieldKeys[i]
-	raw, ok := c.f.value(key)
+func (c *catalogFigures) above(f aboveField, value, broken *tokenRates) {
+	raw, ok := c.f.value(f.key)
 	if !ok {
 		return
 	}
 	if isJSONNumber(raw) {
 		c.priced = true
 	}
-	if v, ok := c.decodeNumber(raw, key); ok {
-		*value.slot(i) = v
+	if v, ok := c.decodeNumber(raw, f.key); ok {
+		*f.slot(value) = v
 		return
 	}
-	*broken.slot(i) = &brokenAboveMarker
+	*f.slot(broken) = &brokenAboveMarker
 }
 
 // finishEntry classifies a decoded row: prose stays a silent non-model, a
@@ -994,6 +983,12 @@ func loadFromCachePath(path, url string, p *progress, now time.Time) (catalog, e
 	if fetchErr == nil {
 		return c, nil
 	}
+	if errors.Is(fetchErr, context.Canceled) || errors.Is(fetchErr, context.DeadlineExceeded) {
+		// The run context was aborted (cancel or deadline): do not arm a
+		// cooldown or serve a stale fallback; return so the report aborts
+		// promptly and the next run retries the network.
+		return nil, fetchErr
+	}
 	return staleCatalog(path, warn, p, fetchErr, now)
 }
 
@@ -1014,6 +1009,12 @@ func tryFetch(path, url string, p *progress, cacheUnusable bool, warn warnSink, 
 		p.detail(string(catalogFetched))
 		return c, nil
 	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// Run-level abort (cancel or deadline) is not a transport failure:
+		// skipping the cooldown marker keeps the next status run able to
+		// fetch immediately.
+		return nil, err
+	}
 	if markErr := markFetchAttempt(path, err); markErr != nil {
 		warnProgress(p, "rate cooldown marker write failed: %s; the next run may retry the fetch", markErr)
 	}
@@ -1023,9 +1024,9 @@ func tryFetch(path, url string, p *progress, cacheUnusable bool, warn warnSink, 
 // staleCatalog serves the last good catalog when the refresh failed. Serving old
 // prices is a disclosure, not a silent degradation: one persistent warning names
 // the fetch cause and the cache age so the user can judge the numbers. When the
-// cached copy itself fails to parse, both distinct causes are reported once (f6,
-// f15). warn is the run's deduplicated sink, so re-parsing the same cache file
-// cannot repeat corrupt-figure warnings.
+// cached copy itself fails to parse, both distinct causes are reported once.
+// warn is the run's deduplicated sink, so re-parsing the same cache file cannot
+// repeat corrupt-figure warnings.
 func staleCatalog(path string, warn warnSink, p *progress, fetchErr error, now time.Time) (catalog, error) {
 	c, err := parseCatalogFile(path, warn)
 	if err == nil {
@@ -1040,10 +1041,7 @@ func staleCatalog(path string, warn warnSink, p *progress, fetchErr error, now t
 	if !errors.Is(err, os.ErrNotExist) {
 		doWarnSink(warn, fmt.Errorf("%s: %w; refetching", path, err))
 	}
-	if fetchErr != nil {
-		return nil, fetchErr
-	}
-	return nil, err
+	return nil, fetchErr
 }
 
 func fetchCoolingDownAt(path string, now time.Time) (bool, error) {

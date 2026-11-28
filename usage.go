@@ -613,14 +613,23 @@ func (t promptTokens) tier(id tier) int64 {
 	return 0
 }
 
+// satAdd adds with saturation: fold sums must never wrap int64 and flip
+// evidence to absent.
+func satAdd(a, b int64) int64 {
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
+}
+
 // plus folds another count field by field; corruption is sticky across folds.
 func (t promptTokens) plus(o promptTokens) promptTokens {
 	return promptTokens{
-		input: t.input + o.input, output: t.output + o.output,
-		cacheRead:              t.cacheRead + o.cacheRead,
-		cacheWrite5m:           t.cacheWrite5m + o.cacheWrite5m,
-		cacheWrite1h:           t.cacheWrite1h + o.cacheWrite1h,
-		unclassifiedCacheWrite: t.unclassifiedCacheWrite + o.unclassifiedCacheWrite,
+		input: satAdd(t.input, o.input), output: satAdd(t.output, o.output),
+		cacheRead:              satAdd(t.cacheRead, o.cacheRead),
+		cacheWrite5m:           satAdd(t.cacheWrite5m, o.cacheWrite5m),
+		cacheWrite1h:           satAdd(t.cacheWrite1h, o.cacheWrite1h),
+		unclassifiedCacheWrite: satAdd(t.unclassifiedCacheWrite, o.unclassifiedCacheWrite),
 		corrupt:                t.corrupt | o.corrupt,
 	}
 }

@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
-	"io"
 	"sort"
 )
 
@@ -58,9 +56,7 @@ type claudeUsage struct {
 	ServerToolUse *claudeServerToolUse `json:"server_tool_use"`
 }
 
-// UnmarshalJSON reads each figure on its own. A typed decode of the whole block
-// fails on the first number this build cannot hold, and with it loses every
-// readable count of the turn (see rawFields).
+// UnmarshalJSON reads each figure on its own (see rawFields for why).
 func (u *claudeUsage) UnmarshalJSON(b []byte) error {
 	f, err := rawObject(b)
 	if err != nil {
@@ -109,26 +105,10 @@ func (s *claudeServerToolUse) UnmarshalJSON(b []byte) error {
 // activity. Unreadable records are counted so the caller can warn.
 func claudeUsageEvents(r *bufio.Reader) (sessionParse, error) {
 	var out sessionParse
-	for {
-		line, oversized, prefix, rerr := sessionRecord(r)
-		err := sessionRecordErr(line, oversized, rerr)
-		out.consumeClaudeLine(line, oversized, prefix)
-		if err == io.EOF {
-			out.sortClaude()
-			return out, nil
-		}
-		if err != nil {
-			if errors.Is(err, io.ErrUnexpectedEOF) {
-				// A killed writer cut the final record mid-line. The completed
-				// records survive; the tail is a record-level loss the caller
-				// taints, instead of dropping the whole session.
-				return out, err
-			}
-			// One error policy: any other read failure drops the session and
-			// taints the total, so a partial result must never read as complete.
-			return sessionParse{}, err
-		}
-	}
+	return runSessionDriver(r, out.consumeClaudeLine, func() sessionParse {
+		out.sortClaude()
+		return out
+	})
 }
 
 func (p *sessionParse) sortClaude() {
@@ -221,7 +201,7 @@ func (p *sessionParse) consumeClaudeActivity(line []byte) {
 }
 
 func sortUsageEvents(events []usageEvent) {
-	sort.Slice(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
+	sort.SliceStable(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
 }
 
 // claudeSyntheticModel is the error record's pseudo-model. It bills nothing and
@@ -253,9 +233,19 @@ func claudeAnswer(model string) string {
 // message id and request id so the worktree-level dedupe can collapse streaming
 // repeats and cross-file repeats to one billed turn.
 func claudeEvent(rec *claudeUsageRecord, dropped *int) (usageEvent, bool) {
-	msg := rec.Message
-	if rec.Type != "assistant" || msg == nil || msg.Usage == nil || msg.Model == claudeSyntheticModel {
+	if rec.Type != "assistant" {
 		return usageEvent{}, false
+	}
+	msg := rec.Message
+	if msg == nil || msg.Usage == nil {
+		// The caller routed this record for billing (hasUsage), so a payload
+		// with no usable message usage must not vanish in silence: taint the
+		// total so a partial sum never reads as complete.
+		*dropped++
+		return usageEvent{}, false
+	}
+	if msg.Model == claudeSyntheticModel {
+		return usageEvent{}, false // the synthetic error record bills nothing
 	}
 	at, ok := transcriptTimestamp(rec.Timestamp)
 	if !ok {
