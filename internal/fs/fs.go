@@ -2,6 +2,7 @@ package fs
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -235,6 +236,10 @@ func writeAtomicContents(f *os.File, data []byte, mode os.FileMode) error {
 	return f.Chmod(mode)
 }
 
+// ErrLockBusy is returned by TryAcquireFileLock when another process holds the
+// lock.
+var ErrLockBusy = errors.New("file lock is held by another process")
+
 // WithFileLock runs fn while holding an exclusive OS lock on lockPath, blocking
 // until it is available. The lock file is created once and never removed or
 // renamed: the OS releases the lock on process exit, so a crash cannot leave a
@@ -251,7 +256,7 @@ func WithFileLock(lockPath string, fn func() error) error {
 	if err := lockFile(f); err != nil {
 		return err
 	}
-	defer func() { _ = UnlockFile(f) }()
+	defer func() { _ = unlockFile(f) }()
 	return fn()
 }
 

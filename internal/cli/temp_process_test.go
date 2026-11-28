@@ -308,30 +308,49 @@ func checkTempProcessSnapshots() error {
 	return nil
 }
 
-func checkTempProcessLock() (err error) {
+// TestFileLockHandleContention pins the exported lock handle contract: acquire
+// blocks until free, TryAcquire reports contention as ErrLockBusy, and Release
+// returns the lock so another acquirer can take it.
+func TestFileLockHandleContention(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "l.lock")
+	a, err := fs.AcquireFileLock(path)
+	var _ *fs.FileLock = a // pin the exported handle type
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.TryAcquireFileLock(path); !errors.Is(err, fs.ErrLockBusy) {
+		t.Fatalf("TryAcquireFileLock under holder = %v, want ErrLockBusy", err)
+	}
+	if err := a.Release(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := fs.TryAcquireFileLock(path)
+	if err != nil {
+		t.Fatalf("TryAcquireFileLock after release: %v", err)
+	}
+	if err := b.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkTempProcessLock() error {
 	path, err := temp.LockPath()
 	if err != nil {
 		return err
 	}
-	file, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, file.Close()) }()
-	if err := requireTempLockContention(file); err != nil {
+	if err := requireTempLockContention(path); err != nil {
 		return err
 	}
 	fmt.Println("contended")
 	return nil
 }
 
-func requireTempLockContention(file *os.File) error {
-	err := nonblockingTempFileLock(file)
+func requireTempLockContention(path string) error {
+	_, err := fs.TryAcquireFileLock(path)
 	if err == nil {
-		unlockErr := fs.UnlockFile(file)
-		return fmt.Errorf("acquired registry lock while holder retained it (unlock error: %v)", unlockErr)
+		return fmt.Errorf("acquired registry lock while holder retained it")
 	}
-	if !isTempLockContention(err) {
+	if !errors.Is(err, fs.ErrLockBusy) {
 		return fmt.Errorf("nonblocking registry lock attempt: %w", err)
 	}
 	return nil
