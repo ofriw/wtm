@@ -84,12 +84,12 @@ jobs:
         env:
           WTM_REQUIRE_BTIME: "1"
         run: |
-          # Fail when the -run pattern matches no tests: a rename would retire
-          # the btime proof silently (go test exits 0 with "[no tests to run]").
-          if [ -z "$(go test -list 'TestFileBirthTime|TestWorktreeCreated' .)" ]; then
-            echo "btime guard: -run pattern matched no tests; refusing to run" >&2
-            exit 1
-          fi
+          # go test -list prints "ok <pkg>" and exits 0 even when nothing
+          # matches, so a -z check never fires. Check each test by exact name:
+          # a rename retires the btime proof loudly instead of silently.
+          for t in TestFileBirthTime TestWorktreeCreated; do
+            go test -list "^${t}$" . | grep -qx "${t}" || { echo "btime guard: ${t} missing" >&2; exit 1; }
+          done
           go test -count=1 -run 'TestFileBirthTime|TestWorktreeCreated' .
 
   # Tier 2: container golden filesystem diff, authoritative for integration.

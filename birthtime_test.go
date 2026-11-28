@@ -32,7 +32,12 @@ func TestWorktreeCreatedIgnoresGitMtime(t *testing.T) {
 	if got.Equal(stamp) {
 		t.Fatalf("worktreeCreated read the .git mtime %v", stamp)
 	}
-	if birth := fileBirthTime(gitDir); !birth.IsZero() && !got.Equal(birth) {
+	if birth := fileBirthTime(gitDir); birth.IsZero() {
+		if os.Getenv(requireBtimeEnv) != "" {
+			t.Fatal("filesystem records no birth time, but WTM_REQUIRE_BTIME requires one")
+		}
+		t.Skip("filesystem records no birth time")
+	} else if !got.Equal(birth) {
 		t.Errorf("worktreeCreated = %v, want the birth time %v", got, birth)
 	}
 }
