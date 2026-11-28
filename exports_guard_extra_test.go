@@ -67,3 +67,14 @@ func TestReferencedOutsideRegression(t *testing.T) {
 		t.Error("local shadowing counted as a cross-package reference")
 	}
 }
+
+// TestShadowedImportNameNotPackageRef pins that a top-level local var that
+// shadows an import name stops the selector from counting as a package ref,
+// even when the import of the declaring directory resolves.
+func TestShadowedImportNameNotPackageRef(t *testing.T) {
+	shadowSrc := mustParse(t, "package cli\nimport \"wtm/internal/core\"\nvar core = struct{ Bar int }{}\nvar x = core.Bar\n")
+	shadowProd := parsedFile{dir: "/repo/internal/cli", ast: shadowSrc, imports: resolveImports(shadowSrc, "/src"), locals: collectLocals(shadowSrc)}
+	if !isOrphan("Bar", declDir, []parsedFile{shadowProd}) {
+		t.Error("top-level local var shadowing an import name counted as a package reference")
+	}
+}

@@ -31,6 +31,10 @@ var discoveryAgents = []string{"pi", "claude"}
 // nonHarnessCapabilities are registered integrations that are not harnesses.
 var nonHarnessCapabilities = map[string]bool{"chunkhound": true, "mcp": true}
 
+// MCPDiscovery pins the config-inventory seam cli wiring assigns at startup;
+// keeping the seam exercised by a cli test keeps the allowlist entry honest.
+var _ core.MCPDiscovery = harness.MCPConfigs
+
 func TestDiscoveryAgentsMatchCapabilities(t *testing.T) {
 	registered := map[string]bool{}
 	for _, c := range core.Capabilities() {
