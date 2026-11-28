@@ -89,8 +89,8 @@ func assertWithin(t *testing.T, widths []int, budget int) {
 }
 
 func widthsFor(headers []string, rows [][]string, budget int) []int {
-	priority, floors := ShrinkPolicy(headers)
-	return ui.ColumnWidths(headers, rows, budget, priority, floors)
+	policy := NewGridPolicy(headers)
+	return ui.ColumnWidths(headers, rows, budget, policy.Priority, policy.Floors)
 }
 
 // TestCellTemp pins the shared TEMP cell: a dash for permanent worktrees, the

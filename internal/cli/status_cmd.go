@@ -49,8 +49,7 @@ func cmdStatus(g *globals, args []string, hooks core.Hooks) error {
 func printStatusTable(cols []core.WorktreeColumn, wts []core.Worktree, now time.Time, ttl time.Duration, colorMode string) {
 	ctx := core.ColumnContext{Now: now, TTL: ttl}
 	headers := core.ColumnHeaders(cols)
-	priority, floors := core.ShrinkPolicy(headers)
-	ui.PrintTable(headers, core.GridRows(cols, wts, ctx), colorMode, statusCell, core.ColumnRightAligns(cols), priority, floors, core.IsCapabilityHeader)
+	ui.PrintTable(headers, core.GridRows(cols, wts, ctx), colorMode, statusCell, core.ColumnRightAligns(cols), core.NewGridPolicy(headers))
 }
 
 // ---------- domain stylings ----------

@@ -195,13 +195,18 @@ func GridRows(cols []WorktreeColumn, wts []Worktree, ctx ColumnContext) [][]stri
 	return rows
 }
 
-// ShrinkPolicy computes the shrink policy for the given headers from the
-// column registry: elision priority and floors. ui's generic sizing needs no
-// knowledge of the registry; the capability-header identifier that discloses
-// dropped --wide columns is core.IsCapabilityHeader.
-func ShrinkPolicy(headers []string) ([]string, map[string]int) {
+// NewGridPolicy computes the shrink policy for the given headers from the
+// column registry: elision priority, floors, and the capability-header
+// predicate. ui's generic sizing needs no knowledge of the registry; the
+// capability-header identifier that discloses dropped --wide columns is
+// IsCapabilityHeader.
+func NewGridPolicy(headers []string) ui.GridPolicy {
 	reg := ColumnRegistry()
-	return dynamicShrinkPriority(headers, reg), dynamicShrinkFloor(headers, reg)
+	return ui.GridPolicy{
+		Priority:         dynamicShrinkPriority(headers, reg),
+		Floors:           dynamicShrinkFloor(headers, reg),
+		CapabilityHeader: IsCapabilityHeader,
+	}
 }
 
 // statusColumnsFor picks the schema: the compact grouped default, or the

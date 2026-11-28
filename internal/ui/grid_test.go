@@ -131,7 +131,7 @@ func TestPrintTableRightAlign(t *testing.T) {
 	t.Setenv("COLUMNS", "0")
 	headers := []string{"A", "BB"}
 	rows := [][]string{{"x", "y"}}
-	out := testutil.CaptureStdout(t, func() { PrintTable(headers, rows, ColorNever, nil, []string{"BB"}, nil, nil, nil) })
+	out := testutil.CaptureStdout(t, func() { PrintTable(headers, rows, ColorNever, nil, []string{"BB"}, GridPolicy{}) })
 	want := "A  BB\nx   y\n"
 	if out != want {
 		t.Fatalf("right-aligned table = %q, want %q", out, want)

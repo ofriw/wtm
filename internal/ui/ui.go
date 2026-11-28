@@ -53,16 +53,27 @@ const (
 // calls it only when the profile supports styling, so it may always decorate.
 type cellRenderer func(header, value string) string
 
+// GridPolicy carries the shrink policy a grid needs beyond its own rows:
+// elision priority and floors from the caller's column registry, plus the
+// predicate that identifies capability headers so dropped --wide columns can
+// be disclosed. It is built by core.NewGridPolicy; consumers must pass one,
+// so omitting the width-fitting inputs is a compile error, not silent
+// degradation.
+type GridPolicy struct {
+	Priority         []string
+	Floors           map[string]int
+	CapabilityHeader func(string) bool
+}
+
 // PrintTable renders a width-fitted table. Deterministic output is a test
 // contract: the budget comes from COLUMNS or a TTY only, and cells are sized
 // and middle-elided here — never by the table resizer, whose end-elision and
 // shrink-column choice we cannot observe or pin. Styles are applied only when
 // the resolved profile supports them; NoTTY output stays pure ASCII so pipes,
-// --json and goldens remain byte-stable. priority/floors carry the shrink
-// policy from the caller's column registry; isCapHeader identifies capability
-// headers so dropped --wide columns can be disclosed.
-func PrintTable(headers []string, rows [][]string, colorMode string, render cellRenderer, rightAlign []string, priority []string, floors map[string]int, isCapHeader func(string) bool) {
-	headers, rows, widths, aligns := SizedGrid(headers, rows, WidthBudget(), rightAlign, priority, floors, isCapHeader)
+// --json and goldens remain byte-stable. policy carries the shrink policy from
+// the caller's column registry; see SizedGrid.
+func PrintTable(headers []string, rows [][]string, colorMode string, render cellRenderer, rightAlign []string, policy GridPolicy) {
+	headers, rows, widths, aligns := SizedGrid(headers, rows, WidthBudget(), rightAlign, policy)
 	profile := resolveColorProfile(colorMode)
 	if profile > colorprofile.NoTTY && render != nil {
 		headers, rows = RenderCells(headers, rows, render)
@@ -74,10 +85,11 @@ func PrintTable(headers []string, rows [][]string, colorMode string, render cell
 // SizedGrid resolves a grid against a width budget: columns are sized, then
 // middle-elided, and alignment is resolved from the plain headers before
 // elision. The returned widths and aligns stay index-aligned to the kept
-// headers and rows.
-func SizedGrid(headers []string, rows [][]string, budget int, rightAlign []string, priority []string, floors map[string]int, isCapHeader func(string) bool) ([]string, [][]string, []int, []lipgloss.Position) {
-	widths := ColumnWidths(headers, rows, budget, priority, floors)
-	headers, rows, widths = dropZeroColumns(headers, rows, widths, isCapHeader)
+// headers and rows. policy is required and carries the shrink priority, floors,
+// and the capability-header predicate (see GridPolicy).
+func SizedGrid(headers []string, rows [][]string, budget int, rightAlign []string, policy GridPolicy) ([]string, [][]string, []int, []lipgloss.Position) {
+	widths := ColumnWidths(headers, rows, budget, policy.Priority, policy.Floors)
+	headers, rows, widths = dropZeroColumns(headers, rows, widths, policy.CapabilityHeader)
 	aligns := ColumnAligns(headers, rightAlign)
 	headers, rows = elideCells(headers, rows, widths)
 	return headers, rows, widths, aligns

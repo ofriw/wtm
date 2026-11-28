@@ -185,7 +185,7 @@ func TestPrintTable(t *testing.T) {
 	t.Setenv("COLUMNS", "0") // non-TTY goldens must stay at natural widths
 	headers := []string{"A", "BB"}
 	rows := [][]string{{"x", "y"}, {"long", "z"}}
-	out := CaptureStdout(t, func() { ui.PrintTable(headers, rows, ui.ColorAuto, nil, nil, nil, nil, nil) })
+	out := CaptureStdout(t, func() { ui.PrintTable(headers, rows, ui.ColorAuto, nil, nil, ui.GridPolicy{}) })
 	want := "A     BB\nx     y\nlong  z\n"
 	if out != want {
 		t.Fatalf("printTable = %q, want %q", out, want)
@@ -202,7 +202,7 @@ func TestStatusHeadersSSOT(t *testing.T) {
 	}
 	// The elision order production derives for this table is a contract, not an
 	// implementation detail.
-	priority, _ := core.ShrinkPolicy(want)
+	priority := core.NewGridPolicy(want).Priority
 	wantShrink := []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED", "INTEGRATIONS"}
 	if !slices.Equal(priority, wantShrink) {
 		t.Errorf("shrink priority = %v, want %v", priority, wantShrink)
@@ -256,7 +256,7 @@ func TestWideColumnsShrinkable(t *testing.T) {
 	}
 	// Dynamic shrink priority must include capability columns when present.
 	headers := core.ColumnHeaders(wideCols)
-	priority, _ := core.ShrinkPolicy(headers)
+	priority := core.NewGridPolicy(headers).Priority
 	for _, c := range core.Capabilities() {
 		if !slices.Contains(priority, strings.ToUpper(c.ID)) {
 			t.Errorf("capability column %q not in dynamic shrink priority", strings.ToUpper(c.ID))
@@ -270,8 +270,8 @@ func TestRenderGridMatchesPrintTable(t *testing.T) {
 	t.Setenv("COLUMNS", "0")
 	headers := []string{"A", "BB", "CCC"}
 	rows := [][]string{{"x", "yy", "zzz"}, {"longer", "y", "z"}}
-	out := CaptureStdout(t, func() { ui.PrintTable(headers, rows, ui.ColorNever, nil, []string{"CCC"}, nil, nil, nil) })
-	h, r, widths, aligns := ui.SizedGrid(headers, rows, ui.WidthBudget(), []string{"CCC"}, nil, nil, nil)
+	out := CaptureStdout(t, func() { ui.PrintTable(headers, rows, ui.ColorNever, nil, []string{"CCC"}, ui.GridPolicy{}) })
+	h, r, widths, aligns := ui.SizedGrid(headers, rows, ui.WidthBudget(), []string{"CCC"}, ui.GridPolicy{})
 	header, body := ui.RenderGrid(h, r, widths, aligns)
 	if got := ui.GridString(header, body) + "\n"; got != out {
 		t.Fatalf("renderGrid = %q, printTable = %q", got, out)

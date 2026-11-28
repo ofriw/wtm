@@ -225,8 +225,8 @@ func TestGCPickerColumnBudget(t *testing.T) {
 	rows := core.GridRows(core.PickerColumns(), candidates, core.ColumnContext{Now: now, TTL: ttl})
 	for _, cols := range []int{200, 120, 80, 60, 44} {
 		t.Setenv("COLUMNS", strconv.Itoa(cols))
-		priority, floors := core.ShrinkPolicy(headers)
-		widths := ui.ColumnWidths(headers, rows, pickerBudget(), priority, floors)
+		policy := core.NewGridPolicy(headers)
+		widths := ui.ColumnWidths(headers, rows, pickerBudget(), policy.Priority, policy.Floors)
 		if got := ui.LineWidth(widths) + ui.PickerChromeWidth + ui.PickerOptionPrefixWidth; got > cols {
 			t.Errorf("picker line = %d cells at %d cols, want <= %d", got, cols, cols)
 		}
