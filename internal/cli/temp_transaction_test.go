@@ -22,7 +22,7 @@ func TestRemoveTempWorktreeRejectsChangedRecord(t *testing.T) {
 	_, path, w := identityCheckout(t)
 	seedTempRecord(t, path, w.Branch, "1h", TempNow)
 	want := mustReadTempStore(t)
-	if removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity); removed || err == nil {
+	if removed, _, err := temp.RemoveTempWorktreeIf(temp.CheckoutIdentity{Path: w.Path, Branch: w.Branch, Identity: w.TempIdentity}, false, TempNow, harness.FreshWorktreeActivity); removed || err == nil {
 		t.Fatalf("stale removal = %v, %v", removed, err)
 	}
 	assertTempStore(t, want)
@@ -35,7 +35,7 @@ func TestRemoveTempWorktreeFailurePreservesRecord(t *testing.T) {
 	repo, path, w := identityCheckout(t)
 	MustGit(t, repo, "worktree", "lock", path)
 	want := mustReadTempStore(t)
-	if removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity); removed || err == nil {
+	if removed, _, err := temp.RemoveTempWorktreeIf(temp.CheckoutIdentity{Path: w.Path, Branch: w.Branch, Identity: w.TempIdentity}, false, TempNow, harness.FreshWorktreeActivity); removed || err == nil {
 		t.Fatalf("locked removal = %v, %v", removed, err)
 	}
 	assertTempStore(t, want)
@@ -47,7 +47,7 @@ func TestRemoveTempWorktreeFailurePreservesRecord(t *testing.T) {
 func TestRemoveTempWorktreeRegistryWriteFailure(t *testing.T) {
 	_, path, w := identityCheckout(t)
 	restrictRegistryWrites(t)
-	removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
+	removed, _, err := temp.RemoveTempWorktreeIf(temp.CheckoutIdentity{Path: w.Path, Branch: w.Branch, Identity: w.TempIdentity}, false, TempNow, harness.FreshWorktreeActivity)
 	if !removed || err == nil {
 		t.Fatalf("write-failed removal = %v, %v", removed, err)
 	}
@@ -128,7 +128,7 @@ func assertTempPromotion(t *testing.T, path string, want bool) {
 func assertTempRemoval(t *testing.T, w core.Worktree, want bool) {
 	t.Helper()
 	before := mustReadTempStore(t)
-	removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
+	removed, _, err := temp.RemoveTempWorktreeIf(temp.CheckoutIdentity{Path: w.Path, Branch: w.Branch, Identity: w.TempIdentity}, false, TempNow, harness.FreshWorktreeActivity)
 	if removed != want || (want && err != nil) {
 		t.Fatalf("removal = %v, %v; want %v", removed, err, want)
 	}
@@ -175,7 +175,7 @@ func TestTempRemovalConcurrentPromotion(t *testing.T) {
 	promotion := make(chan tempRemovalOutcome, 1)
 	runTempContenders(t,
 		func() {
-			ok, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
+			ok, _, err := temp.RemoveTempWorktreeIf(temp.CheckoutIdentity{Path: w.Path, Branch: w.Branch, Identity: w.TempIdentity}, false, TempNow, harness.FreshWorktreeActivity)
 			removal <- tempRemovalOutcome{ok, err}
 		},
 		func() { ok, err := temp.PromoteTempRecord(w.Path); promotion <- tempRemovalOutcome{ok, err} },
@@ -201,7 +201,7 @@ func TestTempRemovalConcurrentRegistration(t *testing.T) {
 	registration := make(chan error, 1)
 	runTempContenders(t,
 		func() {
-			ok, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
+			ok, _, err := temp.RemoveTempWorktreeIf(temp.CheckoutIdentity{Path: w.Path, Branch: w.Branch, Identity: w.TempIdentity}, false, TempNow, harness.FreshWorktreeActivity)
 			removal <- tempRemovalOutcome{ok, err}
 		},
 		func() {
@@ -332,7 +332,7 @@ func TestReconcileDuringRemove(t *testing.T) {
 	holder.expect(t, "locked")
 	removeDone := make(chan tempRemovalOutcome, 1)
 	startContender(func() {
-		removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
+		removed, _, err := temp.RemoveTempWorktreeIf(temp.CheckoutIdentity{Path: w.Path, Branch: w.Branch, Identity: w.TempIdentity}, false, TempNow, harness.FreshWorktreeActivity)
 		removeDone <- tempRemovalOutcome{removed, err}
 	})
 	assertTempProcessContention(t, w.Path)

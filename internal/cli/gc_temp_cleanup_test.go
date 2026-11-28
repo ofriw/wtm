@@ -60,7 +60,7 @@ func assertTempCleanupSucceeded(t *testing.T, repo string, w core.Worktree, res 
 
 func TestGCTempPruneFailureRetainsRecoveryBranch(t *testing.T) {
 	repo, _, w := identityCheckout(t)
-	removed, _, err := temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, false, TempNow, harness.FreshWorktreeActivity)
+	removed, _, err := temp.RemoveTempWorktreeIf(temp.CheckoutIdentity{Path: w.Path, Branch: w.Branch, Identity: w.TempIdentity}, false, TempNow, harness.FreshWorktreeActivity)
 	if err != nil || !removed {
 		t.Fatalf("remove checkout: removed=%v, error=%v", removed, err)
 	}

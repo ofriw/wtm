@@ -77,7 +77,7 @@ func verifyTempWorktree(w core.Worktree) error {
 	if err != nil {
 		return err
 	}
-	return temp.VerifyTempSnapshot(store, w.Path, w.Branch, w.TempIdentity)
+	return temp.VerifyTempSnapshot(store, temp.CheckoutIdentity{Path: w.Path, Branch: w.Branch, Identity: w.TempIdentity})
 }
 
 func TestParseTTL(t *testing.T) {

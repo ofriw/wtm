@@ -509,7 +509,7 @@ func removeVerifiedWorktree(root string, w core.Worktree, idleOnly bool, now tim
 				return false, nil, err
 			}
 		}
-		return temp.RemoveTempWorktreeIf(w.Path, w.Branch, w.TempIdentity, idleOnly, now, harness.FreshWorktreeActivity)
+		return temp.RemoveTempWorktreeIf(temp.CheckoutIdentity{Path: w.Path, Branch: w.Branch, Identity: w.TempIdentity}, idleOnly, now, harness.FreshWorktreeActivity)
 	}
 	removed, err = temp.RemovePermanentWorktree(root, w.Path)
 	return removed, nil, err

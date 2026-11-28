@@ -37,6 +37,15 @@ type Record struct {
 	Identity  string    `json:"identity"`
 }
 
+// CheckoutIdentity is the observed identity of a temp checkout: its path,
+// branch and stored token. It is passed as one value so callers cannot swap
+// two adjacent strings at the destructive removal boundary.
+type CheckoutIdentity struct {
+	Path     string
+	Branch   string
+	Identity string
+}
+
 // Store maps a canonical checkout path to its record.
 type Store map[string]Record
 
@@ -332,15 +341,15 @@ func verifyTempBranch(path, expected string) error {
 
 // VerifyTempSnapshot verifies a store snapshot against the expected identity and
 // branch, returning ErrTempMetadataChanged or ErrTempPromoted on drift.
-func VerifyTempSnapshot(store Store, path, branch, identity string) error {
-	rec, ok := store[path]
+func VerifyTempSnapshot(store Store, id CheckoutIdentity) error {
+	rec, ok := store[id.Path]
 	if !ok {
-		return fmt.Errorf("%w: %s", ErrTempPromoted, path)
+		return fmt.Errorf("%w: %s", ErrTempPromoted, id.Path)
 	}
-	if rec.Identity != identity || rec.Branch != branch {
-		return fmt.Errorf("%w: identity or branch changed for %s", ErrTempMetadataChanged, path)
+	if rec.Identity != id.Identity || rec.Branch != id.Branch {
+		return fmt.Errorf("%w: identity or branch changed for %s", ErrTempMetadataChanged, id.Path)
 	}
-	return VerifyTempIdentity(path, rec)
+	return VerifyTempIdentity(id.Path, rec)
 }
 
 var (
@@ -385,29 +394,29 @@ func VerifyTempIdle(store Store, path string, now time.Time, fresh activityFn) (
 // idle verification + checkout removal sequence.  Verification refreshes
 // external state (Git activity, agent sessions) and removal runs a blocking
 // git command; callers should not expect the lock to be short-lived.
-func RemoveTempWorktreeIf(path, branch, identity string, idleOnly bool, now time.Time, fresh activityFn) (removed bool, stale []string, err error) {
+func RemoveTempWorktreeIf(id CheckoutIdentity, idleOnly bool, now time.Time, fresh activityFn) (removed bool, stale []string, err error) {
 	err = withLockedTempStore(func(store Store, registry string) error {
-		stale, err = verifyTempRemoval(store, path, branch, identity, idleOnly, now, fresh)
+		stale, err = verifyTempRemoval(store, id, idleOnly, now, fresh)
 		if err != nil {
 			return err
 		}
-		if err := removeTempCheckout(path); err != nil {
+		if err := removeTempCheckout(id.Path); err != nil {
 			return err
 		}
 		removed = true
-		return persistTempRemoval(store, registry, path)
+		return persistTempRemoval(store, registry, id.Path)
 	})
 	return removed, stale, err
 }
 
-func verifyTempRemoval(store Store, path, branch, identity string, idleOnly bool, now time.Time, fresh activityFn) ([]string, error) {
+func verifyTempRemoval(store Store, id CheckoutIdentity, idleOnly bool, now time.Time, fresh activityFn) ([]string, error) {
 	// branch/identity come from the observed checkout (the inventory record);
 	// the stored record alone cannot prove the checkout is the same one.
-	if err := VerifyTempSnapshot(store, path, branch, identity); err != nil {
+	if err := VerifyTempSnapshot(store, id); err != nil {
 		return nil, err
 	}
 	if idleOnly {
-		return VerifyTempIdle(store, path, now, fresh)
+		return VerifyTempIdle(store, id.Path, now, fresh)
 	}
 	return nil, nil
 }

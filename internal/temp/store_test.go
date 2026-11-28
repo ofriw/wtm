@@ -173,7 +173,7 @@ func TestRemoveTempWorktreeIfNilProbeLeavesRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	removed, _, err := RemoveTempWorktreeIf(key, rec.Branch, rec.Identity, true, TempTestTime, nil)
+	removed, _, err := RemoveTempWorktreeIf(CheckoutIdentity{Path: key, Branch: rec.Branch, Identity: rec.Identity}, true, TempTestTime, nil)
 	if removed || err == nil {
 		t.Fatalf("nil probe removal = %v, %v; want (false, error)", removed, err)
 	}
