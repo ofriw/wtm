@@ -268,10 +268,13 @@ func TestTempStoreReaderSnapshotsWhileWriterHoldsLock(t *testing.T) {
 	}()
 	select {
 	case <-snapshotsOk:
+		close(readerDone)
 	case <-time.After(15 * time.Second):
+		// Signal the writer before failing so it cannot keep logging after this
+		// test's goroutine has finished.
+		close(readerDone)
 		t.Fatal("reader blocked on the exclusive registry lock")
 	}
-	close(readerDone)
 	wg.Wait()
 
 	final, err := ReadTempStoreUnlocked()
