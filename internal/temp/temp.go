@@ -244,11 +244,27 @@ func withLockedTempStore(fn func(Store, string) error) error {
 }
 
 func writeTempStore(path string, store Store) error {
+	if err := validateStore(store); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
 		return err
 	}
 	return fs.WriteFileAtomic(path, append(data, '\n'), 0o600)
+}
+
+// validateStore re-runs record validation over the whole map before persist, so
+// every mutation path (AddTempRecord, removal, WithLockedTempStore,
+// ReconcileTempStore) shares the same guard regardless of how the caller
+// mutated the store.
+func validateStore(store Store) error {
+	for path, rec := range store {
+		if err := validateTempRecord(rec); err != nil {
+			return fmt.Errorf("record for %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // WithLockedTempStore runs fn under the exclusive registry lock and persists
