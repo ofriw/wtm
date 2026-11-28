@@ -91,34 +91,11 @@ const (
 // so a non-value recedes with faint everywhere.
 func secondaryValue(v string) bool { return v == dashValue || v == unknownValue }
 
-// statusCellStyle maps a status-table cell to its style. Basic ANSI colors are
-// deliberate: the terminal theme owns the palette, and every profile (16/256/
-// truecolor/NO_COLOR) degrades cleanly. UNUSED is Yellow, not Red: it is the
-// gc candidate, not an error.
-// columnStyleFor resolves a header's style key straight from the registry, so
-// presentation keys off the column definition — never a second header→style
-// table that could drift.
-func columnStyleFor(header string) colStyle {
-	if c, ok := columnRegistry()[header]; ok {
-		return c.style
-	}
-	return stylePlain
-}
-
-func statusCellStyle(header, value string) lipgloss.Style {
-	if style, ok := statusColumnStyle(columnStyleFor(header), value); ok {
-		return style
-	}
-	// Capability columns only appear in the opt-in --wide view.
-	if isCapabilityHeader(header) {
-		return capabilityCellStyle(value)
-	}
-	return lipgloss.NewStyle()
-}
-
-// statusColumnStyle maps the fixed status columns by their style key. The ok
-// result is false when the style has no rule, so the caller can fall through to
-// the capability columns.
+// statusColumnStyle maps the fixed status columns by their style key. Basic
+// ANSI colors are deliberate: every profile degrades cleanly, and UNUSED is
+// Yellow, not Red, because it is a gc candidate, not an error. The ok result
+// is false when the style has no rule, so the caller can fall through to the
+// capability columns.
 func statusColumnStyle(style colStyle, value string) (lipgloss.Style, bool) {
 	switch style {
 	case styleStatus:
@@ -216,12 +193,6 @@ func statusCellRenderer(styles map[string]worktreeColumn) cellRenderer {
 		}
 		return value
 	}
-}
-
-// statusCell renders one plain status cell with its color, building the style
-// lookup per call; production uses statusCellRenderer with a prebuilt lookup.
-func statusCell(header, value string) string {
-	return statusCellRenderer(columnRegistry())(header, value)
 }
 
 // legendStyle is the one treatment for the explanatory lines under a table:
@@ -325,7 +296,7 @@ func fitKeyValues(widths []int, budget int) []int {
 // styleKeyValues title-styles the first titleRows labels and faints the
 // remaining ones. Labels identify data; values are data, so a value stays
 // plain. A non-value ("-"/"unknown") recedes with faint, matching the table
-// cells (see statusCellStyle's COST case).
+// cells (see secondaryColumnStyle's COST case).
 func styleKeyValues(rows [][]string, titleRows int) [][]string {
 	out := make([][]string, len(rows))
 	for i, r := range rows {
