@@ -1,9 +1,6 @@
 package main
 
-import (
-	"os"
-	"time"
-)
+import "time"
 
 // status.go — the status command entry point and usage orchestration. The
 // table, detail block and JSON contract live in status_table.go,
@@ -89,70 +86,6 @@ func parseStatusFlags(g *globals, args []string) (bool, error) {
 		return false, usagef("status: --wide has no effect with --json (JSON already reports all integrations)")
 	}
 	return *wide, nil
-}
-
-// nowFunc is the clock seam. Production reads the wall clock; the container
-// harness pins WTM_NOW so every clock read is deterministic in goldens: status
-// ages, worktreeLastUsed and the gc TTL decision all draw from this one seam.
-// A malformed value is a test-setup error, so warnNowEnv discloses it once
-// before any renderer starts: a raw warning inside the frame is erased. As a
-// package variable it is also the injection seam that pins the one-clock-per-run
-// contract.
-var nowFunc = func() time.Time {
-	if t, ok := parseNowEnv(); ok {
-		return t
-	}
-	return time.Now()
-}
-
-// nowEnv is the WTM_NOW clock seam. The container test suite pins it so
-// worktree ages and the gc TTL boundary are byte-stable; production never sets
-// it.
-const nowEnv = "WTM_NOW"
-
-// parseNowEnv parses the WTM_NOW seam. An absent or malformed value reports
-// ok=false, so nowFunc falls back to the wall clock.
-func parseNowEnv() (time.Time, bool) {
-	return parseRFC3339(os.Getenv(nowEnv))
-}
-
-// warnNowEnv runs at dispatch, before any subcommand can open a renderer.
-func warnNowEnv() {
-	raw := os.Getenv(nowEnv)
-	if raw == "" {
-		return
-	}
-	if _, ok := parseNowEnv(); !ok {
-		warnf("WTM_NOW %q is not RFC3339: using the wall clock", raw)
-	}
-}
-
-// createdAtEnv is the WTM_CREATED_AT test seam. Fixtures cannot seed a
-// filesystem birth time, so the scenario harness pins it; production never
-// sets it. A malformed value is a test-setup error, so warnCreatedAtEnv
-// discloses it once while worktreeCreated falls through to the FS fact.
-const createdAtEnv = "WTM_CREATED_AT"
-
-// parseCreatedAtEnv parses the creation seam. Absent and malformed values both
-// report ok=false, so the caller uses the filesystem birth time.
-func parseCreatedAtEnv() (time.Time, bool) {
-	raw := os.Getenv(createdAtEnv)
-	if raw == "" {
-		return time.Time{}, false
-	}
-	return parseRFC3339(raw)
-}
-
-// warnCreatedAtEnv runs at dispatch beside warnNowEnv: a raw warning inside a
-// renderer frame would be erased by the next frame.
-func warnCreatedAtEnv() {
-	raw := os.Getenv(createdAtEnv)
-	if raw == "" {
-		return
-	}
-	if _, ok := parseCreatedAtEnv(); !ok {
-		warnf("%s %q is not RFC3339: using the filesystem birth time", createdAtEnv, raw)
-	}
 }
 
 // loadUsage attaches every worktree's cost/active-time summary. The harness
