@@ -76,7 +76,19 @@ sessions purged: 1
 
 ## Cost & time tracking
 
-Every part has a price. `wtm status` measures each worktree: **AGE**, **ACTIVE** time, and **COST** in model spend. The detail block breaks cost down per model. Subscription proof shows billed cost beside list price — e.g. `$0.00/$41.20` — so you can tell coverage from metered burn. Unknown costs stay unknown, never a silent zero, and estimates carry a `*`.
+Every part has a price. `wtm status` measures each worktree: **AGE**, **ACTIVE** time, and **COST** in model spend. The detail block breaks cost down per model. Subscription proof shows billed cost beside list price — e.g. `$0.00/$41.20` — so you can tell coverage from metered burn. Unknown costs stay unknown, never a silent zero, and `~` marks an estimate: a value from a partial total that an unreadable session or record may change.
+
+**Proof.** A proven subscription splits `COST` (what you actually pay) from `LIST` (what the same tokens would cost metered), each with its own header. Pi proves coverage through OAuth: a session naming `openai-codex` is covered, and every other subscription-backed provider must store `oauth` in its `auth.json` (`kimi-coding` is always covered). Claude Code proves coverage through its account file: it must bill by one of the subscription plans, hold no metered override in the session's own settings, its parents, or the enterprise managed-settings file, and not predate the subscription. Without proof, `wtm` shows the list price alone.
+
+**History caveat.** Session files record no credential type, so both proofs read the *current* credentials: a past metered run under today's subscription credential reads as covered and may display `$0.00`. A missing credential file proves nothing and never fails the command.
+
+**Pricing.** Pi prices its own sessions. Claude Code records tokens, not prices, so `wtm` derives cost from the [LiteLLM public rate catalog](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json): the catalog is cached at `~/.wtm/rates.json` (24h TTL), and `WTM_RATES` pins a local copy for offline use. With no catalog and no cache, the Claude cost reads `unknown`.
+
+**JSON contract.** `wtm status --json` adds `current`, `ageSeconds` (null when unknown), `cost` (null when unknown), and — for worktrees with recorded usage — `activeSeconds`, a per-harness `usage` map, and `partial:true` when a total lost an unreadable session. `costEstimated` marks an estimated billed cost; `listCost`/`listCostEstimated` appear only when a proven subscription makes the billed and list values differ. `inputOutputRatio` carries `total`/`cached`/`uncached` shares when output was recorded.
+
+**Env seams.** `WTM_NOW` and `WTM_CREATED_AT` (RFC3339) pin the clock and creation marks; `WTM_RATES` pins the catalog; `WTM_MANAGED_SETTINGS` replaces the Claude managed-settings file list; `WTM_CLAUDE_PARENT_SCOPE=0` skips the ancestor-settings walk; `WTM_PROGRESS_DELAY` pins the silence window; `WTM_USAGE_BYTE_BUDGET` caps the session bytes one status run reads (default 1 GiB; `0` disables the cap; over-budget sessions are skipped and totals read partial); `WTM_STATUS_SKIP_USAGE=1` skips usage loading entirely. None are user settings — they exist for tests and offline pinning.
+
+**Interrupts.** A SIGINT/SIGTERM aborts a run and exits 1, not 0, so an interrupted run is never mistaken for success.
 
 ## Temporary worktrees
 
