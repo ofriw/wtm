@@ -78,7 +78,9 @@ func assertValidCapability(c Capability) {
 // assertNoDuplicateCapabilities panics when any two caps share an ID, a Token,
 // or an upper-cased header. Header comparison mirrors Column (strings.ToUpper
 // of ID), so a duplicate in the input also means a duplicate --wide column.
-// Case-insensitive comparison uses strings.EqualFold (SA6005).
+// ToUpper covers ASCII case-insensitivity and any Unicode uppercase-collision
+// pair (e.g. "i" and "ı" U+0131 both render as "I"), unlike EqualFold which
+// would let those slip through as distinct.
 func assertNoDuplicateCapabilities(caps []Capability) {
 	for i, a := range caps {
 		for _, b := range caps[i+1:] {
@@ -87,7 +89,7 @@ func assertNoDuplicateCapabilities(caps []Capability) {
 				panic(fmt.Sprintf("wtm: duplicate capability id %q", a.ID))
 			case a.Token == b.Token:
 				panic(fmt.Sprintf("wtm: duplicate capability token %q", a.Token))
-			case strings.EqualFold(a.ID, b.ID):
+			case strings.ToUpper(a.ID) == strings.ToUpper(b.ID):
 				panic(fmt.Sprintf("wtm: duplicate capability header %q", strings.ToUpper(a.ID)))
 			}
 		}

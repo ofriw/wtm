@@ -38,6 +38,7 @@ func TestRegisterCapabilitiesDuplicateChecksPanic(t *testing.T) {
 		{"duplicate id", []Capability{mk("dup", "a"), mk("dup", "b")}},
 		{"duplicate token", []Capability{mk("a", "dup"), mk("b", "dup")}},
 		{"duplicate header case-folded", []Capability{mk("A", "A"), mk("a", "a")}},
+		{"duplicate header via dotless i", []Capability{mk("i", "i"), mk("\u0131", "\u0131")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
