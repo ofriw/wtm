@@ -2,12 +2,11 @@ package main
 
 import (
 	"fmt"
-	"image/color"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -273,38 +272,69 @@ func clearColorEnv(t *testing.T) {
 }
 
 func TestStatusCellStyle(t *testing.T) {
+	// The production renderer is the single source of truth for the header→style
+	// mapping; asserting on its rendered bytes means a style regression cannot
+	// hide behind a test-only dispatch.
+	render := statusCellRenderer(columnRegistry())
 	cases := []struct {
 		header, value string
 		bold, faint   bool
-		fg            color.Color
+		fg            int // ANSI SGR foreground code; 0 = none
 	}{
-		{"STATUS", "ACTIVE", true, false, lipgloss.Green},
-		{"STATUS", "UNUSED", false, false, lipgloss.Yellow},
-		{"CHUNKHOUND", "yes", false, false, lipgloss.Green},
-		{"CHUNKHOUND", "partial", false, false, lipgloss.Yellow},
-		{"MCP", "-", false, true, nil},
-		{"MCP", "n/a", false, true, nil},
-		{"INTEGRATIONS", "ch mc", false, false, nil},
-		{"UPSTREAM", "origin/feat", false, false, lipgloss.Green},
-		{"UPSTREAM", "-", false, true, nil},
-		{"BRANCH", "(detached)", false, true, nil},
-		{"BRANCH", "main", false, false, nil},
-		{"LAST USED", "never", false, true, nil},
-		{"COST", "unknown", false, true, nil},
-		{"COST", "-", false, true, nil},
-		{"COST", "$4.00", false, false, nil},
-		{"PATH", "/x", false, false, nil},
+		{"STATUS", "ACTIVE", true, false, 32},
+		{"STATUS", "UNUSED", false, false, 33},
+		{"CHUNKHOUND", "yes", false, false, 32},
+		{"CHUNKHOUND", "partial", false, false, 33},
+		{"MCP", "-", false, true, 0},
+		{"MCP", "n/a", false, true, 0},
+		{"INTEGRATIONS", "ch mc", false, false, 32},
+		{"UPSTREAM", "origin/feat", false, false, 32},
+		{"UPSTREAM", "-", false, true, 0},
+		{"BRANCH", "(detached)", false, true, 0},
+		{"BRANCH", "main", false, false, 0},
+		{"LAST USED", "never", false, true, 0},
+		{"COST", "unknown", false, true, 0},
+		{"COST", "-", false, true, 0},
+		{"COST", "$4.00", false, false, 0},
+		{"PATH", "/x", false, false, 0},
 	}
 	for _, tc := range cases {
-		s := statusCellStyle(tc.header, tc.value)
-		if s.GetBold() != tc.bold || s.GetFaint() != tc.faint {
-			t.Errorf("statusCellStyle(%q, %q) bold=%v faint=%v, want %v/%v",
-				tc.header, tc.value, s.GetBold(), s.GetFaint(), tc.bold, tc.faint)
+		attrs := cellAttrs(render(tc.header, tc.value))
+		if attrs[1] != tc.bold || attrs[2] != tc.faint {
+			t.Errorf("render(%q, %q) bold=%v faint=%v, want %v/%v",
+				tc.header, tc.value, attrs[1], attrs[2], tc.bold, tc.faint)
 		}
-		if tc.fg != nil && s.GetForeground() != tc.fg {
-			t.Errorf("statusCellStyle(%q, %q) foreground = %v, want %v", tc.header, tc.value, s.GetForeground(), tc.fg)
+		if tc.fg != 0 {
+			if !attrs[tc.fg] {
+				t.Errorf("render(%q, %q) missing foreground %d, attrs=%v", tc.header, tc.value, tc.fg, attrs)
+			}
+		} else {
+			for c := 30; c <= 37; c++ {
+				if attrs[c] {
+					t.Errorf("render(%q, %q) unexpected foreground %d, attrs=%v", tc.header, tc.value, c, attrs)
+				}
+			}
 		}
 	}
+}
+
+// cellAttrs extracts the ANSI SGR attribute codes present in a rendered cell,
+// e.g. 1=bold, 2=faint, 32=green foreground. Used to assert style rules on the
+// production renderer's output.
+func cellAttrs(s string) map[int]bool {
+	attrs := make(map[int]bool)
+	for _, seq := range strings.Split(s, "\x1b[")[1:] {
+		end := strings.IndexByte(seq, 'm')
+		if end < 0 {
+			continue
+		}
+		for _, p := range strings.Split(seq[:end], ";") {
+			if n, err := strconv.Atoi(p); err == nil {
+				attrs[n] = true
+			}
+		}
+	}
+	return attrs
 }
 
 // TestLegendStyleFollowsProfile pins the shared legend treatment: the legend is
@@ -330,11 +360,12 @@ func TestGroupedCellColors(t *testing.T) {
 		{"partial", "chunk~", "\x1b[33m"},
 		{"absent", "-", "\x1b[2m"},
 	}
+	render := statusCellRenderer(columnRegistry())
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := statusCell(colIntegrations.header, tc.value)
+			got := render(colIntegrations.header, tc.value)
 			if !strings.Contains(got, tc.escape) {
-				t.Fatalf("statusCell(%q) = %q, want escape %q", tc.value, got, tc.escape)
+				t.Fatalf("render(%q) = %q, want escape %q", tc.value, got, tc.escape)
 			}
 		})
 	}
@@ -348,7 +379,7 @@ func TestStyledCellsStripToPlain(t *testing.T) {
 		statusRow(map[string]string{"PATH": "/SBX/repo", "BRANCH": "main", "UPSTREAM": "origin/main", "LAST USED": "2020-01-01", "AGE": "12d", "ACTIVE": "8h 20m", "COST": "$41.20", "STATUS": "ACTIVE", "TEMP": "-", "INTEGRATIONS": "ch mc"}),
 		statusRow(map[string]string{"PATH": "/SBX/wt", "BRANCH": "(detached)", "UPSTREAM": "-", "LAST USED": "never", "AGE": "-", "ACTIVE": "-", "COST": "-", "STATUS": "UNUSED", "TEMP": "expired", "INTEGRATIONS": "-"}),
 	}
-	_, styled := renderCells(headers, rows, statusCell)
+	_, styled := renderCells(headers, rows, statusCellRenderer(columnRegistry()))
 	for r := range rows {
 		for c := range rows[r] {
 			if got := ansi.Strip(styled[r][c]); got != rows[r][c] {
@@ -378,7 +409,7 @@ func TestStyledTableStripsToPlain(t *testing.T) {
 	widths := naturalWidths(headers, rows)
 	aligns := columnAligns(headers, columnRightAligns(statusColumns))
 	plain := renderTable(headers, rows, widths, aligns)
-	styledHeaders, styledRows := renderCells(headers, rows, statusCell)
+	styledHeaders, styledRows := renderCells(headers, rows, statusCellRenderer(columnRegistry()))
 	if got := ansi.Strip(renderTable(styledHeaders, styledRows, widths, aligns)); got != plain {
 		t.Errorf("stripped styled table differs from plain:\n got: %q\nwant: %q", got, plain)
 	}
@@ -589,20 +620,15 @@ func TestDropZeroColumnsDisclosesHiddenColumns(t *testing.T) {
 // non-value as a non-value: an absent or unpriced COST or LIST cell recedes
 // instead of reading as a number.
 func TestStatusCellStyleNonValuesRecede(t *testing.T) {
+	render := statusCellRenderer(columnRegistry())
 	for _, header := range []string{"COST", "LIST"} {
 		for _, v := range []string{"-", "unknown"} {
-			if s := statusCellStyle(header, v); !s.GetFaint() {
-				t.Errorf("statusCellStyle(%s, %q) faint=false, want true", header, v)
-			}
-			if got := statusCell(header, v); !strings.Contains(got, "\x1b[2m") {
-				t.Errorf("statusCell(%s, %q) = %q, want faint ANSI", header, v, got)
+			if got := render(header, v); !strings.Contains(got, "\x1b[2m") {
+				t.Errorf("render(%s, %q) = %q, want faint ANSI", header, v, got)
 			}
 		}
-		if s := statusCellStyle(header, "$1.00"); s.GetFaint() {
-			t.Errorf("statusCellStyle(%s, \"$1.00\") faint=true, want false", header)
-		}
-		if got := statusCell(header, "$1.00"); strings.Contains(got, "\x1b[2m") {
-			t.Errorf("statusCell(%s, \"$1.00\") = %q, want no faint ANSI", header, got)
+		if got := render(header, "$1.00"); strings.Contains(got, "\x1b[2m") {
+			t.Errorf("render(%s, \"$1.00\") = %q, want no faint ANSI", header, got)
 		}
 	}
 }

@@ -23,7 +23,7 @@ func refPaths(refs []sessionRef) []string {
 	return out
 }
 
-func TestSessionsForWorktreeAttributesDescendants(t *testing.T) {
+func TestSessionsUnderIncludesAllDescendants(t *testing.T) {
 	base := t.TempDir()
 	root := canonical(filepath.Join(base, "repo"))
 	sub := canonical(filepath.Join(root, "website"))
@@ -37,35 +37,31 @@ func TestSessionsForWorktreeAttributesDescendants(t *testing.T) {
 		deep:   {{path: "deep"}},
 		other:  {{path: "other"}},
 	}
-	wts := []worktree{{Path: root}, {Path: nested}}
-
-	if got, want := refPaths(sessionsForWorktree(root, wts, idx)), []string{"root", "sub"}; !slices.Equal(got, want) {
+	// Descendant refs follow in sorted cwd order (nested < website), so the
+	// deepest-owned session reads before a shallower sibling.
+	if got, want := refPaths(sessionsUnder(root, idx)), []string{"root", "nested", "deep", "sub"}; !slices.Equal(got, want) {
 		t.Fatalf("root sessions = %v, want %v", got, want)
 	}
-	if got, want := refPaths(sessionsForWorktree(nested, wts, idx)), []string{"nested", "deep"}; !slices.Equal(got, want) {
-		t.Fatalf("nested sessions = %v, want %v", got, want)
-	}
-	if got, want := refPaths(sessionsForWorktree(other, wts, idx)), []string{"other"}; !slices.Equal(got, want) {
+	if got, want := refPaths(sessionsUnder(other, idx)), []string{"other"}; !slices.Equal(got, want) {
 		t.Fatalf("other sessions = %v, want %v", got, want)
 	}
 }
 
-func TestSessionsForWorktreeIgnoresSiblingPrefix(t *testing.T) {
+func TestSessionsUnderIgnoresSiblingPrefix(t *testing.T) {
 	base := t.TempDir()
 	root := canonical(filepath.Join(base, "repo"))
 	sibling := canonical(filepath.Join(base, "repo-feature"))
 	idx := sessionIndex{root: {{path: "root"}}, sibling: {{path: "sibling"}}}
-	got := refPaths(sessionsForWorktree(root, []worktree{{Path: root}}, idx))
+	got := refPaths(sessionsUnder(root, idx))
 	if want := []string{"root"}; !slices.Equal(got, want) {
 		t.Fatalf("sessions = %v, want %v", got, want)
 	}
 }
 
-// TestPartitionSessionsMatchesPerFold pins that the run-once deepest-owner
-// partition assigns every worktree exactly the sessions sessionsForWorktree
-// would return per fold, so the status path cannot drift from the nested
-// checkout rules.
-func TestPartitionSessionsMatchesPerFold(t *testing.T) {
+// TestPartitionSessionsDeepestOwner pins the run-once deepest-owner partition:
+// a nested checkout owns its own and deeper sessions, so the parent report path
+// never double-counts them.
+func TestPartitionSessionsDeepestOwner(t *testing.T) {
 	base := t.TempDir()
 	root := canonical(filepath.Join(base, "repo"))
 	sub := canonical(filepath.Join(root, "website"))
@@ -81,11 +77,14 @@ func TestPartitionSessionsMatchesPerFold(t *testing.T) {
 	}
 	wts := []worktree{{Path: root}, {Path: nested}}
 	parts := partitionSessions(wts, idx)
-	for _, w := range wts {
-		r := canonical(w.Path)
-		if got, want := refPaths(parts[r]), refPaths(sessionsForWorktree(r, wts, idx)); !slices.Equal(got, want) {
-			t.Errorf("partition[%s] = %v, want %v", r, got, want)
-		}
+	if got, want := refPaths(parts[root]), []string{"root", "sub"}; !slices.Equal(got, want) {
+		t.Errorf("partition[%s] = %v, want %v", root, got, want)
+	}
+	if got, want := refPaths(parts[nested]), []string{"nested", "deep"}; !slices.Equal(got, want) {
+		t.Errorf("partition[%s] = %v, want %v", nested, got, want)
+	}
+	if _, ok := parts[other]; ok {
+		t.Errorf("unowned other path must not be partitioned")
 	}
 }
 
@@ -155,7 +154,8 @@ func TestBuildUsageForCountsDescendantSessions(t *testing.T) {
 		t.Fatalf("exact cost = %v, want %v", got, want)
 	}
 
-	nested, _, err := buildUsageForReportAt(root, []worktree{{Path: root}, {Path: sub}}, idx, nil, subscriptions{}, nowFunc())
+	parts := partitionSessions([]worktree{{Path: root}, {Path: sub}}, idx)
+	nested, _, err := buildUsageSessionsReport(root, parts[canonical(root)], nil, subscriptions{}, nowFunc(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

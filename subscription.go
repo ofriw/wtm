@@ -108,13 +108,9 @@ func claudeAccountFile() (path string, ok bool, err error) {
 	if primary, ok, err := claudePrimaryAccountFile(); ok || err != nil {
 		return primary, ok, err
 	}
-	base := os.Getenv("CLAUDE_CONFIG_DIR")
+	base := claudeAgent.configDirBase()
 	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", false, nil
-		}
-		base = home
+		return "", false, nil
 	}
 	return filepath.Join(base, ".claude"+claudeAccountSuffix()+".json"), true, nil
 }

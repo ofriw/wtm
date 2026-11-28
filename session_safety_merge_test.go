@@ -100,7 +100,7 @@ func TestSharedSessionSafetyMissingIndexedFile(t *testing.T) {
 		if _, err := sessionLastUsed(owner, idx, true, nil); err == nil {
 			t.Fatal("missing indexed session accepted by removal check")
 		}
-		warning := captureStderr(t, func() { lastUsed(owner, idx, nil) })
+		warning := captureStderr(t, func() { _, _ = sessionLastUsed(owner, idx, false, nil) })
 		if !strings.Contains(warning, p) {
 			t.Fatalf("display did not disclose missing activity: %q", warning)
 		}
@@ -108,7 +108,7 @@ func TestSharedSessionSafetyMissingIndexedFile(t *testing.T) {
 		// write would be erased by the next frame.
 		events := make(chan progressEvent, 4)
 		display := &progress{ctx: context.Background(), events: events}
-		if stderr := captureStderr(t, func() { lastUsed(owner, idx, display) }); stderr != "" {
+		if stderr := captureStderr(t, func() { _, _ = sessionLastUsed(owner, idx, false, display) }); stderr != "" {
 			t.Fatalf("warning bypassed the progress handle: %q", stderr)
 		}
 		close(events)

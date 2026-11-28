@@ -93,6 +93,12 @@ func parseStatusFlags(g *globals, args []string) (bool, error) {
 // Claude Code's account file. An unreadable session degrades to a warning:
 // status is read-only and must still report what it knows.
 func (ws *workspace) loadUsage(p *progress, now time.Time) error {
+	// WTM_STATUS_SKIP_USAGE=1 opts out of usage loading entirely: no catalog,
+	// no subscriptions, no session parses.
+	if statusSkipUsage() {
+		return nil
+	}
+	budget := usageBudgetFromEnv(p)
 	// One deepest-owner partition for the run: the harness checks and every
 	// worker fold read it instead of re-scanning the session index per call.
 	parts := partitionSessions(ws.wts, ws.idx)
@@ -112,7 +118,7 @@ func (ws *workspace) loadUsage(p *progress, now time.Time) error {
 		return err
 	}
 	// The caller owns the report instant, so usage and every renderer share it.
-	return ws.parseUsage(cat, subs, now, p, parts)
+	return ws.parseUsage(cat, subs, now, p, parts, budget)
 }
 
 // loadCatalog resolves the price catalog, naming its source in the progress
@@ -125,8 +131,8 @@ func (ws *workspace) loadCatalog(p *progress, hasClaude bool, now time.Time) cat
 	cat, err := loadCatalogReporting(p, now)
 	if err != nil {
 		warnProgress(p, "claude cost unavailable: %s", err)
-		// A nil catalog makes every harness report unknown, which is the honest
-		// answer when no catalog is available at all.
+		// A nil catalog makes Claude's catalog-derived prices unknown, which is the
+		// honest answer when no catalog is available; Pi self-reports its prices.
 		return nil
 	}
 	return cat
@@ -145,13 +151,13 @@ type usageResult struct {
 // independent. The label follows the worktree a worker picked up; results
 // attach by index after the join, keeping the render order tied to git's order,
 // not to completion order.
-func (ws *workspace) parseUsage(cat catalog, subs subscriptions, now time.Time, p *progress, parts worktreePartitions) error {
+func (ws *workspace) parseUsage(cat catalog, subs subscriptions, now time.Time, p *progress, parts worktreePartitions, budget *usageBudget) error {
 	p.phase("parsing sessions", len(ws.wts))
 	if len(ws.wts) == 0 {
 		return nil
 	}
 	usages := mapParallel(len(ws.wts), scanWorkers, func(i int) usageResult {
-		return ws.usageResultFor(i, cat, subs, now, p, parts)
+		return ws.usageResultFor(i, cat, subs, now, p, parts, budget)
 	})
 	return ws.emitUsageResults(usages, p)
 }
@@ -159,13 +165,13 @@ func (ws *workspace) parseUsage(cat catalog, subs subscriptions, now time.Time, 
 // usageResultFor prices one worktree. A worker never writes stderr
 // (parallel.go), so warnings travel in the result and the parent emits them
 // after the join.
-func (ws *workspace) usageResultFor(i int, cat catalog, subs subscriptions, now time.Time, p *progress, parts worktreePartitions) usageResult {
+func (ws *workspace) usageResultFor(i int, cat catalog, subs subscriptions, now time.Time, p *progress, parts worktreePartitions, budget *usageBudget) usageResult {
 	if err := p.abort(); err != nil {
 		return usageResult{err: err}
 	}
 	path := ws.wts[i].Path
 	p.detail(displayPath(path))
-	u, warnings, err := buildUsageSessionsReport(path, parts[canonical(path)], cat, subs, now)
+	u, warnings, err := buildUsageSessionsReport(path, parts[canonical(path)], cat, subs, now, budget)
 	p.advance(1)
 	// Keep a total loss so the loss reads as unknown, never as no usage.
 	if u.hasEvents() || u.partial {

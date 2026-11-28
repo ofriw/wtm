@@ -16,8 +16,8 @@ func requireSessionTime(t *testing.T, owner string, idx sessionIndex, want time.
 			t.Fatalf("last used (strict=%v) = %s, %v; want %s", strict, got, err, want)
 		}
 	}
-	if got := lastUsed(owner, idx, nil); !got.Equal(want) {
-		t.Fatalf("display last used = %s, want %s", got, want)
+	if got, err := sessionLastUsed(owner, idx, false, nil); err != nil || !got.Equal(want) {
+		t.Fatalf("display last used = %s, %v; want %s", got, err, want)
 	}
 }
 

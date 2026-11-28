@@ -76,7 +76,7 @@ func fitStatusFixture(t *testing.T, values map[string]string, budget int) fitted
 	var errOut string
 	out := captureStdout(t, func() {
 		errOut = captureStderr(t, func() {
-			emitSizedGrid(headers, rows, colorNever, statusCell, columnRightAligns(cols), budget)
+			emitSizedGrid(headers, rows, colorNever, statusCellRenderer(columnRegistry()), columnRightAligns(cols), budget)
 		})
 	})
 	kept, keptRows, _, _ := sizedGrid(headers, rows, budget, columnRightAligns(cols))

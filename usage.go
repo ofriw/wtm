@@ -15,7 +15,7 @@ import (
 // session records into usageEvent values; addBilledSession folds those into a
 // worktreeUsage. This file owns the folding, the money/span model, the
 // cross-file dedupe and the display grammar; the session loader that drives
-// addBilledSession (the report path) lives with the harness registry in agents.go.
+// addBilledSession (the report path) lives in usage_report.go.
 
 // estimateCause names the documented assumption behind an estimated amount.
 // It is a bit set, so a fold that mixes both assumptions keeps both reasons and
@@ -1027,18 +1027,6 @@ type dedupeBest struct {
 // session is never hidden by a covered copy of the same turn in another.
 type coveredProof func(usageEvent) bool
 
-// dedupeKeyedEvents decides which occurrence of each billed turn prices. It
-// returns a per-session billed mask: true marks the occurrence that contributes
-// cost. Spans ignore the mask and fold every event, so dedupe never changes
-// activity time. Keyless events always bill. The winner is the first occurrence
-// of a key with the best score, independent of coverage: the best measurement
-// copy prices the turn. Coverage is a separate per-key verdict the fold applies
-// (see disputedKeys and meterDisputed). The caller keeps its event slices; only
-// the returned masks describe the change.
-func dedupeKeyedEvents(sessions [][]usageEvent, covered []coveredProof) [][]bool {
-	return dedupeMasks(sessions, bestScores(sessions, covered))
-}
-
 // dedupeMasks derives the per-session billed masks from the precomputed best
 // scores, so the fold can compute masks and the disputed-key verdict from one
 // walk.
@@ -1299,4 +1287,106 @@ func seconds(d time.Duration) int64 {
 		return 0
 	}
 	return int64(d / time.Second)
+}
+
+// usagePricer resolves one event to its price pair and per-tier breakdown. The
+// list side is the pay-as-you-go price today's code reports; a proven
+// subscription replaces the billed side with the $0 marginal cost while the
+// list side stays visible. A Claude proof that still permits overage yields an
+// estimated zero only when the event priced something (a known nonzero list,
+// real tokens, or a self-priced cost); a zero-token event keeps the exact zero,
+// so an empty turn never reads estimated. The substitution reaches every tier,
+// so a covered event never shows a bare $0.00 beside a metered list per tier.
+// API-key and otherwise metered usage still bills, so a proven $0 never claims
+// the whole invoice.
+func usagePricer(a agent, cat catalog, subs subscriptions, warn warnSink) func(usageEvent) pricedEvent {
+	return func(e usageEvent) pricedEvent {
+		p := listPrice(a, cat, e, warn)
+		switch subs.coverage(a.name, e.provider, e.at) {
+		case coverageAllowance:
+			coverTiers(&p, knownZero)
+		case coverageOveragePossible:
+			// A nonzero search count is spend evidence even when rejected: an
+			// unknown list price must not yield an exact zero.
+			if (p.total.list.known() && p.total.list.amount != 0) || e.tokens.hasUsageEvidence() || e.webSearch != 0 || e.cost != nil {
+				coverTiers(&p, estimatedZero)
+			} else {
+				coverTiers(&p, knownZero)
+			}
+		}
+		return p
+	}
+}
+
+// coverTiers replaces the billed side of the total and every priced tier with
+// the coverage zero, keeping the list side intact. The invariant: every cost
+// figure carries the billed/list pair, so a proven subscription discounts each
+// tier exactly as it discounts the total. A tier the event never priced stays
+// absent rather than becoming a spurious $0.00.
+func coverTiers(p *pricedEvent, zero func() money) {
+	p.total.billed = zero()
+	p.total.subscription = true
+	for i := range p.tiers {
+		if !p.tiers[i].list.any {
+			continue
+		}
+		p.tiers[i].billed = zero()
+		p.tiers[i].subscription = true
+	}
+}
+
+// listPrice resolves one event's pay-as-you-go price and per-tier breakdown: a
+// harness-supplied cost wins, a catalog-rated token record is priced from the
+// catalog, and everything else (including a catalog-rated record with no
+// catalog) is unknown.
+func listPrice(a agent, cat catalog, e usageEvent, warn warnSink) pricedEvent {
+	switch {
+	case e.cost != nil || e.tierCost != nil:
+		return piPrice(e, warn)
+	case a.catalogRated && cat != nil:
+		return cat.priceWith(e, warn)
+	default:
+		return unpriced()
+	}
+}
+
+// piPrice prices a self-reported Pi event: the record carries the total and,
+// in modern sessions, the per-class split. An older record with only the total
+// leaves every tier absent rather than inventing a breakdown, and a record with
+// only the split leaves the total unknown. A corrupt figure is unknown: a
+// negative subtracts money and an overflow reads as a real bill.
+func piPrice(e usageEvent, warn warnSink) pricedEvent {
+	var p pricedEvent
+	if e.cost != nil {
+		addReportedCost(&p.total.list, *e.cost, "cost.total", warn)
+	} else {
+		// A record that reports only its per-class split states no total, so the
+		// total stays unknown instead of borrowing a partial breakdown.
+		p.total.list.addUnknown()
+	}
+	if c := e.tierCost; c != nil {
+		addReportedTiers(&p.tiers, c, warn)
+	}
+	for i := range p.tiers {
+		p.tiers[i].billed = p.tiers[i].list
+	}
+	p.total.billed = p.total.list
+	return p
+}
+
+// addReportedTiers records a harness-reported per-class price. Each field names
+// itself so a rejected figure discloses the class it voided.
+func addReportedTiers(tiers *tokenTiers, c *tokenCosts, warn warnSink) {
+	addKnownClass(&tiers[tierInput].list, c.input, "tierCost.input", warn)
+	addKnownClass(&tiers[tierOutput].list, c.output, "tierCost.output", warn)
+	addKnownClass(&tiers[tierCacheRead].list, c.cacheRead, "tierCost.cacheRead", warn)
+	addKnownClass(&tiers[tierCacheWrite].list, c.cacheWrite, "tierCost.cacheWrite", warn)
+}
+
+// addKnownClass records a harness-reported class price. A nil field leaves the
+// tier untouched, which reads as absent, never as a real zero.
+func addKnownClass(m *money, v *float64, field string, warn warnSink) {
+	if v != nil {
+		addReportedCost(m, *v, field, warn)
+	}
 }

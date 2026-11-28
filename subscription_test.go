@@ -981,6 +981,26 @@ func TestSubscriptionClaudeZeroTokenStaysExact(t *testing.T) {
 	}
 }
 
+// TestClaudeAccountFileBaseMapping pins the config-dir owner: claudeAccountFile
+// builds its suffixed path from CLAUDE_CONFIG_DIR when set, else HOME. The
+// .config.json primary must be absent so the resolver reaches the suffixed
+// candidate.
+func TestClaudeAccountFileBaseMapping(t *testing.T) {
+	env := sandbox(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", env.ClaudeDir)
+	if p, ok, err := claudeAccountFile(); !ok || err != nil {
+		t.Fatalf("claudeAccountFile with env dir = %q, ok=%v, err=%v; want ok", p, ok, err)
+	} else if got := filepath.Dir(p); got != env.ClaudeDir {
+		t.Errorf("base = %q, want the CLAUDE_CONFIG_DIR value %q", got, env.ClaudeDir)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	if p, ok, err := claudeAccountFile(); !ok || err != nil {
+		t.Fatalf("claudeAccountFile without env dir = %q, ok=%v, err=%v; want ok", p, ok, err)
+	} else if got := filepath.Dir(p); got != env.Home {
+		t.Errorf("base = %q, want HOME %q", got, env.Home)
+	}
+}
+
 // TestClaudeAccountFileMatrix pins 1B: the resolver precedence across HOME,
 // the selected config dir, the .config.json primary, the custom-oauth suffix,
 // and a missing file. It drives the real files and the real parser, so a HOME
@@ -1304,7 +1324,8 @@ func TestUsageReportCarriesWorktreeWarnings(t *testing.T) {
 	if err := os.MkdirAll(settings, 0o700); err != nil {
 		t.Fatalf("seed settings directory: %v", err)
 	}
-	u, warnings, err := buildUsageForReportAt(dir, []worktree{{Path: dir}}, idx, testRates(t), loadSubscriptions(true), nowFunc())
+	parts := partitionSessions([]worktree{{Path: dir}}, idx)
+	u, warnings, err := buildUsageSessionsReport(dir, parts[canonical(dir)], testRates(t), loadSubscriptions(true), nowFunc(), nil)
 	if err != nil {
 		t.Fatalf("buildUsageForReport: %v", err)
 	}
