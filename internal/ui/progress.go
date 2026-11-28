@@ -31,15 +31,17 @@ const (
 type progressKind int
 
 const (
-	evPhase progressKind = iota
-	evAdvance
-	evDetail
+	EvPhase progressKind = iota
+	EvAdvance
+	EvDetail
 	EvNotice
-	evDone
+	EvDone
 )
 
-// ProgressEvent is the single wire format from worker to renderer. One channel
-// carries every operation so the renderer replays them in the worker's order.
+// ProgressEvent is the renderer's wire format: the single channel payload from
+// worker to renderer. One channel carries every operation so the renderer
+// replays them in the worker's order. The Kind constants (EvPhase, EvAdvance,
+// EvDetail, EvNotice, EvDone) are part of the exported contract.
 type ProgressEvent struct {
 	Kind  progressKind
 	Name  string
@@ -75,15 +77,15 @@ func (p *Progress) send(ev ProgressEvent) {
 
 // Phase announces a new phase with its total step count.
 func (p *Progress) Phase(name string, total int) {
-	p.send(ProgressEvent{Kind: evPhase, Name: name, Total: total})
+	p.send(ProgressEvent{Kind: EvPhase, Name: name, Total: total})
 }
 
 // Advance advances the current phase by n steps.
-func (p *Progress) Advance(n int) { p.send(ProgressEvent{Kind: evAdvance, N: n}) }
+func (p *Progress) Advance(n int) { p.send(ProgressEvent{Kind: EvAdvance, N: n}) }
 
 // Detail updates the current phase's detail line.
 func (p *Progress) Detail(text string) {
-	p.send(ProgressEvent{Kind: evDetail, Text: text})
+	p.send(ProgressEvent{Kind: EvDetail, Text: text})
 }
 
 // Notice asks the renderer to print a persistent line above the progress block.
@@ -124,7 +126,7 @@ func WarnProgress(p *Progress, format string, a ...any) {
 // when work failed outside any phase (e.g. a scan error), and it is what
 // releases the renderer to quit.
 func (p *Progress) Done(err error) {
-	p.send(ProgressEvent{Kind: evDone, Err: err})
+	p.send(ProgressEvent{Kind: EvDone, Err: err})
 }
 
 // progressEnabled is the single source of truth for --progress precedence: auto
@@ -296,7 +298,7 @@ func (m progressModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m progressModel) updateEvent(ev ProgressEvent) (tea.Model, tea.Cmd) {
 	switch ev.Kind {
-	case evDone:
+	case EvDone:
 		m.finish(ev.Err)
 		return m, tea.Quit
 	case EvNotice:
@@ -308,15 +310,15 @@ func (m progressModel) updateEvent(ev ProgressEvent) (tea.Model, tea.Cmd) {
 
 func (m *progressModel) apply(ev ProgressEvent) {
 	switch ev.Kind {
-	case evPhase:
+	case EvPhase:
 		m.finishRunning()
 		m.phases = append(m.phases, &phaseItem{name: ev.Name, total: ev.Total, state: phaseRunning})
 		m.active = len(m.phases) - 1
-	case evAdvance:
+	case EvAdvance:
 		if m.active >= 0 {
 			m.phases[m.active].done += ev.N
 		}
-	case evDetail:
+	case EvDetail:
 		if m.active >= 0 {
 			m.phases[m.active].detail = ev.Text
 		}
