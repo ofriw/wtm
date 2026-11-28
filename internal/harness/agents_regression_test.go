@@ -79,7 +79,7 @@ func TestPurgePreservesUnreadableFile(t *testing.T) {
 	idx := mustIndexSessions(t)
 	keep := filepath.Join(filepath.Dir(owned), "unreadable.jsonl")
 	WriteFile(t, keep, ClaudeTranscript(t.TempDir()), 0o644)
-	makeUnreadable(t, keep)
+	Unreadable(t, keep)
 	assertOwnedSessionPurged(t, owner, idx, owned)
 	if _, err := os.Stat(keep); err != nil {
 		t.Fatalf("unreadable history removed: %v", err)
@@ -94,16 +94,11 @@ func assertOwnedSessionPurged(t *testing.T, owner string, idx core.SessionIndex,
 	}
 }
 
+// makeUnreadable forwards to the central helper. It stays because
+// session_safety_merge_test.go (outside this batch) still calls it.
 func makeUnreadable(t *testing.T, path string) {
 	t.Helper()
-	if err := os.Chmod(path, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
-	if f, err := os.Open(path); err == nil {
-		_ = f.Close()
-		t.Skip("host allows reading mode-000 files")
-	}
+	Unreadable(t, path)
 }
 
 // TestUnreadableSessionFailClosed pins the one policy split: reclamation must
@@ -113,7 +108,7 @@ func TestUnreadableSessionFailClosed(t *testing.T) {
 	Sandbox(t)
 	repo := NativeRepo(t)
 	path := MkClaudeSession(t, repo, "unreadable", time.Now())
-	makeUnreadable(t, path)
+	Unreadable(t, path)
 
 	if _, err := indexSessions(agents(), core.SessionErrPolicy{FailClosed: true}); err == nil || !strings.Contains(err.Error(), path) {
 		t.Fatalf("reclamation index must fail on unreadable transcript %s: %v", path, err)
@@ -152,7 +147,7 @@ func TestReclaimFailsClosedOnUnreadableSession(t *testing.T) {
 	linked := CanonicalPath(filepath.Join(filepath.Dir(repo), "linked"))
 	GitWorktreeAdd(t, repo, linked, "feat", "refs/heads/main")
 	session := MkClaudeSession(t, linked, "unreadable", time.Now())
-	makeUnreadable(t, session)
+	Unreadable(t, session)
 
 	_, errOut, rc := RunWTM(t, repo, nil, "delete", "feat", "--yes")
 	if rc == 0 {

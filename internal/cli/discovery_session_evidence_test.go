@@ -66,18 +66,6 @@ func safetySessionFor(t *testing.T, harnessName, name, content string, age time.
 	return p
 }
 
-func makeUnreadable(t *testing.T, path string) {
-	t.Helper()
-	if err := os.Chmod(path, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
-	if f, err := os.Open(path); err == nil {
-		_ = f.Close()
-		t.Skip("host allows reading mode-000 files")
-	}
-}
-
 func discoveryEvidenceFixture(t *testing.T) (string, core.Worktree, string) {
 	t.Helper()
 	repo, temp, _ := idleTempCheckout(t)
@@ -99,7 +87,7 @@ func discoveryUnknownSession(t *testing.T, harnessName, kind string, age time.Ti
 	}
 	p := safetySessionFor(t, harnessName, kind, "{broken}\n", age)
 	if kind == "unreadable" {
-		makeUnreadable(t, p)
+		Unreadable(t, p)
 	}
 	return p
 }
@@ -253,19 +241,8 @@ func discoveryStructuralFailure(t *testing.T, harnessName, kind string) string {
 	if kind == "root-unreadable" {
 		dir = root
 	}
-	makeUnreadableDirectory(t, dir)
+	UnreadableDirectory(t, dir)
 	return dir
-}
-
-func makeUnreadableDirectory(t *testing.T, dir string) {
-	t.Helper()
-	if err := os.Chmod(dir, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	if _, err := os.ReadDir(dir); err == nil {
-		t.Skip("host permits reading mode-000 directories")
-	}
 }
 
 func TestDisplayDiscoveryKeepsLenientSessionWarning(t *testing.T) {

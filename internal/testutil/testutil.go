@@ -269,6 +269,32 @@ func SetTTL(t *testing.T, ttl string) {
 	WriteFile(t, SettingsFile(t), fmt.Sprintf("{\"unusedTTL\":%q}\n", ttl), 0o600)
 }
 
+// Unreadable makes path mode-000 and skips when the host ignores file modes.
+func Unreadable(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+	if f, err := os.Open(path); err == nil {
+		_ = f.Close()
+		t.Skip("host allows reading mode-000 files")
+	}
+}
+
+// UnreadableDirectory makes dir mode-000 and skips when the host ignores
+// directory modes.
+func UnreadableDirectory(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if _, err := os.ReadDir(dir); err == nil {
+		t.Skip("host permits reading mode-000 directories")
+	}
+}
+
 // WriteFile writes path with content and mode, creating parents.
 func WriteFile(t *testing.T, path, content string, mode os.FileMode) {
 	t.Helper()
