@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -244,27 +243,50 @@ func discoverInputs(root string, p *progress, sessions sessionDiscovery) (discov
 	return in, nil
 }
 
+// discoveryResult is one worker's outcome for a shared discovery source, so the
+// batch runs on the one pool (parallel.go) instead of a hand-rolled WaitGroup.
+type discoveryResult struct {
+	raw     []gworktree
+	idx     sessionIndex
+	unknown []unverifiedSession
+	ups     map[string]upstream
+	temps   tempStore
+	warn    string
+	err     error
+}
+
 // fetchDiscoveryInputs reads each shared source once, concurrently: worktrees,
 // sessions, upstreams and temp records are independent. The label names the
 // session walk because it dominates the batch; the other three finish in tens
-// of milliseconds.
+// of milliseconds. The abort check precedes the workers' errors, so an
+// interrupt preempts their results.
 func fetchDiscoveryInputs(root string, p *progress, sessions sessionDiscovery) (in discoveryInputs, upsWarn, tempWarn string, err error) {
-	var (
-		rawErr      error
-		sessionsErr error
-		wg          sync.WaitGroup
-	)
 	p.phase("indexing sessions", 0)
-	wg.Add(4)
-	go func() { defer wg.Done(); in.raw, rawErr = worktrees(root) }()
-	go func() { defer wg.Done(); in.idx, in.unknown, sessionsErr = sessions(p) }()
-	go func() { defer wg.Done(); in.ups, upsWarn = discoverUpstreams(root) }()
-	go func() { defer wg.Done(); in.temps, tempWarn = readTempStoreLenient() }()
-	wg.Wait()
-	if ferr := firstDiscoveryFailure(p.abort(), rawErr, sessionsErr); ferr != nil {
+	results := mapParallel(4, scanWorkers, func(i int) discoveryResult {
+		switch i {
+		case 0:
+			raw, err := worktrees(root)
+			return discoveryResult{raw: raw, err: err}
+		case 1:
+			idx, unknown, err := sessions(p)
+			return discoveryResult{idx: idx, unknown: unknown, err: err}
+		case 2:
+			ups, warn := discoverUpstreams(root)
+			return discoveryResult{ups: ups, warn: warn}
+		default:
+			temps, warn := readTempStoreLenient()
+			return discoveryResult{temps: temps, warn: warn}
+		}
+	})
+	in.raw = results[0].raw
+	in.idx = results[1].idx
+	in.unknown = results[1].unknown
+	in.ups = results[2].ups
+	in.temps = results[3].temps
+	if ferr := firstDiscoveryFailure(p.abort(), results[0].err, results[1].err); ferr != nil {
 		return discoveryInputs{}, "", "", ferr
 	}
-	return in, upsWarn, tempWarn, nil
+	return in, results[2].warn, results[3].warn, nil
 }
 
 // firstDiscoveryFailure returns the first reader failure: the abort check

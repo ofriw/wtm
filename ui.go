@@ -227,7 +227,7 @@ func groupedCellStyle(value string) string {
 		// WHY: the ~ suffix groupedToken writes is the state, so color keys
 		// off it directly instead of through a token-string wrapper.
 		state := capPresent
-		if strings.HasSuffix(tok, partialMarker) {
+		if strings.HasSuffix(tok, notExactMarker) {
 			state = capPartial
 		}
 		tokens[i] = capStateStyle(state).Render(tok)

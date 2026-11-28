@@ -103,7 +103,7 @@ func cellAge(w worktree, c columnContext) string {
 // render a lost-data value as exact; zero-with-loss stays unknown below.
 func partialValue(s string, partial bool) string {
 	if partial {
-		return "~" + s
+		return markNotExact(s)
 	}
 	return s
 }
@@ -390,9 +390,15 @@ func withListColumn(cols []worktreeColumn, show bool) []worktreeColumn {
 // grid projection and column sizing happen once and the legend explains exactly
 // the columns that render. Styling and elision follow the same pipeline as
 // emitGrid, so output is byte-identical to the un-shared path.
-func printStatusTable(fit tableFit, colorMode string, seen map[string]bool) {
-	headers, rows, widths, aligns := fittedGrid(fit.cols, fit.rows, fit.widths, seen)
+// printFittedGrid renders a precomputed fit through the shared grid pipeline,
+// so the table and detail emit byte-identical output from one renderer.
+func printFittedGrid(cols []worktreeColumn, rows [][]string, widths []int, colorMode string, seen map[string]bool) {
+	headers, rows, widths, aligns := fittedGrid(cols, rows, widths, seen)
 	emitGrid(headers, rows, widths, aligns, colorMode, statusCellRenderer(columnRegistry()))
+}
+
+func printStatusTable(fit tableFit, colorMode string, seen map[string]bool) {
+	printFittedGrid(fit.cols, fit.rows, fit.widths, colorMode, seen)
 }
 
 // fittedGrid lays out a precomputed fit through the shared layoutGrid pipeline.

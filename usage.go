@@ -86,6 +86,14 @@ func (m money) jsonValue() *float64 {
 	return &v
 }
 
+// notExactMarker is the shared "not exact" glyph. One constant owns the mark:
+// a partial integration token, an estimated price, and a partial total all
+// render it, so readers decode one symbol.
+const notExactMarker = "~"
+
+// markNotExact prefixes a rendered value with the shared "not exact" marker.
+func markNotExact(s string) string { return notExactMarker + s }
+
 // cell is the table contract: "-" absent, "unknown" unpriced, "~$d.dd" when an
 // assumption priced part of the total, else "$d.dd".
 func (m money) cell() string {
@@ -95,7 +103,7 @@ func (m money) cell() string {
 	case m.unknown:
 		return unknownValue
 	case m.causes != 0:
-		return "~" + formatCost(m.amount)
+		return markNotExact(formatCost(m.amount))
 	default:
 		return formatCost(m.amount)
 	}

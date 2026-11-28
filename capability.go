@@ -139,14 +139,12 @@ func isCapabilityHeader(header string) bool {
 	return false
 }
 
-// partialMarker flags a partially wired integration in the grouped cell.
-const partialMarker = "~"
-
 // groupedToken renders a capability the worktree carries: the token when fully
-// wired, token~ when partial. Absent capabilities never reach here.
+// wired, token~ when partial (shared notExactMarker). Absent capabilities never
+// reach here.
 func (c capability) groupedToken(s capState) string {
 	if s == capPartial {
-		return c.token + partialMarker
+		return c.token + notExactMarker
 	}
 	return c.token
 }
