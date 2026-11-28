@@ -1,12 +1,12 @@
 package main
 
 import (
-	"image/color"
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -14,6 +14,14 @@ import (
 // ui_test.go — pure width-budget and color contracts for ui.go. No TTY, no clock.
 
 func statusHeaders() []string { return columnHeaders(statusColumns) }
+
+// emitSizedGrid renders a width-fitted table through the production pipeline; it
+// replaces the deleted printTable as the test-only convenience for asserting
+// rendered table bytes.
+func emitSizedGrid(headers []string, rows [][]string, colorMode string, render cellRenderer, rightAlign []string, budget int) {
+	h, r, w, a := sizedGrid(headers, rows, budget, rightAlign)
+	emitGrid(h, r, w, a, colorMode, render)
+}
 
 func TestWidthBudget(t *testing.T) {
 	cases := []struct {
@@ -70,16 +78,41 @@ func TestMiddleElide(t *testing.T) {
 	}
 }
 
+// statusRow builds a status row from header names, so a schema change never
+// silently misaligns a fixture.
+func statusRow(values map[string]string) []string {
+	headers := statusHeaders()
+	row := make([]string, len(headers))
+	for i, h := range headers {
+		row[i] = values[h]
+	}
+	return row
+}
+
+func headerIndex(headers []string) map[string]int {
+	m := make(map[string]int, len(headers))
+	for i, h := range headers {
+		m[h] = i
+	}
+	return m
+}
+
 func TestColumnWidths(t *testing.T) {
 	headers := statusHeaders()
-	rows := [][]string{{
-		"/a/very/long/checkout/path/that/keeps/going/on",
-		"feature/a-rather-long-branch",
-		"origin/feature/a-rather-long-branch",
-		"2020-01-01", "UNUSED", "ch mc",
-	}}
+	rows := [][]string{statusRow(map[string]string{
+		"PATH":         "/a/very/long/checkout/path/that/keeps/going/on",
+		"BRANCH":       "feature/a-rather-long-branch",
+		"UPSTREAM":     "origin/feature/a-rather-long-branch",
+		"LAST USED":    "2020-01-01",
+		"AGE":          "12d",
+		"ACTIVE":       "8h 20m",
+		"COST":         "$41.20",
+		"STATUS":       "UNUSED",
+		"INTEGRATIONS": "ch mc",
+	})}
 	natural := naturalWidths(headers, rows)
 	naturalTotal := lineWidth(natural)
+	idx := headerIndex(headers)
 
 	t.Run("budget zero is natural", func(t *testing.T) {
 		assertWidths(t, columnWidths(headers, rows, 0), natural)
@@ -87,46 +120,100 @@ func TestColumnWidths(t *testing.T) {
 	t.Run("generous budget is natural", func(t *testing.T) {
 		assertWidths(t, columnWidths(headers, rows, naturalTotal+40), natural)
 	})
-	t.Run("path shrinks before branch", func(t *testing.T) {
-		budget := naturalTotal - 4
+	t.Run("identity columns shrink before the cost columns", func(t *testing.T) {
+		budget := naturalTotal - 2
 		got := columnWidths(headers, rows, budget)
 		assertWithin(t, got, budget)
-		assertPinned(t, got, natural)
-		if got[0] >= natural[0] {
-			t.Errorf("PATH should shrink first: got %d, natural %d", got[0], natural[0])
+		assertPinned(t, headers, got, natural)
+		assertNoSlivers(t, headers, got)
+		if got[idx["PATH"]] >= natural[idx["PATH"]] {
+			t.Errorf("PATH must give up width first: got %d, natural %d", got[idx["PATH"]], natural[idx["PATH"]])
 		}
-		if got[1] != natural[1] || got[2] != natural[2] {
-			t.Errorf("BRANCH/UPSTREAM must not shrink while PATH has room: got %d/%d, natural %d/%d", got[1], got[2], natural[1], natural[2])
+		for _, h := range []string{"AGE", "ACTIVE", "COST"} {
+			if got[idx[h]] != natural[idx[h]] {
+				t.Errorf("%s must not shrink while PATH has room: got %d, natural %d", h, got[idx[h]], natural[idx[h]])
+			}
 		}
 	})
-	t.Run("upstream shrinks after path floor", func(t *testing.T) {
-		pathFloor := columnRegistry()["PATH"].floor
-		budget := naturalTotal - (natural[0] - pathFloor) - 3
+	t.Run("cost columns keep their header floor", func(t *testing.T) {
+		registry := columnRegistry()
+		identitySlack := 0
+		for _, h := range []string{"PATH", "UPSTREAM", "BRANCH", "LAST USED"} {
+			identitySlack += natural[idx[h]] - registry[h].floor
+		}
+		budget := naturalTotal - identitySlack - 2
 		got := columnWidths(headers, rows, budget)
 		assertWithin(t, got, budget)
-		assertPinned(t, got, natural)
-		if got[0] != pathFloor {
-			t.Errorf("PATH = %d, want floor %d", got[0], pathFloor)
+		assertPinned(t, headers, got, natural)
+		assertNoSlivers(t, headers, got)
+		for _, h := range []string{"PATH", "UPSTREAM", "BRANCH"} {
+			if got[idx[h]] != registry[h].floor {
+				t.Errorf("%s = %d, want floor %d", h, got[idx[h]], registry[h].floor)
+			}
 		}
-		if got[2] != natural[2]-3 {
-			t.Errorf("UPSTREAM = %d, want %d", got[2], natural[2]-3)
+		for _, h := range []string{"AGE", "ACTIVE", "COST"} {
+			if got[idx[h]] < dispWidth(h) {
+				t.Errorf("%s = %d, narrower than its header %d", h, got[idx[h]], dispWidth(h))
+			}
 		}
+		assertWholeOrDropped(t, headers, got, natural, "LAST USED", "AGE", "ACTIVE", "COST", "INTEGRATIONS")
 	})
-	t.Run("tight budget still fits and keeps pinned columns", func(t *testing.T) {
+	t.Run("tight budget drops whole columns, never slivers", func(t *testing.T) {
 		got := columnWidths(headers, rows, 45)
 		assertWithin(t, got, 45)
-		assertPinned(t, got, natural)
+		assertPinned(t, headers, got, natural)
+		assertNoSlivers(t, headers, got)
 	})
+}
+
+// TestColumnWidthsNarrowBudgets pins the fit contract at every narrow
+// terminal: optional columns drop whole first, identity columns yield next,
+// measurement columns survive whole while kept, lines fit, and no slivers ever
+// render.
+func TestColumnWidthsNarrowBudgets(t *testing.T) {
+	headers := statusHeaders()
+	rows := [][]string{statusRow(map[string]string{
+		"PATH":         "/a/very/long/checkout/path/that/keeps/going/on",
+		"BRANCH":       "feature/a-rather-long-branch",
+		"UPSTREAM":     "origin/feature/a-rather-long-branch",
+		"LAST USED":    "2020-01-01",
+		"AGE":          "12d",
+		"ACTIVE":       "8h 20m",
+		"COST":         "$41.20",
+		"STATUS":       "UNUSED",
+		"INTEGRATIONS": "ch mc",
+	})}
+	idx := headerIndex(headers)
+	natural := naturalWidths(headers, rows)
+	for _, budget := range []int{80, 60, 40} {
+		t.Run(fmt.Sprintf("%d", budget), func(t *testing.T) {
+			got := columnWidths(headers, rows, budget)
+			assertWithin(t, got, budget)
+			assertPinned(t, headers, got, natural)
+			assertNoSlivers(t, headers, got)
+			for _, h := range []string{"LAST USED", "AGE", "ACTIVE", "COST", "INTEGRATIONS"} {
+				if got[idx[h]] > 0 && got[idx[h]] < dispWidth(h) {
+					t.Errorf("%s = %d, narrower than its %d-cell header", h, got[idx[h]], dispWidth(h))
+				}
+			}
+			assertWholeOrDropped(t, headers, got, natural, "LAST USED", "AGE", "ACTIVE", "COST", "INTEGRATIONS")
+		})
+	}
 }
 
 func TestElideCells(t *testing.T) {
 	headers := statusHeaders()
-	rows := [][]string{{
-		"/a/very/long/checkout/path",
-		"feature/x",
-		"origin/x",
-		"2020-01-01", "UNUSED", "ch mc",
-	}}
+	rows := [][]string{statusRow(map[string]string{
+		"PATH":         "/a/very/long/checkout/path",
+		"BRANCH":       "feature/x",
+		"UPSTREAM":     "origin/x",
+		"LAST USED":    "2020-01-01",
+		"AGE":          "12d",
+		"ACTIVE":       "8h 20m",
+		"COST":         "$41.20",
+		"STATUS":       "UNUSED",
+		"INTEGRATIONS": "ch mc",
+	})}
 	widths := naturalWidths(headers, rows)
 	widths[0] = 10
 	gotHeaders, gotRows := elideCells(headers, rows, widths)
@@ -185,34 +272,82 @@ func clearColorEnv(t *testing.T) {
 }
 
 func TestStatusCellStyle(t *testing.T) {
+	// The production renderer is the single source of truth for the header→style
+	// mapping; asserting on its rendered bytes means a style regression cannot
+	// hide behind a test-only dispatch.
+	render := statusCellRenderer(columnRegistry())
 	cases := []struct {
 		header, value string
 		bold, faint   bool
-		fg            color.Color
+		fg            int // ANSI SGR foreground code; 0 = none
 	}{
-		{"STATUS", "ACTIVE", true, false, lipgloss.Green},
-		{"STATUS", "UNUSED", false, false, lipgloss.Yellow},
-		{"CHUNKHOUND", "yes", false, false, lipgloss.Green},
-		{"CHUNKHOUND", "partial", false, false, lipgloss.Yellow},
-		{"MCP", "-", false, true, nil},
-		{"MCP", "n/a", false, true, nil},
-		{"INTEGRATIONS", "ch mc", false, false, nil},
-		{"UPSTREAM", "origin/feat", false, false, lipgloss.Green},
-		{"UPSTREAM", "-", false, true, nil},
-		{"BRANCH", "(detached)", false, true, nil},
-		{"BRANCH", "main", false, false, nil},
-		{"LAST USED", "never", false, true, nil},
-		{"PATH", "/x", false, false, nil},
+		{"STATUS", "ACTIVE", true, false, 32},
+		{"STATUS", "UNUSED", false, false, 33},
+		{"CHUNKHOUND", "yes", false, false, 32},
+		{"CHUNKHOUND", "partial", false, false, 33},
+		{"MCP", "-", false, true, 0},
+		{"MCP", "n/a", false, true, 0},
+		{"INTEGRATIONS", "ch mc", false, false, 32},
+		{"UPSTREAM", "origin/feat", false, false, 32},
+		{"UPSTREAM", "-", false, true, 0},
+		{"BRANCH", "(detached)", false, true, 0},
+		{"BRANCH", "main", false, false, 0},
+		{"LAST USED", "never", false, true, 0},
+		{"COST", "unknown", false, true, 0},
+		{"COST", "-", false, true, 0},
+		{"COST", "$4.00", false, false, 0},
+		{"PATH", "/x", false, false, 0},
 	}
 	for _, tc := range cases {
-		s := statusCellStyle(tc.header, tc.value)
-		if s.GetBold() != tc.bold || s.GetFaint() != tc.faint {
-			t.Errorf("statusCellStyle(%q, %q) bold=%v faint=%v, want %v/%v",
-				tc.header, tc.value, s.GetBold(), s.GetFaint(), tc.bold, tc.faint)
+		attrs := cellAttrs(render(tc.header, tc.value))
+		if attrs[1] != tc.bold || attrs[2] != tc.faint {
+			t.Errorf("render(%q, %q) bold=%v faint=%v, want %v/%v",
+				tc.header, tc.value, attrs[1], attrs[2], tc.bold, tc.faint)
 		}
-		if tc.fg != nil && s.GetForeground() != tc.fg {
-			t.Errorf("statusCellStyle(%q, %q) foreground = %v, want %v", tc.header, tc.value, s.GetForeground(), tc.fg)
+		if tc.fg != 0 {
+			if !attrs[tc.fg] {
+				t.Errorf("render(%q, %q) missing foreground %d, attrs=%v", tc.header, tc.value, tc.fg, attrs)
+			}
+		} else {
+			for c := 30; c <= 37; c++ {
+				if attrs[c] {
+					t.Errorf("render(%q, %q) unexpected foreground %d, attrs=%v", tc.header, tc.value, c, attrs)
+				}
+			}
 		}
+	}
+}
+
+// cellAttrs extracts the ANSI SGR attribute codes present in a rendered cell,
+// e.g. 1=bold, 2=faint, 32=green foreground. Used to assert style rules on the
+// production renderer's output.
+func cellAttrs(s string) map[int]bool {
+	attrs := make(map[int]bool)
+	for _, seq := range strings.Split(s, "\x1b[")[1:] {
+		end := strings.IndexByte(seq, 'm')
+		if end < 0 {
+			continue
+		}
+		for _, p := range strings.Split(seq[:end], ";") {
+			if n, err := strconv.Atoi(p); err == nil {
+				attrs[n] = true
+			}
+		}
+	}
+	return attrs
+}
+
+// TestLegendStyleFollowsProfile pins the shared legend treatment: the legend is
+// dim on a color terminal and byte-plain when color is off, so a legend never
+// pollutes pipes or goldens.
+func TestLegendStyleFollowsProfile(t *testing.T) {
+	const line = "tokens: a = b"
+	colored := captureStdout(t, func() { printLegend([]string{line}, colorAlways) })
+	if !strings.Contains(colored, "\x1b[2m") {
+		t.Fatalf("legend is not dim with --color=always: %q", colored)
+	}
+	if plain := captureStdout(t, func() { printLegend([]string{line}, colorNever) }); plain != line+"\n" {
+		t.Fatalf("legend must be byte-plain with --color=never: %q", plain)
 	}
 }
 
@@ -225,11 +360,12 @@ func TestGroupedCellColors(t *testing.T) {
 		{"partial", "chunk~", "\x1b[33m"},
 		{"absent", "-", "\x1b[2m"},
 	}
+	render := statusCellRenderer(columnRegistry())
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := statusCell(colIntegrations.header, tc.value)
+			got := render(colIntegrations.header, tc.value)
 			if !strings.Contains(got, tc.escape) {
-				t.Fatalf("statusCell(%q) = %q, want escape %q", tc.value, got, tc.escape)
+				t.Fatalf("render(%q) = %q, want escape %q", tc.value, got, tc.escape)
 			}
 		})
 	}
@@ -240,10 +376,10 @@ func TestGroupedCellColors(t *testing.T) {
 func TestStyledCellsStripToPlain(t *testing.T) {
 	headers := statusHeaders()
 	rows := [][]string{
-		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "-", "ch mc"},
-		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "expired", "-"},
+		statusRow(map[string]string{"PATH": "/SBX/repo", "BRANCH": "main", "UPSTREAM": "origin/main", "LAST USED": "2020-01-01", "AGE": "12d", "ACTIVE": "8h 20m", "COST": "$41.20", "STATUS": "ACTIVE", "TEMP": "-", "INTEGRATIONS": "ch mc"}),
+		statusRow(map[string]string{"PATH": "/SBX/wt", "BRANCH": "(detached)", "UPSTREAM": "-", "LAST USED": "never", "AGE": "-", "ACTIVE": "-", "COST": "-", "STATUS": "UNUSED", "TEMP": "expired", "INTEGRATIONS": "-"}),
 	}
-	_, styled := renderCells(headers, rows, statusCell)
+	_, styled := renderCells(headers, rows, statusCellRenderer(columnRegistry()))
 	for r := range rows {
 		for c := range rows[r] {
 			if got := ansi.Strip(styled[r][c]); got != rows[r][c] {
@@ -251,13 +387,14 @@ func TestStyledCellsStripToPlain(t *testing.T) {
 			}
 		}
 	}
+	idx := headerIndex(headers)
 	for r, want := range []string{"ACTIVE", "UNUSED"} {
-		if !strings.Contains(styled[r][4], "\x1b[") {
-			t.Errorf("STATUS %q cell carries no ANSI: %q", want, styled[r][4])
+		if !strings.Contains(styled[r][idx["STATUS"]], "\x1b[") {
+			t.Errorf("STATUS %q cell carries no ANSI: %q", want, styled[r][idx["STATUS"]])
 		}
 	}
-	if !strings.Contains(styled[0][6], "\x1b[") {
-		t.Errorf("INTEGRATIONS cell carries no ANSI: %q", styled[0][6])
+	if !strings.Contains(styled[0][idx["INTEGRATIONS"]], "\x1b[") {
+		t.Errorf("INTEGRATIONS cell carries no ANSI: %q", styled[0][idx["INTEGRATIONS"]])
 	}
 }
 
@@ -266,26 +403,99 @@ func TestStyledCellsStripToPlain(t *testing.T) {
 func TestStyledTableStripsToPlain(t *testing.T) {
 	headers := statusHeaders()
 	rows := [][]string{
-		{"/SBX/repo", "main", "origin/main", "2020-01-01", "ACTIVE", "-", "ch mc"},
-		{"/SBX/wt", "(detached)", "-", "never", "UNUSED", "expired", "-"},
+		statusRow(map[string]string{"PATH": "/SBX/repo", "BRANCH": "main", "UPSTREAM": "origin/main", "LAST USED": "2020-01-01", "AGE": "12d", "ACTIVE": "8h 20m", "COST": "$41.20", "STATUS": "ACTIVE", "TEMP": "-", "INTEGRATIONS": "ch mc"}),
+		statusRow(map[string]string{"PATH": "/SBX/wt", "BRANCH": "(detached)", "UPSTREAM": "-", "LAST USED": "never", "AGE": "-", "ACTIVE": "-", "COST": "-", "STATUS": "UNUSED", "TEMP": "expired", "INTEGRATIONS": "-"}),
 	}
 	widths := naturalWidths(headers, rows)
 	aligns := columnAligns(headers, columnRightAligns(statusColumns))
 	plain := renderTable(headers, rows, widths, aligns)
-	styledHeaders, styledRows := renderCells(headers, rows, statusCell)
+	styledHeaders, styledRows := renderCells(headers, rows, statusCellRenderer(columnRegistry()))
 	if got := ansi.Strip(renderTable(styledHeaders, styledRows, widths, aligns)); got != plain {
 		t.Errorf("stripped styled table differs from plain:\n got: %q\nwant: %q", got, plain)
 	}
 }
 
 func TestPrintTableRightAlign(t *testing.T) {
-	t.Setenv("COLUMNS", "0")
 	headers := []string{"A", "BB"}
 	rows := [][]string{{"x", "y"}}
-	out := captureStdout(t, func() { printTable(headers, rows, colorNever, nil, []string{"BB"}) })
+	// colorNever is NoTTY and the renderer is nil, so the table renders plain.
+	out := captureStdout(t, func() { emitSizedGrid(headers, rows, colorNever, nil, []string{"BB"}, 0) })
 	want := "A  BB\nx   y\n"
 	if out != want {
 		t.Fatalf("right-aligned table = %q, want %q", out, want)
+	}
+}
+
+// TestPrintKeyValues is the key/value block contract: headerless two-column
+// layout on the shared two-cell gutter, no trailing padding.
+func TestPrintKeyValues(t *testing.T) {
+	rows := [][]string{
+		{"current worktree", "/SBX/wt"},
+		{"age", "6y"},
+		{"active time", "45m"},
+	}
+	out := captureStdout(t, func() { printKeyValues(rows, 1, colorNever, 0) })
+	want := "current worktree  /SBX/wt\nage               6y\nactive time       45m\n"
+	if out != want {
+		t.Fatalf("key/value block = %q, want %q", out, want)
+	}
+}
+
+// TestPrintKeyValuesStylesTitleAndLabels proves the title carries the title
+// style, the other labels faint, and the styling strips back to the exact plain
+// bytes.
+func TestPrintKeyValuesStylesTitleAndLabels(t *testing.T) {
+	rows := [][]string{{"current worktree", "/SBX/wt"}, {"age", "6y"}}
+	styled := captureStdout(t, func() { printKeyValues(rows, 1, colorAlways, 0) })
+	if !strings.Contains(styled, "\x1b[1;36m") {
+		t.Errorf("title label is not a cyan title: %q", styled)
+	}
+	if !strings.Contains(styled, "\x1b[2m") {
+		t.Errorf("value label is not faint: %q", styled)
+	}
+	if got, want := ansi.Strip(styled), "current worktree  /SBX/wt\nage               6y\n"; got != want {
+		t.Errorf("stripped block = %q, want %q", got, want)
+	}
+}
+
+// TestPrintKeyValuesFitsWidth pins the summary block's budget: a long value is
+// elided to fit, the label survives, and no line exceeds the budget.
+func TestPrintKeyValuesFaintsNonValues(t *testing.T) {
+	rows := [][]string{
+		{"current worktree", "/SBX/wt"},
+		{"active time", "-"},
+		{"cost", "unknown"},
+		{"age", "6y"},
+	}
+	styled := captureStdout(t, func() { printKeyValues(rows, 1, colorAlways, 0) })
+	// A non-value recedes with faint; a real value stays plain.
+	for _, v := range []string{"-", "unknown"} {
+		if !strings.Contains(styled, "\x1b[2m"+v) {
+			t.Errorf("non-value %q is not faint: %q", v, styled)
+		}
+	}
+	if strings.Contains(styled, "\x1b[2m6y") {
+		t.Errorf("real value must stay plain: %q", styled)
+	}
+}
+
+func TestPrintKeyValuesFitsWidth(t *testing.T) {
+	rows := [][]string{
+		{"current worktree", "/SBX/home/a/very/long/checkout/path/that/keeps/going/on"},
+		{"cost", "$4.00"},
+	}
+	for _, width := range []int{80, 40, 30} {
+		t.Run(fmt.Sprintf("%d", width), func(t *testing.T) {
+			out := captureStdout(t, func() { printKeyValues(rows, 1, colorNever, width) })
+			for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+				if w := dispWidth(line); w > width {
+					t.Errorf("line exceeds %d cells: %d\n%q", width, w, line)
+				}
+			}
+			if !strings.Contains(out, "current worktree") {
+				t.Errorf("label lost at %d cols:\n%s", width, out)
+			}
+		})
 	}
 }
 
@@ -301,11 +511,45 @@ func assertWidths(t *testing.T, got, want []int) {
 	}
 }
 
-func assertPinned(t *testing.T, got, natural []int) {
+func assertPinned(t *testing.T, headers []string, got, natural []int) {
 	t.Helper()
-	for _, i := range []int{4} {
-		if got[i] != natural[i] {
-			t.Errorf("pinned column %d = %d, want %d", i, got[i], natural[i])
+	// STATUS is the only pinned status column (shrinkRank 0).
+	for i, h := range headers {
+		if h == "STATUS" && got[i] != natural[i] {
+			t.Errorf("pinned column %s = %d, want %d", h, got[i], natural[i])
+		}
+	}
+}
+
+// assertNoSlivers keeps the historical helper contract shared with
+// status_test.go: a kept column is at or above its header width or its declared
+// floor, whichever is narrower. The strict policy (a kept column is whole or at
+// its floor) is pinned by assertWholeOrDropped and the width_fix tests.
+func assertNoSlivers(t *testing.T, headers []string, widths []int) {
+	t.Helper()
+	registry := columnRegistry()
+	for i, w := range widths {
+		if w == 0 {
+			continue
+		}
+		floor := dispWidth(headers[i])
+		if c, ok := registry[headers[i]]; ok && c.floor > 0 && c.floor < floor {
+			floor = c.floor
+		}
+		if w < floor {
+			t.Errorf("column %s = %d, narrower than its %d-cell floor", headers[i], w, floor)
+		}
+	}
+}
+
+// assertWholeOrDropped pins the unelidable contract: the named columns render
+// their whole natural width or are dropped (width 0), never middle-elided.
+func assertWholeOrDropped(t *testing.T, headers []string, got, natural []int, names ...string) {
+	t.Helper()
+	idx := headerIndex(headers)
+	for _, h := range names {
+		if got[idx[h]] != 0 && got[idx[h]] != natural[idx[h]] {
+			t.Errorf("%s = %d, want whole %d or dropped", h, got[idx[h]], natural[idx[h]])
 		}
 	}
 }
@@ -327,7 +571,7 @@ func TestDropZeroColumns(t *testing.T) {
 		{"a2", "b2", "c2", "d2"},
 	}
 	widths := []int{10, 0, 5, 0}
-	h, r, w := dropZeroColumns(headers, rows, widths)
+	h, r, w := dropZeroColumns(headers, rows, widths, nil)
 	if !slices.Equal(h, []string{"A", "C"}) {
 		t.Errorf("headers = %v, want [A C]", h)
 	}
@@ -345,29 +589,60 @@ func TestDropZeroColumnsAllDropped(t *testing.T) {
 	headers := []string{"A", "B"}
 	rows := [][]string{{"a1", "b1"}}
 	widths := []int{0, 0}
-	h, r, w := dropZeroColumns(headers, rows, widths)
+	h, r, w := dropZeroColumns(headers, rows, widths, nil)
 	if len(h) != 0 || len(r[0]) != 0 || len(w) != 0 {
 		t.Errorf("all-dropped = %v / %v / %v, want empty", h, r, w)
 	}
 }
 
-// TestDropZeroColumnsWarnsForHiddenCapability pins the disclosure contract: a
-// dropped capability column is named on stderr (stdout stays machine-clean),
-// while a dropped core column stays silent. Only capability columns drop whole.
-func TestDropZeroColumnsWarnsForHiddenCapability(t *testing.T) {
+// TestDropZeroColumnsDisclosesHiddenColumns pins the disclosure contract: any
+// dropped column is named on stderr (stdout stays machine-clean), so a missing
+// column reads as hidden, not absent.
+func TestDropZeroColumnsDisclosesHiddenColumns(t *testing.T) {
 	header := strings.ToUpper(capabilities()[0].id)
 	headers := []string{"PATH", header}
 	rows := [][]string{{"/x", "yes"}}
 	t.Run("capability warns", func(t *testing.T) {
-		errOut := captureStderr(t, func() { dropZeroColumns(headers, rows, []int{10, 0}) })
+		errOut := captureStderr(t, func() { dropZeroColumns(headers, rows, []int{10, 0}, nil) })
 		if !strings.Contains(errOut, "terminal too narrow; hid "+header) {
 			t.Fatalf("hidden capability must warn: %q", errOut)
 		}
 	})
-	t.Run("core stays silent", func(t *testing.T) {
-		errOut := captureStderr(t, func() { dropZeroColumns(headers, rows, []int{0, 5}) })
-		if errOut != "" {
-			t.Fatalf("hidden core column must not warn: %q", errOut)
+	t.Run("core warns", func(t *testing.T) {
+		errOut := captureStderr(t, func() { dropZeroColumns(headers, rows, []int{0, 5}, nil) })
+		if !strings.Contains(errOut, "terminal too narrow; hid PATH") {
+			t.Fatalf("hidden core column must warn: %q", errOut)
 		}
 	})
+}
+
+// TestStatusCellStyleNonValuesRecede pins that both price columns treat a
+// non-value as a non-value: an absent or unpriced COST or LIST cell recedes
+// instead of reading as a number.
+func TestStatusCellStyleNonValuesRecede(t *testing.T) {
+	render := statusCellRenderer(columnRegistry())
+	for _, header := range []string{"COST", "LIST"} {
+		for _, v := range []string{"-", "unknown"} {
+			if got := render(header, v); !strings.Contains(got, "\x1b[2m") {
+				t.Errorf("render(%s, %q) = %q, want faint ANSI", header, v, got)
+			}
+		}
+		if got := render(header, "$1.00"); strings.Contains(got, "\x1b[2m") {
+			t.Errorf("render(%s, \"$1.00\") = %q, want no faint ANSI", header, got)
+		}
+	}
+}
+
+// BenchmarkReviewStatusCell tracks per-cell allocations in the status style
+// path: the registry lookup must be built once per render, not per cell.
+func BenchmarkReviewStatusCell(b *testing.B) {
+	render := statusCellRenderer(columnRegistry())
+	headers := []string{"PATH", "BRANCH", "UPSTREAM", "LAST USED", "AGE", "ACTIVE", "COST", "LIST", "STATUS", "TEMP", "INTEGRATIONS"}
+	row := []string{"/SBX/wt", "main", "-", "2026-10-24", "10d 3h", "~2M 16d", "$101.19", "$1,738.95", "ACTIVE", "-", "chunk mcp pi claude"}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for j, h := range headers {
+			render(h, row[j])
+		}
+	}
 }

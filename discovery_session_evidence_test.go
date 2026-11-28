@@ -160,7 +160,7 @@ func TestExplicitGCPathFailsClosedOnUnreadableSession(t *testing.T) {
 			if !exists(temp.Path) || !exists(permanent) || !exists(p) {
 				t.Fatal("explicit GC changed checkout or evidence despite unreadable session")
 			}
-			if _, _, err := discover(repo, nil, true); err == nil || !strings.Contains(err.Error(), p) {
+			if _, _, err := discover(repo, nil, true, time.Now()); err == nil || !strings.Contains(err.Error(), p) {
 				t.Fatalf("ordinary strict discovery must reject unreadable session: %v", err)
 			}
 		})
@@ -309,7 +309,7 @@ func requireNotProtected(t *testing.T, w worktree) {
 }
 
 // TestIdleGCDiscoveryGuardProtectsOnExactSessionAge pins the equality edge of
-// guardPermanentActivity (status.go:245): a permanent whose newest known-age
+// guardPermanentActivity (see activity.go): a permanent whose newest known-age
 // unverified session matches its activity exactly must stay protected.
 func TestIdleGCDiscoveryGuardProtectsOnExactSessionAge(t *testing.T) {
 	repo, _, _ := discoveryEvidenceFixture(t)
@@ -332,7 +332,7 @@ func TestIdleGCDiscoveryGuardProtectsOnExactSessionAge(t *testing.T) {
 }
 
 // TestIdleGCDiscoveryNewestSessionDecidesProtection pins newestKnownSession
-// (status.go:261): protection scopes by the MAX of multiple known-age
+// (see activity.go): protection scopes by the MAX of multiple known-age
 // unverified sessions, not the min or first.
 func TestIdleGCDiscoveryNewestSessionDecidesProtection(t *testing.T) {
 	repo, tempWt, _ := discoveryEvidenceFixture(t)

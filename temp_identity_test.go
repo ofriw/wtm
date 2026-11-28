@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func identityCheckout(t *testing.T) (string, string, worktree) {
@@ -17,7 +18,7 @@ func identityCheckout(t *testing.T) (string, string, worktree) {
 	path := filepath.Join(filepath.Dir(repo), "temp")
 	gitWorktreeAdd(t, repo, path, "tmp/test", "HEAD")
 	seedTempRecord(t, path, "tmp/test", "100ms", tempTestTime)
-	w := buildWorktree(gworktree{Path: path, Branch: "tmp/test"}, sessionIndex{}, nil, mustReadTempStore(t), nil)
+	w := buildWorktree(gworktree{Path: path, Branch: "tmp/test"}, sessionIndex{}, nil, mustReadTempStore(t), nil, time.Now())
 	if !w.Temp || !validTempIdentity(w.TempIdentity) {
 		t.Fatalf("identity was not attached: %+v", w)
 	}
@@ -26,7 +27,7 @@ func identityCheckout(t *testing.T) (string, string, worktree) {
 
 func assertPermanentAfterReconcile(t *testing.T, path, branch string) {
 	t.Helper()
-	before := buildWorktree(gworktree{Path: path, Branch: branch}, sessionIndex{}, nil, mustReadTempStore(t), nil)
+	before := buildWorktree(gworktree{Path: path, Branch: branch}, sessionIndex{}, nil, mustReadTempStore(t), nil, time.Now())
 	if before.Temp {
 		t.Fatal("unverified checkout inherited temp rules before reconciliation")
 	}
@@ -37,7 +38,7 @@ func assertPermanentAfterReconcile(t *testing.T, path, branch string) {
 	if _, ok := store[canonical(path)]; ok {
 		t.Fatal("stale record survived reconciliation")
 	}
-	w := buildWorktree(gworktree{Path: path, Branch: branch}, sessionIndex{}, nil, store, nil)
+	w := buildWorktree(gworktree{Path: path, Branch: branch}, sessionIndex{}, nil, store, nil, time.Now())
 	if w.Temp {
 		t.Fatal("replacement checkout became temp")
 	}
@@ -109,7 +110,7 @@ func TestTempIdentityInvalidNeverTemp(t *testing.T) {
 	for _, identity := range []string{"", "bad", strings.Repeat("a", 63)} {
 		rec := mustReadTempStore(t)[canonical(path)]
 		rec.Identity = identity
-		got := buildWorktree(gworktree{Path: path, Branch: w.Branch}, sessionIndex{}, nil, tempStore{canonical(path): rec}, nil)
+		got := buildWorktree(gworktree{Path: path, Branch: w.Branch}, sessionIndex{}, nil, tempStore{canonical(path): rec}, nil, time.Now())
 		if got.Temp {
 			t.Fatalf("invalid identity %q marked temp", identity)
 		}

@@ -1,0 +1,87 @@
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -      -  ACTIVE  -     -
+/SBX/wt    wt      -         2020-01-01  6y 2d      0s  $1.84  ACTIVE  -     -
+
+current worktree  /SBX/repo
+age               6y 2d
+active time       -
+cost              -
+no agent usage recorded
+[
+  {
+    "path": "/SBX/repo",
+    "branch": "main",
+    "upstream": "",
+    "main": true,
+    "current": true,
+    "lastUsed": "2020-01-01T00:00:00Z",
+    "status": "ACTIVE",
+    "ageSeconds": 189388800,
+    "cost": null,
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    },
+    "temp": false,
+    "expiresAt": null
+  },
+  {
+    "path": "/SBX/wt",
+    "branch": "wt",
+    "upstream": "",
+    "main": false,
+    "current": false,
+    "lastUsed": "2020-01-01T00:00:00Z",
+    "status": "ACTIVE",
+    "ageSeconds": 189388800,
+    "cost": 1.8375,
+    "activeSeconds": 0,
+    "usage": {
+      "claude": {
+        "cost": 1.8375,
+        "activeSeconds": 0,
+        "models": {
+          "claude-sonnet-4-6": {
+            "cost": 1.8375,
+            "activeSeconds": 0,
+            "tiers": {
+              "cacheRead": {
+                "tokens": 0,
+                "cost": null
+              },
+              "cacheWrite": {
+                "tokens": 10000,
+                "cost": 0.0375
+              },
+              "input": {
+                "tokens": 100000,
+                "cost": 0.3
+              },
+              "output": {
+                "tokens": 100000,
+                "cost": 1.5
+              }
+            },
+            "cacheMissTokens": 110000,
+            "cacheHitRate": 0
+          }
+        }
+      }
+    },
+    "inputOutputRatio": {
+      "total": 1.1,
+      "cached": 0,
+      "uncached": 1.1
+    },
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    },
+    "temp": false,
+    "expiresAt": null
+  }
+]

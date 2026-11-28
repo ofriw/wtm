@@ -31,8 +31,8 @@ var indexTimeout = 5 * time.Minute
 var errNoChunkHound = errors.New("chunkhound not on PATH")
 
 // hasChunkHoundWorkspace reports whether root carries a ChunkHound setup. The
-// existence paths come from the same constants as status.go's CONFIG/DB
-// columns, so the two views of "does this project use ChunkHound" cannot drift.
+// existence paths come from the same helpers the capability registry uses for
+// its ChunkHound state, so the two views cannot drift.
 func hasChunkHoundWorkspace(root string) bool {
 	return exists(filepath.Join(root, chunkhoundConfigFile)) || exists(chunkhoundDBPath(root))
 }

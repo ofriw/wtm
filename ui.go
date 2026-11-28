@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
@@ -21,11 +22,24 @@ import (
 // warnPrefix labels every non-fatal disclosure line, wherever it is emitted.
 const warnPrefix = "warning: "
 
-// warnf writes a `warning:` line to stderr. stdout stays machine-clean, so
-// every non-fatal disclosure goes through here.
-func warnf(format string, a ...any) {
-	fmt.Fprint(os.Stderr, warnPrefix+fmt.Sprintf(format, a...)+"\n")
+// cleanWarningText makes one warning single-line: control characters collapse
+// to spaces and whitespace runs to one space. A hostile cause (a model name
+// carrying newlines or tabs) interpolates into warnings, so only display text
+// is cleaned; raw values stay in JSON.
+func cleanWarningText(s string) string {
+	clean := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(clean), " ")
 }
+
+// warnf writes a `warning:` line to stderr. stdout stays machine-clean, so
+// every non-fatal disclosure goes through here. It is warnProgress's nil-
+// progress case, so the two cannot drift.
+func warnf(format string, a ...any) { warnProgress(nil, format, a...) }
 
 // pickerOptionPrefixWidth is how far huh's MultiSelect indents an option key:
 // the selector ("> " / "  ") plus the toggle prefix ("• " / "✓ ").
@@ -52,31 +66,75 @@ func booleanStyle(active bool) lipgloss.Style {
 	return lipgloss.NewStyle().Faint(true)
 }
 
-// statusCellStyle maps a status-table cell to its style. Basic ANSI colors are
-// deliberate: the terminal theme owns the palette, and every profile (16/256/
-// truecolor/NO_COLOR) degrades cleanly. UNUSED is Yellow, not Red: it is the
-// gc candidate, not an error.
-func statusCellStyle(header, value string) lipgloss.Style {
-	switch header {
-	case "STATUS":
-		if value == "ACTIVE" {
-			return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Green)
+// titleStyle is the one title treatment: every table header and the block
+// title share it, so "title" reads the same everywhere and outranks both the
+// plain data and the faint secondary labels. Basic ANSI cyan is deliberate:
+// the terminal theme owns the exact hue.
+func titleStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Cyan)
+}
+
+// Non-value grammar: the rendered absent/unpriced tokens. Cells produce them;
+// the styles that fade them and the summary block match the same names, so a
+// non-value always recedes with faint. The detached/never tokens are the
+// branch and last-used non-s, named once here so every producer and the
+// styles that fade them share one spelling.
+const (
+	dashValue     = "-"
+	unknownValue  = "unknown"
+	neverValue    = "never"
+	detachedValue = "(detached)"
+)
+
+// secondaryValue reports a rendered non-value: absent (dashValue) or unpriced
+// (unknownValue). One rule serves both the table cells and the summary block,
+// so a non-value recedes with faint everywhere.
+func secondaryValue(v string) bool { return v == dashValue || v == unknownValue }
+
+// statusColumnStyle maps the fixed status columns by their style key. Basic
+// ANSI colors are deliberate: every profile degrades cleanly, and UNUSED is
+// Yellow, not Red, because it is a gc candidate, not an error. The ok result
+// is false when the style has no rule, so the caller can fall through to the
+// capability columns.
+func statusColumnStyle(style colStyle, value string) (lipgloss.Style, bool) {
+	switch style {
+	case styleStatus:
+		return statusWordStyle(value), true
+	case styleTemp:
+		return tempCellStyle(value), true
+	case styleUpstream:
+		return booleanStyle(value != dashValue), true
+	case styleSecondary, styleStale:
+		return secondaryColumnStyle(style, value)
+	}
+	return lipgloss.Style{}, false
+}
+
+// statusWordStyle colors the STATUS word: ACTIVE is live, anything else is the
+// gc candidate.
+func statusWordStyle(value string) lipgloss.Style {
+	if value == statusActive {
+		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Green)
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
+}
+
+// secondaryColumnStyle fades a COST/LIST non-value and a stale BRANCH/LAST USED
+// marker; any other value stays plain. The ok result is false so the caller can
+// try the capability columns.
+func secondaryColumnStyle(style colStyle, value string) (lipgloss.Style, bool) {
+	switch style {
+	case styleSecondary:
+		// A number is the signal; "unknown" and "-" are non-values and recede.
+		if secondaryValue(value) {
+			return lipgloss.NewStyle().Faint(true), true
 		}
-		return lipgloss.NewStyle().Foreground(lipgloss.Yellow)
-	case "TEMP":
-		return tempCellStyle(value)
-	case "UPSTREAM":
-		return booleanStyle(value != "-")
-	case "BRANCH", "LAST USED":
-		if value == "(detached)" || value == "never" {
-			return lipgloss.NewStyle().Faint(true)
+	case styleStale:
+		if value == detachedValue || value == neverValue {
+			return lipgloss.NewStyle().Faint(true), true
 		}
 	}
-	// Capability columns only appear in the opt-in --wide view.
-	if isCapabilityHeader(header) {
-		return capabilityCellStyle(value)
-	}
-	return lipgloss.NewStyle()
+	return lipgloss.Style{}, false
 }
 
 // capabilityCellStyle maps a --wide capability cell. The state word is the
@@ -94,7 +152,7 @@ func capabilityCellStyle(value string) lipgloss.Style {
 }
 
 func tempCellStyle(value string) lipgloss.Style {
-	if value == "-" {
+	if value == dashValue {
 		return lipgloss.NewStyle().Faint(true)
 	}
 	if value == "expired" {
@@ -116,24 +174,52 @@ func capStateStyle(s capState) lipgloss.Style {
 	}
 }
 
-// cellRenderer renders one plain cell value into its colored form. printTable
+// cellRenderer renders one plain cell value into its colored form. emitGrid
 // calls it only when the profile supports styling, so it may always decorate.
 type cellRenderer func(header, value string) string
 
-// statusCell renders one plain status cell with its color. The grouped
-// INTEGRATIONS cell colors token-by-token; every other column takes one style.
-func statusCell(header, value string) string {
-	if header == colIntegrations.header {
-		return groupedCellStyle(value)
+// statusCellRenderer fixes the style lookup for one render, so columnRegistry()
+// runs once per table, not per cell.
+func statusCellRenderer(styles map[string]worktreeColumn) cellRenderer {
+	return func(header, value string) string {
+		if header == colIntegrations.header {
+			return groupedCellStyle(value)
+		}
+		if styled, ok := statusColumnStyle(styles[header].style, value); ok {
+			return styled.Render(value)
+		}
+		if isCapabilityHeader(header) {
+			return capabilityCellStyle(value).Render(value)
+		}
+		return value
 	}
-	return statusCellStyle(header, value).Render(value)
+}
+
+// legendStyle is the one treatment for the explanatory lines under a table:
+// dim, because a legend is secondary to the data it explains. Basic dim
+// degrades cleanly across every profile.
+func legendStyle() lipgloss.Style { return lipgloss.NewStyle().Faint(true) }
+
+// printLegend writes explanatory lines below a table through the resolved
+// profile, so a legend dims on a color terminal and stays byte-clean when the
+// output is piped. Styling is skipped on NoTTY, matching emitGrid, so pipes,
+// --json and goldens remain byte-stable.
+func printLegend(lines []string, colorMode string) {
+	profile := resolveColorProfile(colorMode)
+	w := &colorprofile.Writer{Forward: os.Stdout, Profile: profile}
+	for _, line := range lines {
+		if profile > colorprofile.NoTTY {
+			line = legendStyle().Render(line)
+		}
+		_, _ = fmt.Fprintln(w, line)
+	}
 }
 
 // groupedCellStyle colors a grouped INTEGRATIONS cell token by token: present
 // green, partial yellow, absent faint. Shape (via the shared markers) carries
 // the state; color only reinforces it.
 func groupedCellStyle(value string) string {
-	if value == "-" {
+	if value == dashValue {
 		return capStateStyle(capAbsent).Render(value)
 	}
 	tokens := strings.Fields(value)
@@ -141,7 +227,7 @@ func groupedCellStyle(value string) string {
 		// WHY: the ~ suffix groupedToken writes is the state, so color keys
 		// off it directly instead of through a token-string wrapper.
 		state := capPresent
-		if strings.HasSuffix(tok, partialMarker) {
+		if strings.HasSuffix(tok, notExactMarker) {
 			state = capPartial
 		}
 		tokens[i] = capStateStyle(state).Render(tok)
@@ -149,15 +235,13 @@ func groupedCellStyle(value string) string {
 	return strings.Join(tokens, " ")
 }
 
-// printTable renders a width-fitted table. Deterministic output is a test
-// contract: the budget comes from COLUMNS or a TTY only, and cells are sized
-// and middle-elided here — never by the table resizer, whose end-elision and
-// shrink-column choice we cannot observe or pin. Styles are applied only when
-// the resolved profile supports them; NoTTY output stays pure ASCII so pipes,
-// --json and goldens remain byte-stable.
-func printTable(headers []string, rows [][]string, colorMode string, render cellRenderer, rightAlign []string) {
-	headers, rows, widths, aligns := sizedGrid(headers, rows, widthBudget(), rightAlign)
+// emitGrid renders a pre-sized grid: style when the profile supports it, then
+// split and write. printStatusTable and the detail block all end
+// here, so every table shares one pipeline.
+func emitGrid(headers []string, rows [][]string, widths []int, aligns []lipgloss.Position, colorMode string, render cellRenderer) {
 	profile := resolveColorProfile(colorMode)
+	// A nil renderer renders plain text: the guard keeps that a no-op instead of
+	// relying on the profile to skip the call.
 	if profile > colorprofile.NoTTY && render != nil {
 		headers, rows = renderCells(headers, rows, render)
 	}
@@ -165,14 +249,81 @@ func printTable(headers []string, rows [][]string, colorMode string, render cell
 	writeTable(gridString(header, body), profile)
 }
 
+// printKeyValues renders a headerless two-column block: label, then value. It
+// shares renderTable's sizing, two-cell gutter, trimming and width budget with
+// emitGrid, so a key/value block lines up with the tables around it instead
+// of introducing a third layout. The first titleRows labels carry the title
+// style; the rest are faint; values stay plain except a non-value ("-"/
+// "unknown"), which recedes with faint. Styles apply after sizing and elision,
+// and NoTTY output is ASCII-only, so goldens stay byte-stable.
+func printKeyValues(rows [][]string, titleRows int, colorMode string, budget int) {
+	labels, widths := sizedKeyValues(rows, budget)
+	aligns := columnAligns(labels, nil)        // key/value blocks are left-aligned
+	_, rows = elideCells(labels, rows, widths) // elide plain text before styling
+	profile := resolveColorProfile(colorMode)
+	if profile > colorprofile.NoTTY {
+		rows = styleKeyValues(rows, titleRows)
+	}
+	writeTable(renderTable(nil, rows, widths, aligns), profile)
+}
+
+// keyValueValueFloor is the narrowest value cell a summary block keeps. Below it
+// a rendered value is a bare ellipsis, which reads as missing, not elided.
+const keyValueValueFloor = 6
+
+// sizedKeyValues sizes a two-column summary block to the terminal budget. The
+// block renders headerless, so an empty label slice stands in for the width
+// pass; callers with no rows must not call it.
+func sizedKeyValues(rows [][]string, budget int) ([]string, []int) {
+	labels := make([]string, len(rows[0])) // width pass only; no header row renders
+	return labels, fitKeyValues(naturalWidths(labels, rows), budget)
+}
+
+// fitKeyValues fits a two-column summary block to the budget: the value column
+// gives up width first, then the label, so a long path cannot wrap the block
+// while the table above elides. Values never fall below keyValueValueFloor.
+func fitKeyValues(widths []int, budget int) []int {
+	if budget <= 0 || lineWidth(widths) <= budget {
+		return widths
+	}
+	widths[1] = max(keyValueValueFloor, widths[1]-(lineWidth(widths)-budget))
+	if over := lineWidth(widths) - budget; over > 0 {
+		widths[0] = max(1, widths[0]-over)
+	}
+	return widths
+}
+
+// styleKeyValues title-styles the first titleRows labels and faints the
+// remaining ones. Labels identify data; values are data, so a value stays
+// plain. A non-value ("-"/"unknown") recedes with faint, matching the table
+// cells (see secondaryColumnStyle's COST case).
+func styleKeyValues(rows [][]string, titleRows int) [][]string {
+	out := make([][]string, len(rows))
+	for i, r := range rows {
+		label := lipgloss.NewStyle().Faint(true)
+		if i < titleRows {
+			label = titleStyle()
+		}
+		value := lipgloss.NewStyle()
+		if secondaryValue(r[1]) {
+			value = value.Faint(true)
+		}
+		out[i] = []string{label.Render(r[0]), value.Render(r[1])}
+	}
+	return out
+}
+
 // sizedGrid resolves a grid against a width budget: columns are sized, then
-// middle-elided, and alignment is resolved from the plain headers before
-// elision so ANSI decoration can never change which columns are right-aligned.
-// Return order matches renderGrid's parameters, so renderGrid(sizedGrid(...))
-// composes.
+// laid out by layoutGrid.
 func sizedGrid(headers []string, rows [][]string, budget int, rightAlign []string) ([]string, [][]string, []int, []lipgloss.Position) {
-	widths := columnWidths(headers, rows, budget)
-	headers, rows, widths = dropZeroColumns(headers, rows, widths)
+	// nil seen: grids outside a status run always disclose a drop.
+	return layoutGrid(headers, rows, columnWidths(headers, rows, budget), rightAlign, nil)
+}
+
+// layoutGrid is the shared drop/align/elide pipeline for a pre-sized grid;
+// sizedGrid and fittedGrid both end here, so one pipeline serves every table.
+func layoutGrid(headers []string, rows [][]string, widths []int, rightAlign []string, seen map[string]bool) ([]string, [][]string, []int, []lipgloss.Position) {
+	headers, rows, widths = dropZeroColumns(headers, rows, widths, seen)
 	aligns := columnAligns(headers, rightAlign)
 	headers, rows = elideCells(headers, rows, widths)
 	return headers, rows, widths, aligns
@@ -265,12 +416,12 @@ func truthy(v string) bool {
 	return err == nil && b
 }
 
-// renderCells bolds the header row and renders each body cell through render.
-// It runs after elision so widths are measured on plain text.
+// renderCells title-styles the header row and renders each body cell through
+// render. It runs after elision so widths are measured on plain text.
 func renderCells(headers []string, rows [][]string, render cellRenderer) ([]string, [][]string) {
 	styled := make([]string, len(headers))
 	for i, h := range headers {
-		styled[i] = lipgloss.NewStyle().Bold(true).Render(h)
+		styled[i] = titleStyle().Render(h)
 	}
 	out := make([][]string, len(rows))
 	for r, row := range rows {
@@ -345,12 +496,15 @@ func middleElide(s string, w int) string {
 }
 
 // columnWidths sizes each column to natural width when the budget allows, else
-// shrinks the shrinkable columns in rank order down to their floor and, only
-// if that is still not enough, down to a single cell. Pinned columns never
-// change. A floor-0 column is all-or-nothing: it renders at natural width or
-// is dropped whole, never elided to a useless sliver. Shrink priority is
-// derived from the actual headers via columnRegistry(), so --wide capability
-// columns participate alongside the core columns.
+// gives up width in rank order. A declared floor is a hard minimum: the shrink
+// pass stops there, so a measurement column keeps its whole value. A zero-floor
+// column drops whole, including a zero-floor unelidable column such as LIST. A
+// positive-floor unelidable column (AGE, ACTIVE, LAST USED, INTEGRATIONS, TIME,
+// COST) is pinned at natural width and drops whole only in the overflow pass.
+// The table never shows a bare ellipsis or a truncated measurement; a long
+// elidable identity column may still middle-elide to its column width. Shrink
+// priority is derived from the actual headers via columnRegistry(), so --wide
+// capability columns participate alongside the core columns.
 func columnWidths(headers []string, rows [][]string, budget int) []int {
 	widths := naturalWidths(headers, rows)
 	if budget <= 0 || lineWidth(widths) <= budget {
@@ -359,15 +513,61 @@ func columnWidths(headers []string, rows [][]string, budget int) []int {
 	registry := columnRegistry()
 	priority := dynamicShrinkPriority(headers, registry)
 	floors := dynamicShrinkFloor(headers, registry)
+	pinUnelidableFloors(headers, widths, registry, floors)
 	over := shrinkToFloors(headers, widths, priority, floors, budget)
-	if over > 0 {
-		for _, name := range priority {
-			over = shrinkColumn(widths, slices.Index(headers, name), over, 1)
-		}
-	}
+	dropOverflowColumns(headers, widths, priority, budget, over)
 	return widths
 }
 
+// pinUnelidableFloors pins each unelidable column with a floor at its natural
+// width: the shrink pass then cannot cut a measurement value, and
+// dropOverflowColumns drops the whole column instead. A floor-0 unelidable
+// column has no useful minimum, so it drops whole in the shrink pass at its
+// rank; pinning it would make it outlive cheaper columns (LIST did before this
+// distinction).
+func pinUnelidableFloors(headers []string, widths []int, registry map[string]worktreeColumn, floors map[string]int) {
+	for i, h := range headers {
+		if c, ok := registry[h]; ok && c.unelidable && c.floor > 0 {
+			floors[h] = max(floors[h], widths[i])
+		}
+	}
+}
+
+// dropOverflowColumns is the last resort when the declared floors still do not
+// fit: drop whole columns (reclaiming their gutter) in the same priority order,
+// instead of rendering an unlabelled sliver or a cut measurement. Unelidable
+// columns reach this stage at natural width, so a measurement column is dropped
+// whole with the stderr disclosure rather than middle-elided. Pinned columns
+// (rank 0) are absent from priority, so when the budget cannot hold even the
+// pinned set they are dropped tail-first: the grid must fit its budget, and the
+// leading pinned columns (the state) outlive the trailing ones (the temp
+// countdown).
+func dropOverflowColumns(headers []string, widths []int, priority []string, budget, over int) {
+	for _, name := range priority {
+		if over <= 0 {
+			break
+		}
+		i := slices.Index(headers, name)
+		if i < 0 || widths[i] == 0 {
+			continue
+		}
+		widths[i] = 0
+		over = lineWidth(widths) - budget
+	}
+	for i := len(widths) - 1; i >= 0 && over > 0; i-- {
+		if widths[i] == 0 {
+			continue
+		}
+		widths[i] = 0
+		over = lineWidth(widths) - budget
+	}
+}
+
+// shrinkToFloors gives up width in rank order until the budget fits. A
+// zero-floor column drops whole (it has no useful minimum), whether or not it is
+// unelidable; every other column stops at its floor, which positive-floor
+// unelidable columns pin at natural width. The returned over is what the floors
+// cannot absorb; dropOverflowColumns then drops whole columns.
 func shrinkToFloors(headers []string, widths []int, priority []string, floors map[string]int, budget int) int {
 	over := lineWidth(widths) - budget
 	for _, name := range priority {
@@ -388,23 +588,14 @@ func shrinkToFloors(headers []string, widths []int, priority []string, floors ma
 
 // dropZeroColumns removes columns sized to zero, so a dropped column leaves no
 // gutter or empty cell behind. Cells, widths and headers stay index-aligned.
-// Capability columns dropped from a narrow --wide view are disclosed on stderr
-// (stdout stays machine-clean for pipes and goldens), so a missing column reads
-// as hidden, not absent.
-func dropZeroColumns(headers []string, rows [][]string, widths []int) ([]string, [][]string, []int) {
+// Dropped columns are disclosed on stderr (stdout stays machine-clean for pipes
+// and goldens), so a missing column reads as hidden, not absent.
+func dropZeroColumns(headers []string, rows [][]string, widths []int, seen map[string]bool) ([]string, [][]string, []int) {
 	keep := positiveWidthColumns(widths)
 	if len(keep) == len(widths) {
 		return headers, rows, widths
 	}
-	var hidden []string
-	for i, h := range headers {
-		if widths[i] == 0 && isCapabilityHeader(h) {
-			hidden = append(hidden, h)
-		}
-	}
-	if len(hidden) > 0 {
-		warnf("terminal too narrow; hid %s; widen the terminal or drop --wide", strings.Join(hidden, ", "))
-	}
+	warnHiddenColumns(hiddenHeaders(headers, widths), seen)
 	out := make([][]string, len(rows))
 	for r, row := range rows {
 		out[r] = selectStrings(row, keep)
@@ -420,6 +611,41 @@ func positiveWidthColumns(widths []int) []int {
 		}
 	}
 	return keep
+}
+
+// warnHiddenColumns discloses dropped columns on stderr. Every grid (table,
+// detail block, token rows) uses this one line, so a narrow terminal always
+// reads as hidden columns, never as a shorter contract. The per-run seen set
+// dedupes across grids, so a header hidden in the table and again in the
+// detail block warns once. A nil seen (grids outside a status run) warns on
+// every call.
+func warnHiddenColumns(names []string, seen map[string]bool) {
+	if seen == nil {
+		seen = map[string]bool{}
+	}
+	var unseen []string
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		unseen = append(unseen, name)
+	}
+	if len(unseen) > 0 {
+		warnf("terminal too narrow; hid %s; widen the terminal or use --json", strings.Join(unseen, ", "))
+	}
+}
+
+// hiddenHeaders names the columns dropped from a grid, so a missing column
+// reads as hidden, not absent.
+func hiddenHeaders(headers []string, widths []int) []string {
+	var hidden []string
+	for i, h := range headers {
+		if widths[i] == 0 {
+			hidden = append(hidden, h)
+		}
+	}
+	return hidden
 }
 
 // selectStrings keeps the columns at keep indices. Concrete (not generic): only

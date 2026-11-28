@@ -1,0 +1,419 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// workspace.go — the worktree/workspace model, the discovery pipeline that
+// fills it, and the shared path display: root resolution, inventory, session
+// indexing, temp records and the activity scan that seeds LAST USED.
+
+// worktree is the shared model: one git worktree plus its harness inventory.
+type worktree struct {
+	Path     string
+	Branch   string
+	Upstream upstream // configured tracking branch; zero value = none
+	Main     bool
+	Dirty    bool // uncommitted changes; surfaced for gc (picker label, forced-removal warning), never a filter
+	LastUsed time.Time
+
+	// Temp metadata is applied only after registry identity and branch checks.
+	Temp         bool
+	TempTTL      time.Duration
+	TempCreated  time.Time
+	TempIdentity string
+	// Caps uses the capability registry's ids and states.
+	Caps map[string]capState
+	// Created is the worktree creation mark: the filesystem birth time of its
+	// .git entry. Zero when the filesystem records none, which renders as an
+	// unknown age.
+	Created time.Time
+	// Usage is the cost/active-time summary; nil when the worktree has no agent
+	// events. Only status fills it; gc and add leave it nil.
+	Usage *worktreeUsage
+}
+
+func (w worktree) branchName() string {
+	if w.Branch == "" {
+		return detachedValue
+	}
+	return w.Branch
+}
+
+// resolveRoot returns the repo root: --root if given, else the main worktree
+// of the repo containing the current directory.
+func resolveRoot(g *globals) (string, error) {
+	if g.root != "" {
+		return canonicalAbs(g.root)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	root, err := repoRoot(cwd)
+	if err != nil {
+		return "", fmt.Errorf("no repository here; use --root: %w", err)
+	}
+	return canonical(root), nil
+}
+
+// workspace is one discovery pass: the repo root, the TTL, the inventory and
+// the session index the inventory was built from. Reclamation reuses that index
+// instead of walking every harness session root a second time.
+type workspace struct {
+	root string
+	ttl  time.Duration
+	wts  []worktree
+	idx  sessionIndex
+}
+
+// loadWorkspace resolves the repo, TTL and inventory against the caller's
+// progress handle: the command entry owns the renderer, so a single session can
+// span discovery, pricing and parsing. A nil p is a no-op handle. Discovery
+// reads but never reconciles the temp registry. Explicit removal passes
+// failClosed to reject unreadable sessions before any destructive action.
+func loadWorkspace(g *globals, p *progress, failClosed bool, now time.Time) (workspace, error) {
+	return loadWorkspaceWithSessions(g, p, discoverySessions(failClosed), now)
+}
+
+// loadWorkspaceProgress opens a discovery-only progress session. Commands whose
+// slow work is discovery alone (delete, promote) use it; status opens its own
+// session so pricing and parsing share the same line.
+func loadWorkspaceProgress(g *globals, failClosed bool) (workspace, error) {
+	var ws workspace
+	err := withProgress(g, progressOptions{}, func(p *progress) error {
+		var derr error
+		ws, derr = loadWorkspace(g, p, failClosed, nowFunc())
+		return derr
+	})
+	return ws, err
+}
+
+// Idle GC collects file evidence for fresh candidate checks; explicit --path
+// removal bypasses idleness, not strict session-read safety. gc owns its
+// renderer because the interactive picker must not run underneath one.
+func loadGCWorkspace(g *globals, paths []string) (workspace, error) {
+	sessions := sessionDiscovery(indexSessionsStrict)
+	if len(paths) > 0 {
+		sessions = discoverySessions(true)
+	}
+	var ws workspace
+	err := withProgress(g, progressOptions{}, func(p *progress) error {
+		var derr error
+		ws, derr = loadWorkspaceWithSessions(g, p, sessions, nowFunc())
+		return derr
+	})
+	return ws, err
+}
+
+type sessionDiscovery func(*progress) (sessionIndex, []unverifiedSession, error)
+
+func loadWorkspaceWithSessions(g *globals, p *progress, sessions sessionDiscovery, now time.Time) (workspace, error) {
+	var ws workspace
+	root, err := resolveRoot(g)
+	if err != nil {
+		return ws, err
+	}
+	ttl, err := unusedDuration()
+	if err != nil {
+		return ws, err
+	}
+	ws.wts, ws.idx, err = discoverWithSessions(root, p, sessions, now)
+	ws.root, ws.ttl = root, ttl
+	return ws, err
+}
+
+func buildWorktree(g gworktree, idx sessionIndex, ups map[string]upstream, temps tempStore, p *progress, now time.Time) worktree {
+	w := worktreeInventory(g, idx, ups, p, now)
+	applyTempRecord(&w, temps, p)
+	return w
+}
+
+func worktreeInventory(g gworktree, idx sessionIndex, ups map[string]upstream, p *progress, now time.Time) worktree {
+	pth := canonical(g.Path)
+	configs := mcpConfigs(pth, p)
+	return worktree{
+		Path: pth, Branch: g.Branch, Upstream: ups[g.Branch], Main: g.Main,
+		// Dirty is set lazily by the gc picker; status does not use it.
+		LastUsed: worktreeLastUsed(pth, idx, p, now),
+		Caps:     capabilityStates(capInput{root: pth, mcp: configs}),
+		Created:  worktreeCreated(pth, now),
+	}
+}
+
+// worktreeCreated reads the AGE fact: the .git entry's filesystem birth time.
+// A linked worktree's .git is a file and the main's is a directory; neither
+// birth time moves on ref or index writes. Filesystems that record no birth
+// time yield zero, so AGE reads "-": an mtime or reflog proxy would re-stamp
+// on writes and report a young worktree as new. A mark after the report
+// instant is no age, matching the future-timestamp policy used everywhere else.
+// createdAtEnv serves tests only and short-circuits the stat; the future rule
+// covers it too.
+func worktreeCreated(path string, now time.Time) time.Time {
+	created := time.Time{}
+	if t, ok := parseCreatedAtEnv(); ok {
+		created = t
+	} else {
+		created = fileBirthTime(filepath.Join(path, ".git"))
+	}
+	if created.After(now) {
+		return time.Time{}
+	}
+	return created
+}
+
+// applyTempRecord marks w temporary when its record verifies. Every failure
+// falls toward permanent, never toward reclaimable: a zero TTL would reclaim
+// instantly, so an unparsable window is refused rather than defaulted.
+func applyTempRecord(w *worktree, temps tempStore, p *progress) {
+	rec, ok := temps[w.Path]
+	if !ok {
+		return
+	}
+	if err := verifyTempIdentity(w.Path, rec); err != nil {
+		warnProgress(p, "temp record for %s: %s; treating as permanent", displayPath(w.Path), err)
+		return
+	}
+	ttl, err := parseTTL(rec.TTL)
+	if err != nil {
+		warnProgress(p, "temp record for %s: %s; treating as permanent", displayPath(w.Path), err)
+		return
+	}
+	w.Temp, w.TempTTL, w.TempCreated, w.TempIdentity = true, ttl, rec.CreatedAt, rec.Identity
+}
+
+// discover inventories every worktree of the repo rooted at root, reporting
+// each slow step to p. The returned session index is reused by reclamation.
+// now is the single report instant the caller already read: a status run
+// clamps every derived time (LastUsed, ACTIVE, cache freshness) to the same
+// clock, so a future filesystem timestamp cannot split the run.
+func discover(root string, p *progress, failClosed bool, now time.Time) ([]worktree, sessionIndex, error) {
+	return discoverWithSessions(root, p, discoverySessions(failClosed), now)
+}
+
+func discoverWithSessions(root string, p *progress, sessions sessionDiscovery, now time.Time) ([]worktree, sessionIndex, error) {
+	in, err := discoverInputs(root, p, sessions)
+	if err != nil {
+		return nil, nil, err
+	}
+	wts, err := scanWorktrees(in, p, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	guardPermanentActivity(wts, in.unknown, now, p)
+	sortWorktrees(wts)
+	return wts, in.idx, nil
+}
+
+// discoverUpstreams returns the configured tracking branches, or the warning
+// that explains their absence. It reports upward because the caller emits
+// warnings after the parallel batch joins, which keeps their order stable.
+func discoverUpstreams(root string) (map[string]upstream, string) {
+	ups, err := branchUpstreams(root)
+	if err != nil {
+		return map[string]upstream{}, fmt.Sprintf("upstreams unavailable: %s", err)
+	}
+	return ups, ""
+}
+
+// discoveryInputs is one batch of shared reads. Every source is read exactly
+// once and reused by inventory, activity and reclamation.
+type discoveryInputs struct {
+	raw     []gworktree
+	idx     sessionIndex
+	unknown []unverifiedSession
+	ups     map[string]upstream
+	temps   tempStore
+}
+
+// discoverInputs emits the deferred warnings after the parallel batch joins, so
+// their order is stable.
+func discoverInputs(root string, p *progress, sessions sessionDiscovery) (discoveryInputs, error) {
+	in, upsWarn, tempWarn, err := fetchDiscoveryInputs(root, p, sessions)
+	if err != nil {
+		return discoveryInputs{}, err
+	}
+	emitWarning(p, upsWarn)
+	emitWarning(p, tempWarn)
+	return in, nil
+}
+
+// discoveryResult is one worker's outcome for a shared discovery source, so the
+// batch runs on the one pool (parallel.go) instead of a hand-rolled WaitGroup.
+type discoveryResult struct {
+	raw     []gworktree
+	idx     sessionIndex
+	unknown []unverifiedSession
+	ups     map[string]upstream
+	temps   tempStore
+	warn    string
+	err     error
+}
+
+// fetchDiscoveryInputs reads each shared source once, concurrently: worktrees,
+// sessions, upstreams and temp records are independent. The label names the
+// session walk because it dominates the batch; the other three finish in tens
+// of milliseconds. The abort check precedes the workers' errors, so an
+// interrupt preempts their results.
+func fetchDiscoveryInputs(root string, p *progress, sessions sessionDiscovery) (in discoveryInputs, upsWarn, tempWarn string, err error) {
+	p.phase("indexing sessions", 0)
+	results := mapParallel(4, scanWorkers, func(i int) discoveryResult {
+		switch i {
+		case 0:
+			raw, err := worktrees(root)
+			return discoveryResult{raw: raw, err: err}
+		case 1:
+			idx, unknown, err := sessions(p)
+			return discoveryResult{idx: idx, unknown: unknown, err: err}
+		case 2:
+			ups, warn := discoverUpstreams(root)
+			return discoveryResult{ups: ups, warn: warn}
+		default:
+			temps, warn := readTempStoreLenient()
+			return discoveryResult{temps: temps, warn: warn}
+		}
+	})
+	in.raw = results[0].raw
+	in.idx = results[1].idx
+	in.unknown = results[1].unknown
+	in.ups = results[2].ups
+	in.temps = results[3].temps
+	if ferr := firstDiscoveryFailure(p.abort(), results[0].err, results[1].err); ferr != nil {
+		return discoveryInputs{}, "", "", ferr
+	}
+	return in, results[2].warn, results[3].warn, nil
+}
+
+// firstDiscoveryFailure returns the first reader failure: the abort check
+// precedes the workers' errors so an interrupt preempts their results.
+func firstDiscoveryFailure(abortErr, rawErr, sessionsErr error) error {
+	if abortErr != nil {
+		return abortErr
+	}
+	if rawErr != nil {
+		return rawErr
+	}
+	return sessionsErr
+}
+
+// emitWarning writes a deferred warning through the one disclosure path.
+func emitWarning(p *progress, text string) {
+	if text != "" {
+		emitProgress(p, warnPrefix+text)
+	}
+}
+
+func discoverySessions(failClosed bool) sessionDiscovery {
+	return func(p *progress) (sessionIndex, []unverifiedSession, error) {
+		idx, err := indexSessions(agents(), sessionErrPolicy{failClosed: failClosed, p: p})
+		return idx, nil, err
+	}
+}
+
+// readTempStoreLenient reads the temp store for read-only commands. A corrupt
+// store only loses temp metadata (the checkouts stay durable), so it must never
+// break status: warn and proceed with no temp records.
+func readTempStoreLenient() (tempStore, string) {
+	temps, err := readTempStoreUnlocked()
+	if err != nil {
+		return tempStore{}, fmt.Sprintf("temp store: %s; no temp worktrees tracked", err)
+	}
+	return temps, ""
+}
+
+// inventoryResult carries one worker's worktree and its disclosures, so
+// warnings emit from the parent in input order after the join.
+type inventoryResult struct {
+	w        worktree
+	warnings []string
+	err      error
+}
+
+// scanWorktrees builds the inventory concurrently: each worktree reads its own
+// mcp configs, capabilities and creation mark, so the per-worktree cost is
+// independent. The label follows the worktree a worker picked up, which is the
+// live "what is being processed" answer; results stay in git's order, and so do
+// the warnings they carry.
+func scanWorktrees(in discoveryInputs, p *progress, now time.Time) ([]worktree, error) {
+	p.phase("scanning worktrees", len(in.raw))
+	results := mapParallel(len(in.raw), scanWorkers, func(i int) inventoryResult {
+		if err := p.abort(); err != nil {
+			return inventoryResult{err: err}
+		}
+		g := in.raw[i]
+		p.detail(displayPath(g.Path))
+		var warnings []string
+		w := buildWorktree(g, in.idx, in.ups, in.temps, p.worker(&warnings), now)
+		p.advance(1)
+		return inventoryResult{w: w, warnings: warnings}
+	})
+	wts := make([]worktree, len(results))
+	for i, r := range results {
+		if r.err != nil {
+			return nil, r.err
+		}
+		wts[i] = r.w
+		for _, text := range r.warnings {
+			emitProgress(p, text)
+		}
+	}
+	return wts, nil
+}
+
+// sortWorktrees orders main first, then most recently used, then path — a
+// total order, so machine output never depends on git's listing order.
+func sortWorktrees(wts []worktree) {
+	sort.Slice(wts, func(i, j int) bool {
+		a, b := wts[i], wts[j]
+		if a.Main != b.Main {
+			return a.Main
+		}
+		if !a.LastUsed.Equal(b.LastUsed) {
+			return a.LastUsed.After(b.LastUsed)
+		}
+		return a.Path < b.Path
+	})
+}
+
+// currentWorktreePath resolves the worktree that contains the current
+// directory; it falls back to the main worktree when the directory is outside
+// the repo (for example with an explicit --root).
+func currentWorktreePath(ws workspace) string {
+	if cwd, err := os.Getwd(); err == nil {
+		if top, err := gitTopLevel(cwd); err == nil {
+			c := canonical(top)
+			for _, w := range ws.wts {
+				if w.Path == c {
+					return c
+				}
+			}
+		}
+	}
+	for _, w := range ws.wts {
+		if w.Main {
+			return w.Path
+		}
+	}
+	return ws.root
+}
+
+// displayPath shortens the home directory to ~ so the PATH column budgets for
+// the path a human recognizes, not for an invariant absolute prefix.
+func displayPath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if strings.HasPrefix(p, home+string(os.PathSeparator)) {
+		return "~" + p[len(home):]
+	}
+	return p
+}

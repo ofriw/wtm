@@ -18,7 +18,8 @@ func TestClaudeMetadataBeforeOwner(t *testing.T) {
 	stamp := time.Now().Add(-time.Hour).Truncate(time.Second)
 	path := mkClaudeSession(t, owner, "metadata-first", stamp)
 	idx := mustIndexSessions(t)
-	if !idxContains(idx, owner, path) || !lastUsed(owner, idx).Equal(stamp) {
+	used, err := sessionLastUsed(owner, idx, false, nil)
+	if !idxContains(idx, owner, path) || err != nil || !used.Equal(stamp) {
 		t.Fatalf("metadata-first transcript not attributed to %s at %s", owner, stamp)
 	}
 }
@@ -164,7 +165,6 @@ func TestReclaimFailsClosedOnUnreadableSession(t *testing.T) {
 
 func TestCorruptNativeMCPStatusConsistent(t *testing.T) {
 	sandbox(t)
-	t.Setenv("COLUMNS", "240") // Keep capability columns visible regardless of the host terminal.
 	repo := nativeRepo(t)
 	writeFile(t, filepath.Join(repo, piNativeMCPFile), "{broken\n", 0o644)
 	for _, args := range [][]string{{"status"}, {"status", "--wide"}, {"status", "--json"}} {

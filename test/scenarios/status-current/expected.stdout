@@ -1,0 +1,64 @@
+PATH       BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST  STATUS  TEMP  INTEGRATIONS
+/SBX/repo  main    -         2020-01-01  6y 2d       -      -  ACTIVE  -     -
+/SBX/wt    wt      -         2020-01-01  6y 2d     45m  $4.00  ACTIVE  -     -
+
+current worktree  /SBX/wt
+age               6y 2d
+active time       45m
+cost              $4.00
+
+MODEL           TIME   COST  ↑ in  ↓ out  ↩ hit  ↪ write  × miss  ● hit%
+deepseek-flash   45m  $4.00     -      -      -        -       -       -
+[
+  {
+    "path": "/SBX/repo",
+    "branch": "main",
+    "upstream": "",
+    "main": true,
+    "current": false,
+    "lastUsed": "2020-01-01T00:00:00Z",
+    "status": "ACTIVE",
+    "ageSeconds": 189388800,
+    "cost": null,
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    },
+    "temp": false,
+    "expiresAt": null
+  },
+  {
+    "path": "/SBX/wt",
+    "branch": "wt",
+    "upstream": "",
+    "main": false,
+    "current": true,
+    "lastUsed": "2020-01-01T00:00:00Z",
+    "status": "ACTIVE",
+    "ageSeconds": 189388800,
+    "cost": 4,
+    "activeSeconds": 2700,
+    "usage": {
+      "pi": {
+        "cost": 4,
+        "activeSeconds": 2700,
+        "models": {
+          "deepseek-flash": {
+            "cost": 4,
+            "activeSeconds": 2700
+          }
+        }
+      }
+    },
+    "integrations": {
+      "chunkhound": "n/a",
+      "claude": "n/a",
+      "mcp": "n/a",
+      "pi": "n/a"
+    },
+    "temp": false,
+    "expiresAt": null
+  }
+]

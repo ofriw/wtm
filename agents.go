@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,12 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 // agents.go — the agent-harness registry plus every operation shared by all
-// harnesses (Pi.dev, Claude Code). One descriptor per harness; seeding,
-// indexing and session purge never duplicate per-harness logic.
+// harnesses (Pi.dev, Claude Code): discovery, owner indexing, and session
+// purge. The usage report loader and attribution live in usage_report.go;
+// event pricing lives in usage.go/rates.go.
 
 // projectMCPFile is the repo-root project MCP config. Pi's pi-mcp-adapter and
 // Claude Code both read it, so it is a shared constant, not a per-harness one.
@@ -34,6 +37,14 @@ type agent struct {
 	configDirRel  []string // under home
 	sessionSubdir string
 	sessionOwner  func(*bufio.Reader) (string, error)
+	// parseUsage reads one session file into cost events, causal turn
+	// activity, and the count of records it could not read (bad JSON,
+	// timestamp, or oversized). A nonzero count lets the caller warn and taint
+	// the total partial. catalogRated marks a harness whose records carry tokens
+	// but no cost, so the public catalog must price them (Claude Code); a
+	// self-pricing harness (Pi) adds cost to each event.
+	parseUsage   func(*bufio.Reader) (sessionParse, error)
+	catalogRated bool
 }
 
 // agents is the SSOT for known harnesses: seeding, indexing and MCP status
@@ -63,9 +74,9 @@ func (a agent) wired(in capInput) bool {
 	return false
 }
 
-// configDir resolves the harness state dir: the env override when set, else
-// home joined with configDirRel. An unset HOME yields "".
-func (a agent) configDir() string {
+// configDirBase resolves the harness state base dir: the env override when set,
+// else the user's home. An unset HOME yields "".
+func (a agent) configDirBase() string {
 	if d := os.Getenv(a.configDirEnv); d != "" {
 		return d
 	}
@@ -73,7 +84,21 @@ func (a agent) configDir() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(append([]string{home}, a.configDirRel...)...)
+	return home
+}
+
+// configDir resolves the harness state dir: the env override when set (used
+// as-is, matching the original behavior), else the home base joined with
+// configDirRel. An unresolvable base yields "".
+func (a agent) configDir() string {
+	if d := os.Getenv(a.configDirEnv); d != "" {
+		return d
+	}
+	base := a.configDirBase()
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(append([]string{base}, a.configDirRel...)...)
 }
 
 // mcpConfigFiles is the deduped union of every agent's MCP configs. Both
@@ -245,7 +270,11 @@ func copyIgnoredFile(srcRoot, dstRoot, rel string) error {
 
 // Ownership comes from harness records, never lossy encoded directory names.
 // Bound each record's memory; oversized records have unknown ownership.
-const maxSessionHeader = 4 << 20
+// maxSessionPrefix bounds the prefix used to classify a discarded record.
+const (
+	maxSessionHeader = 4 << 20
+	maxSessionPrefix = 8 << 10
+)
 
 // maxSessionOwnerRecords bounds the cwd scan: a cwd-less giant JSONL must
 // not force a full scan per status. The owner arrives in the first records
@@ -262,7 +291,7 @@ func (a agent) readSessionOwner(p string) (string, error) {
 }
 
 func piSessionOwner(r *bufio.Reader) (string, error) {
-	line, err := sessionRecord(r)
+	line, _, _, err := sessionRecord(r)
 	if err == io.EOF {
 		err = nil
 	}
@@ -272,7 +301,7 @@ func piSessionOwner(r *bufio.Reader) (string, error) {
 // Claude can write queue metadata before the first record with a cwd.
 func claudeSessionOwner(r *bufio.Reader) (string, error) {
 	for n := 0; n < maxSessionOwnerRecords; n++ {
-		line, err := sessionRecord(r)
+		line, _, _, err := sessionRecord(r)
 		if cwd := recordCWD(line); cwd != "" {
 			return cwd, nil
 		}
@@ -298,22 +327,51 @@ func recordCWD(line []byte) string {
 	return h.CWD
 }
 
-// Drain oversized lines without retaining them, then resume at the next record.
-func sessionRecord(r *bufio.Reader) ([]byte, error) {
-	var line []byte
-	oversized := false
+// sessionRecord returns one record. An oversized record drains and reports
+// oversized=true once with a bounded prefix for billing classification. Owner
+// scans ignore the prefix: an oversized header proves nothing about ownership.
+func sessionRecord(r *bufio.Reader) (line []byte, oversized bool, prefix []byte, err error) {
 	for {
-		part, err := r.ReadSlice('\n')
-		if len(line)+len(part) > maxSessionHeader {
-			oversized, line = true, nil
-		}
+		part, rerr := r.ReadSlice('\n')
 		if !oversized {
-			line = append(line, part...)
+			if len(line)+len(part) > maxSessionHeader {
+				prefix = append(prefix, line...)
+				prefix = append(prefix, part...)
+				if len(prefix) > maxSessionPrefix {
+					prefix = prefix[:maxSessionPrefix]
+				}
+				oversized, line = true, nil
+			} else {
+				line = append(line, part...)
+			}
+		} else if len(prefix) < maxSessionPrefix {
+			keep := min(len(part), maxSessionPrefix-len(prefix))
+			prefix = append(prefix, part[:keep]...)
 		}
-		if err != bufio.ErrBufferFull {
-			return line, err
+		if rerr != bufio.ErrBufferFull {
+			return line, oversized, prefix, rerr
 		}
 	}
+}
+
+// tailLossError marks a truncated final record: the parse kept the completed
+// records before the cut, and only the tail is lost. It unwraps to
+// io.ErrUnexpectedEOF so callers can tell record-level loss from a whole-session
+// open failure with errors.Is.
+type tailLossError struct{}
+
+func (tailLossError) Error() string { return "session ends mid-record; completed records kept" }
+func (tailLossError) Unwrap() error { return io.ErrUnexpectedEOF }
+
+// sessionRecordErr maps an unterminated final record to the tail-loss sentinel:
+// a killed writer leaves bytes without the JSONL newline; the parse keeps the
+// completed records and reports the tail as a record-level loss, so the lost
+// turn can never read as a complete total.
+func sessionRecordErr(line []byte, oversized bool, err error) error {
+	if err == io.EOF && (len(line) > 0 || oversized) {
+		return tailLossError{}
+	}
+	return err
 }
 
 // sessionIndex maps a canonical worktree cwd to its session files. It is built
@@ -321,10 +379,15 @@ func sessionRecord(r *bufio.Reader) ([]byte, error) {
 // instead of one per worktree.
 type sessionIndex map[string][]sessionRef
 
-// sessionRef carries an owned file and the boundary for empty-dir cleanup.
+// sessionRef carries an owned file, the boundary for empty-dir cleanup, the
+// harness that owns it, and the cwd the session was recorded from, so usage
+// loads without re-resolving the harness and prices with the session's own
+// settings, not the worktree root's.
 type sessionRef struct {
 	path       string
 	group      string
+	harness    string
+	cwd        string
 	root       string
 	rootTarget string
 	owner      func(*bufio.Reader) (string, error)
@@ -386,6 +449,9 @@ func indexSessionsStrict(p *progress) (sessionIndex, []unverifiedSession, error)
 
 func (s *sessionScan) scan(ags []agent) error {
 	for _, a := range ags {
+		if err := s.pol.p.abort(); err != nil {
+			return err
+		}
 		if err := s.walk(a); err != nil {
 			return err
 		}
@@ -393,31 +459,179 @@ func (s *sessionScan) scan(ags []agent) error {
 	return nil
 }
 
-func (s *sessionScan) walk(a agent) error {
+// sessionBase resolves the agent's session root and its resolved target. An
+// empty base means the agent has no session directory to scan.
+func sessionBase(a agent) (base, target string, err error) {
 	if a.configDir() == "" {
-		return nil
+		return "", "", nil
 	}
-	base, err := sessionRoot(filepath.Join(a.configDir(), a.sessionSubdir))
+	base, err = sessionRoot(filepath.Join(a.configDir(), a.sessionSubdir))
 	if err != nil {
-		return s.pol.sessionErr(fmt.Errorf("session root: %w", err))
+		return "", "", fmt.Errorf("session root: %w", err)
+	}
+	if base == "" {
+		return "", "", nil
+	}
+	target, err = filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve sessions %s: %w", base, err)
+	}
+	return base, target, nil
+}
+
+func (s *sessionScan) walk(a agent) error {
+	base, target, err := sessionBase(a)
+	if err != nil {
+		return s.pol.sessionErr(err)
 	}
 	if base == "" {
 		return nil
 	}
-	return s.walkRoot(a, base)
+	s.pol.p.detail(a.name)
+	if err := s.pol.p.abort(); err != nil {
+		return err
+	}
+	cands, unverified, walkErrs := collectSessions(a, base, target, s.pol.p)
+	if err := s.pol.p.abort(); err != nil {
+		return err
+	}
+	if err := s.reportWalkFindings(walkErrs, unverified); err != nil {
+		return err
+	}
+	return s.resolve(a, cands)
 }
 
-func (s *sessionScan) walkRoot(a agent, base string) error {
-	target, err := filepath.EvalSymlinks(base)
-	if err != nil {
-		return s.pol.sessionErr(fmt.Errorf("resolve sessions %s: %w", base, err))
-	}
-	return filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return s.pol.sessionErr(fmt.Errorf("walk sessions %s: %w", p, err))
+// reportWalkFindings applies the session error policy to walk findings in their
+// fixed order: structural walk errors abort in a strict run, then unknown-owner
+// paths become evidence.
+func (s *sessionScan) reportWalkFindings(walkErrs []error, unverified []unverifiedFile) error {
+	for _, walkErr := range walkErrs {
+		if perr := s.pol.sessionErr(walkErr); perr != nil {
+			return perr
 		}
-		return s.add(a, base, target, p, d)
+	}
+	for _, u := range unverified {
+		if err := s.unknown(u.path, u.err); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sessionCandidate is one regular session file awaiting an owner read. The walk
+// collects candidates first so the reads can run in a bounded pool.
+type sessionCandidate struct {
+	path       string
+	group      string
+	root       string
+	rootTarget string
+}
+
+// unverifiedFile is one path whose ownership cannot be read, with the cause.
+type unverifiedFile struct {
+	path string
+	err  error
+}
+
+// collectSessions lists regular session files under base without reading them.
+// Walk and classification errors are returned, not applied: the caller owns the
+// error policy, so a lenient run reports and continues while a strict run
+// aborts. Order is WalkDir's, which keeps the index deterministic.
+func collectSessions(a agent, base, target string, prog *progress) ([]sessionCandidate, []unverifiedFile, []error) {
+	var (
+		cands      []sessionCandidate
+		unverified []unverifiedFile
+		errs       []error
+	)
+	werr := filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+		if aerr := prog.abort(); aerr != nil {
+			return aerr
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("walk sessions %s: %w", p, err))
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			unverified = append(unverified, unverifiedFile{path: p})
+			return nil
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			unverified = append(unverified, unverifiedFile{path: p})
+			return nil
+		}
+		cands = append(cands, sessionCandidate{path: p, group: sessionGroup(base, p), root: base, rootTarget: target})
+		return nil
 	})
+	// WalkDir returns the walkFn's abort error on interrupt; the caller checks
+	// prog.abort() after this and surfaces it, so it is not a walk finding. Any
+	// other walk failure is a real finding and joins errs. runProgressProgram
+	// translates the context errors to errInterrupted at the top level.
+	if werr != nil && !errors.Is(werr, context.Canceled) && !errors.Is(werr, context.DeadlineExceeded) {
+		errs = append(errs, fmt.Errorf("walk sessions %s: %w", base, werr))
+	}
+	return cands, unverified, errs
+}
+
+// sessionProgressEvery bounds progress chatter: one label update per chunk of
+// owner reads, not one per file. A real machine walks 15k session files.
+const sessionProgressEvery = 128
+
+// ownerRead is one pooled owner lookup. cwd is empty when the file is not
+// attributable, with err naming the cause for the caller's error policy.
+type ownerRead struct {
+	candidate sessionCandidate
+	cwd       string
+	err       error
+}
+
+// readOwners looks up owners in a bounded pool: the kernel and disk, not the
+// CPU, bound this walk. Reads stay in candidate order for the merge.
+func (s *sessionScan) readOwners(a agent, cands []sessionCandidate) []ownerRead {
+	var processed atomic.Int64
+	return mapParallel(len(cands), scanWorkers, func(i int) ownerRead {
+		c := cands[i]
+		if err := s.pol.p.abort(); err != nil {
+			return ownerRead{candidate: c, err: err}
+		}
+		cwd, err := a.readSessionOwner(c.path)
+		n := processed.Add(1)
+		if n%sessionProgressEvery == 0 {
+			s.pol.p.detail(fmt.Sprintf("%s · %d files", a.name, n))
+		}
+		if err != nil || !filepath.IsAbs(cwd) {
+			return ownerRead{candidate: c, err: err}
+		}
+		return ownerRead{candidate: c, cwd: canonical(cwd)}
+	})
+}
+
+// mergeReads folds read results into the index in candidate order, so the index
+// and its warnings never depend on completion order.
+func (s *sessionScan) mergeReads(a agent, reads []ownerRead) error {
+	for _, r := range reads {
+		if err := s.pol.p.abort(); err != nil {
+			return err
+		}
+		if r.cwd == "" {
+			if err := s.unknown(r.candidate.path, r.err); err != nil {
+				return err
+			}
+			continue
+		}
+		c := r.candidate
+		s.idx[r.cwd] = append(s.idx[r.cwd], sessionRef{
+			path: c.path, group: c.group, harness: a.name, cwd: r.cwd,
+			root: c.root, rootTarget: c.rootTarget, owner: a.sessionOwner,
+		})
+	}
+	return nil
+}
+
+func (s *sessionScan) resolve(a agent, cands []sessionCandidate) error {
+	return s.mergeReads(a, s.readOwners(a, cands))
 }
 
 // Resolve only the root symlink; resolving ancestors rewrites macOS /var paths.
@@ -450,27 +664,6 @@ func sessionDirectory(base string) (string, error) {
 	return base, nil
 }
 
-func (s *sessionScan) add(a agent, base, target, p string, d fs.DirEntry) error {
-	if d.Type()&os.ModeSymlink != 0 {
-		return s.unknown(p, nil)
-	}
-	if d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
-		return nil
-	}
-	if !d.Type().IsRegular() {
-		return s.unknown(p, nil)
-	}
-	cwd, err := a.readSessionOwner(p)
-	if err != nil || !filepath.IsAbs(cwd) {
-		return s.unknown(p, err)
-	}
-	key := canonical(cwd)
-	s.idx[key] = append(s.idx[key], sessionRef{
-		path: p, group: sessionGroup(base, p), root: base, rootTarget: target, owner: a.sessionOwner,
-	})
-	return nil
-}
-
 func (s *sessionScan) unknown(p string, err error) error {
 	if s.collect {
 		s.unverified = append(s.unverified, unverifiedSession{Path: p, ModTime: statFollowMtime(p)})
@@ -500,24 +693,23 @@ func sessionGroup(base, p string) string {
 	return filepath.Join(base, first)
 }
 
-// lastUsed is the newest mtime among the worktree's session files (looked up
-// in idx); zero when the worktree has never hosted a session.
-func lastUsed(wtPath string, idx sessionIndex) time.Time {
-	newest, _ := sessionLastUsed(wtPath, idx, false)
-	return newest
-}
-
 // sessionLastUsed fails closed for fresh removal checks. Display can retain
-// known activity, but must disclose every file it could not inspect.
-func sessionLastUsed(wtPath string, idx sessionIndex, strict bool) (time.Time, error) {
+// known activity, but must disclose every file it could not inspect. The
+// warning rides p because discovery workers run under the renderer and a raw
+// stderr write would be overwritten by the next frame. Descendant sessions
+// count too, so GC never reclaims a worktree whose only recent work ran from a
+// subdirectory. sessionsUnder includes nested worktrees' sessions for the
+// parent: that over-approximates COST attribution and is conservative for
+// reclamation and harmless for display.
+func sessionLastUsed(wtPath string, idx sessionIndex, strict bool, p *progress) (time.Time, error) {
 	var newest time.Time
-	for _, r := range idx[canonical(wtPath)] {
+	for _, r := range sessionsUnder(wtPath, idx) {
 		mtime, err := sessionMtime(r.path)
 		if err != nil {
 			if strict {
 				return newest, err
 			}
-			warnProgress(nil, "%v", err)
+			warnProgress(p, "%v", err)
 		} else if mtime.After(newest) {
 			newest = mtime
 		}

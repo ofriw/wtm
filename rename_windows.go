@@ -41,7 +41,7 @@ func isOpenHandleReplaceErr(err error) bool {
 // posixRename renames by handle, so an open destination is replaced the way
 // POSIX rename(2) does. The source handle must carry DELETE access and share
 // delete (openForRename); the destination reader must hold FILE_SHARE_DELETE
-// (openShared) — the POSIX-semantics flag is what actually permits the replace,
+// (openNoBlock) — the POSIX-semantics flag is what actually permits the replace,
 // not the share alone.
 func posixRename(oldname, newname string) error {
 	src, err := openForRename(oldname)
@@ -83,7 +83,7 @@ func openForRename(path string) (*os.File, error) {
 // fileRenameInfo mirrors Win32 FILE_RENAME_INFO_EX for
 // SetFileInformationByHandle(FileRenameInfoEx). The name bytes follow the
 // struct; the FILE_RENAME flags reuse the union that ReplaceIfExists occupied.
-// See https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-file_rename_info_ex .
+// See https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-file_rename_info_ex.
 type fileRenameInfo struct {
 	Flags          uint32
 	RootDirectory  windows.Handle

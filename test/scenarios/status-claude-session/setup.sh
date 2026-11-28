@@ -20,6 +20,6 @@ mv "$source" "$project/claude-sess.jsonl"
 rmdir "$(dirname "$source")"
 
 wtm config set unusedTTL 36500d
-# .git mtimes are the creation baselines and settings.json is activity;
-# backdate all so the fixed session date decides LAST USED.
+# WTM_CREATED_AT (or the .git birth time) sets AGE; settings.json is activity.
+# Backdate all so the fixed session date decides LAST USED.
 backdate "$SBX/repo/.git" "$SBX/wt1/.git" "$SBX/wt1/.claude/settings.json"

@@ -30,11 +30,14 @@ jobs:
           cache: true
       - name: Normalize checkout to LF
         run: git config --global core.autocrlf false
+      - name: Static guards
+        run: make guard
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          # The pin must be built with a Go >= go.mod's directive: a linter older
-          # than the targeted language version refuses to load the config.
-          version: v2.14.0
+          # Single source of truth for the linter version (shared with local dev
+          # via `make lint`). The pinned build must use a Go >= go.mod's directive:
+          # a linter older than the targeted language version cannot load the config.
+          version-file: .golangci-lint-version
       - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
       - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
@@ -65,7 +68,29 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: go test -race
+        # The shared-proof race test skips without cgo or under -short. CI has
+        # both prerequisites, so a skip here is a coverage loss, not a pass.
+        env:
+          WTM_REQUIRE_RACE: "1"
         run: go test -race -count=1 ./...
+      - name: go test -run 'TestFileBirthTime|TestWorktreeCreated' (required btime)
+        # APFS records birth times; some Linux mounts do not, so require the
+        # positive assertion only where the filesystem supports it. Running
+        # TestWorktreeCreated under the same flag proves AGE through the full
+        # worktreeCreated -> fileBirthTime composition, not just fileBirthTime.
+        # A skip here is a coverage loss, not a pass (same policy as
+        # WTM_REQUIRE_RACE).
+        if: matrix.runner == 'macos-15'
+        env:
+          WTM_REQUIRE_BTIME: "1"
+        run: |
+          # go test -list prints "ok <pkg>" and exits 0 even when nothing
+          # matches, so a -z check never fires. Check each test by exact name:
+          # a rename retires the btime proof loudly instead of silently.
+          for t in TestFileBirthTime TestWorktreeCreated; do
+            go test -list "^${t}$" . | grep -qx "${t}" || { echo "btime guard: ${t} missing" >&2; exit 1; }
+          done
+          go test -count=1 -run 'TestFileBirthTime|TestWorktreeCreated' .
 
   # Tier 2: container golden filesystem diff, authoritative for integration.
   # Native arm64 (not QEMU) keeps this fast.

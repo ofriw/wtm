@@ -1,0 +1,16 @@
+PATH         BRANCH  UPSTREAM   LAST USED    AGE  ACTIVE   COST    LIST  STATUS  TEMP  INTEGRATIONS
+/SBX/repo    main    -         2020-01-01  6y 2d       -      -       -  ACTIVE  -     -
+/SBX/wt      wt      -         2020-01-01  6y 2d      1h  $4.00       -  ACTIVE  -     -
+/SBX/wt-sub  wt-sub  -         2020-01-01  6y 2d     45m  $0.00  $41.20  ACTIVE  -     -
+
+list = pay-as-you-go price of the same tokens
+
+current worktree  /SBX/wt-sub
+age               6y 2d
+active time       45m
+cost              $0.00/$41.20
+
+MODEL  TIME   COST    LIST  ↑ in  ↓ out  ↩ hit  ↪ write  × miss  ● hit%
+gpt-5   45m  $0.00  $41.20     -      -      -        -       -       -
+
+list = pay-as-you-go price of the same tokens

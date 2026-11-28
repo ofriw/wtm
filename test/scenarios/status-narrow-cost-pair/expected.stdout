@@ -1,0 +1,14 @@
+  AGE  ACTIVE   COST  STATUS  TEMP
+6y 2d       -      -  ACTIVE  -
+6y 2d     45m  $0.00  ACTIVE  -
+
+current worktree  /SBX/wt
+age               6y 2d
+active time       45m
+cost              $0.00/$41.20
+
+MODEL  TIME   COST    LIST
+gpt-5   45m  $0.00  $41.20
+
+list = pay-as-you-go price of the same
+       tokens

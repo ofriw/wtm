@@ -19,6 +19,6 @@ printf '{"mcpServers":{"chunkhound":{"command":"chunkhound","args":["mcp"]}}}\n'
 mk_session "$SBX/repo" "zx9-not-an-encoded-name" "$OLD_STAMP"
 
 wtm config set unusedTTL 36500d
-# .git mtime is the creation baseline and the untracked .mcp.json is activity;
-# backdate both so the fixed session date decides LAST USED.
+# WTM_CREATED_AT (or the .git birth time) sets AGE; the untracked .mcp.json is
+# activity. Backdate both so the fixed session date decides LAST USED.
 backdate "$SBX/repo/.git" "$SBX/repo/.mcp.json"

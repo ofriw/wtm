@@ -316,6 +316,40 @@ func TestWriteJSONContract(t *testing.T) {
 	}
 }
 
+func TestWriteJSONPreservesExistingMode(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "secret.json")
+	writeFile(t, p, "{}\n", 0o600)
+	chmodTest(t, p, 0o600)
+	if err := writeJSON(p, map[string]any{"token": "x"}); err != nil {
+		t.Fatalf("writeJSON: %v", err)
+	}
+	fsAssertMode(t, p, 0o600)
+	assertAtomicDirectory(t, dir, filepath.Base(p), false)
+}
+
+func TestWriteJSONConcurrentReadersNeverTruncated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.json")
+	docs := make([]map[string]any, 8)
+	accepted := make([]string, len(docs))
+	for i := range docs {
+		docs[i] = map[string]any{"writer": i, "data": strings.Repeat(string(rune('a'+i)), 64*1024)}
+		b, err := json.MarshalIndent(docs[i], "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		accepted[i] = string(append(b, '\n')) // writeJSON's exact encoding
+	}
+	if err := writeJSON(path, docs[0]); err != nil {
+		t.Fatal(err)
+	}
+	exerciseAtomicReadWrite(t, path, accepted, func(path string, i int) error {
+		return writeJSON(path, docs[i])
+	})
+	assertAtomicDirectory(t, dir, filepath.Base(path), false)
+}
+
 func TestPrintJSON(t *testing.T) {
 	out := captureStdout(t, func() {
 		if err := printJSON(map[string]any{"a": 1}); err != nil {
@@ -337,4 +371,27 @@ func TestExists(t *testing.T) {
 	if exists(filepath.Join(dir, "missing")) {
 		t.Fatal("missing path must report false")
 	}
+}
+
+// TestWriteJSONStatFailureReturnsError pins the privacy boundary: when the
+// existing mode cannot be read, writeJSON must fail instead of defaulting to
+// 0644 and widening a private file. A self-referential link makes stat fail
+// with a cause other than "missing", which a plain existence check hides.
+func TestWriteJSONStatFailureReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink loops need privileges on Windows")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "secret.json")
+	if err := os.Symlink(filepath.Base(p), p); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := writeJSON(p, map[string]any{"token": "x"}); err == nil {
+		t.Fatal("writeJSON must surface the stat failure instead of defaulting to 0644")
+	}
+	info, err := os.Lstat(p)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("private path was replaced: info=%v err=%v", info, err)
+	}
+	assertAtomicDirectory(t, dir, filepath.Base(p), false)
 }

@@ -184,7 +184,7 @@ func TestCmdConfigUsageError(t *testing.T) {
 	}
 }
 
-// TestCmdConfigSetPreservesUnknownKey pins Fix G: a `config set` round-trip
+// TestCmdConfigSetPreservesUnknownKey pins that a `config set` round-trip
 // must not drop forward-compat keys already present in settings.json.
 func TestCmdConfigSetPreservesUnknownKey(t *testing.T) {
 	sandbox(t)
@@ -241,7 +241,7 @@ func TestCmdConfigSetConcurrentWriters(t *testing.T) {
 
 // TestCmdConfigConcurrentReadWrite pins that reads and writes of settings
 // survive each other. On Windows a reader's open handle would block a writer's
-// os.Rename (ERROR_ACCESS_DENIED); the shared read handle (openShared) grants
+// os.Rename (ERROR_ACCESS_DENIED); the guarded read handle (openNoBlock) grants
 // FILE_SHARE_DELETE so it cannot. On POSIX the rename is already safe, so this
 // guards the read/write wiring everywhere.
 func TestCmdConfigConcurrentReadWrite(t *testing.T) {

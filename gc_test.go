@@ -48,12 +48,31 @@ func TestGCSelectionNonInteractive(t *testing.T) {
 	})
 }
 
-// TestFailAbortedExitZero pins Fix A: a declined gc returns errAborted, which
+// TestFailAbortedExitZero pins that a declined gc returns errAborted, which
 // fail maps to exit 0 (the "aborted" message is already on stderr, so fail is
 // silent). The exit-code contract (0/1/2) lives in main.go's fail().
 func TestFailAbortedExitZero(t *testing.T) {
 	if rc := fail(errAborted); rc != 0 {
 		t.Fatalf("fail(errAborted) = %d, want 0", rc)
+	}
+}
+
+// TestGCCleanupStopsBeforeRemovalWhenInterrupted pins the destructive-loop
+// boundary: an already-cancelled run must return the cancellation before
+// touching any worktree, so Ctrl-C cannot delete invisibly.
+func TestGCCleanupStopsBeforeRemovalWhenInterrupted(t *testing.T) {
+	path := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := gcCleanup(filepath.Dir(path), []worktree{{Path: path, Branch: "w"}}, remotePlan{keep: true}, false, nil, gcMode{}, tempNow, &progress{ctx: ctx})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("gcCleanup = %v, want context.Canceled", err)
+	}
+	if len(res.Removed) != 0 {
+		t.Fatalf("interrupted gc reported removals: %v", res.Removed)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("interrupted gc touched the worktree: %v", statErr)
 	}
 }
 
@@ -160,7 +179,7 @@ func TestGCPickerGridAlwaysIncludesTempColumn(t *testing.T) {
 	}
 }
 
-// TestGCPickerDescription pins the D3/D4 disclosure contract: the destructive
+// TestGCPickerDescription pins the disclosure contract: the destructive
 // remote effect is stated once, the temp force-delete clause appears only when
 // a temp candidate is present, and the grid header is indented by exactly the
 // option prefix so it sits above the keys.
@@ -684,7 +703,7 @@ func gcFixtureWithUpstream(t *testing.T) (repo, linked, origin string) {
 // discovered returns the one discovered worktree at path, with its upstream.
 func discovered(t *testing.T, repo, path string) worktree {
 	t.Helper()
-	wts, _, err := discover(repo, nil, false)
+	wts, _, err := discover(repo, nil, false, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

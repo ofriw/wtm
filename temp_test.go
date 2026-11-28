@@ -271,7 +271,7 @@ func TestDiscoveryLenientOnCorruptStore(t *testing.T) {
 	writeFile(t, p, "{not json", 0o600)
 	var wts []worktree
 	var derr error
-	warnings := captureStderr(t, func() { wts, _, derr = discover(repo, nil, false) })
+	warnings := captureStderr(t, func() { wts, _, derr = discover(repo, nil, false, time.Now()) })
 	if derr != nil {
 		t.Fatalf("discover on corrupt store: %v", derr)
 	}
@@ -381,7 +381,7 @@ func TestPrintStatusJSONTempFields(t *testing.T) {
 		{Path: "/temp", Branch: "tmp/x", Temp: true, TempCreated: created, TempTTL: 2*time.Hour + 1*time.Nanosecond},
 	}
 	out := captureStdout(t, func() {
-		if err := printStatusJSON(wts, now, ttl); err != nil {
+		if err := printStatusJSON(wts, now, ttl, ""); err != nil {
 			t.Fatalf("printStatusJSON: %v", err)
 		}
 	})
