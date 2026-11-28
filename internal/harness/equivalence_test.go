@@ -1,7 +1,12 @@
 package harness
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+	"wtm/internal/fs"
 
 	. "wtm/internal/testutil"
 )
@@ -33,5 +38,29 @@ func TestAgentSessionSubdirsMatchConstants(t *testing.T) {
 	}
 	if got := PiAgent.sessionSubdir; got != PiSessionSubdir {
 		t.Fatalf("PiAgent.sessionSubdir = %q, want %q", got, PiSessionSubdir)
+	}
+}
+
+// TestFixturePathsMatchProductionSSOT pins the fixture path layout to the
+// production single source of truth: session files live under each agent's
+// config dir + session subdir, and settings under fs.WtmFilePath.
+func TestFixturePathsMatchProductionSSOT(t *testing.T) {
+	Sandbox(t)
+	now := time.Now()
+
+	wantPi := filepath.Join(PiAgent.ConfigDir(), PiSessionSubdir) + string(os.PathSeparator)
+	if p := MkSession(t, "/wt", "s", now); !strings.HasPrefix(p, wantPi) {
+		t.Fatalf("Pi session path %q not under %s", p, wantPi)
+	}
+	wantClaude := filepath.Join(ClaudeAgent.ConfigDir(), ClaudeSessionSubdir) + string(os.PathSeparator)
+	if p := MkClaudeSession(t, "/wt", "s", now); !strings.HasPrefix(p, wantClaude) {
+		t.Fatalf("Claude session path %q not under %s", p, wantClaude)
+	}
+	wantSettings, err := fs.WtmFilePath(fs.SettingsFileName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := SettingsFile(t); got != wantSettings {
+		t.Fatalf("settings file = %q, want %q", got, wantSettings)
 	}
 }
